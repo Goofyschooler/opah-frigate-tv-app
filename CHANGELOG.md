@@ -2,9 +2,54 @@
 
 This page lists the user-visible changes in each Opah release.
 
-## Unreleased
+## Unreleased — Opah 0.3.0
 
-No changes have been announced yet.
+### Camera groups
+
+- Watch two to four live cameras together.
+- Save favorite camera groups on the device.
+- Open camera groups already set up in Frigate.
+- Use picture-in-picture with two cameras on compatible TVs.
+
+### Activity
+
+- Browse saved video by camera, day, and hour.
+- See where more motion happened in saved video.
+- See how much activity still needs review and review everything currently
+  shown at once.
+- See clearer activity details, including Frigate summaries, recognized names,
+  and license plates when available.
+- Find activity that looks similar to an item you are reviewing.
+- Search saved activity using a short description when the feature is set up
+  in Frigate 0.17.2 or 0.18.
+- Filter activity by camera, object, recognized name, area, license plate,
+  time, and review status.
+- Mark activity as reviewed or not reviewed from its details or video.
+- Save a selected part of History as a recording.
+
+### Saved recordings
+
+- Save a recording from activity details or video playback.
+- Browse saved recordings with preview pictures and recording details.
+- Play saved recordings from the new Saved page.
+- Permanently delete a saved recording after a confirmation warning when
+  signed in as a Frigate administrator.
+
+### Camera controls
+
+- Move, zoom, focus, and open saved positions on compatible cameras.
+
+### Video display
+
+- Fill the television screen with a camera picture and remember the choice for
+  each camera.
+
+### Updates
+
+- See an indicator when a newer Opah release is available.
+- Read the new release notes from the Update page.
+- Download an official Opah update and open it with Android's installer.
+- Download the newest Opah APK using the stable `opah-latest.apk` filename.
 
 ## 0.2.2 - 2026-08-20
 

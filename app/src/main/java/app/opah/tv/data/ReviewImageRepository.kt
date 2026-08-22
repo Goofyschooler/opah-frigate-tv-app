@@ -5,7 +5,9 @@ import android.graphics.BitmapFactory
 import android.util.LruCache
 import androidx.core.graphics.scale
 import app.opah.tv.data.model.ConnectionProfile
+import app.opah.tv.data.model.RecordingExport
 import app.opah.tv.data.model.ReviewItem
+import app.opah.tv.data.model.SearchEvent
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineDispatcher
@@ -41,18 +43,52 @@ class ReviewImageRepository(
     fun cached(profile: ConnectionProfile, item: ReviewItem): ReviewImage? =
         synchronized(cache) { cache.get(cacheKey(profile, item)) }
 
+    fun cached(profile: ConnectionProfile, event: SearchEvent): ReviewImage? =
+        synchronized(cache) { cache.get(cacheKey(profile, event)) }
+
+    fun cached(profile: ConnectionProfile, export: RecordingExport): ReviewImage? =
+        synchronized(cache) { cache.get(cacheKey(profile, export)) }
+
     suspend fun refresh(
         profile: ConnectionProfile,
         item: ReviewItem,
         height: Int = DEFAULT_HEIGHT,
+    ): Result<ReviewImage> {
+        val url = reviewThumbnailUrl(profile, item.thumbnailPath)
+            ?: return Result.failure(IllegalArgumentException("This Review item has no safe thumbnail."))
+        return refresh(cacheKey(profile, item), url, height)
+    }
+
+    suspend fun refresh(
+        profile: ConnectionProfile,
+        event: SearchEvent,
+        height: Int = DEFAULT_HEIGHT,
+    ): Result<ReviewImage> = refresh(
+        key = cacheKey(profile, event),
+        url = eventThumbnailUrl(profile, event.id),
+        height = height,
+    )
+
+    suspend fun refresh(
+        profile: ConnectionProfile,
+        export: RecordingExport,
+        height: Int = DEFAULT_HEIGHT,
+    ): Result<ReviewImage> {
+        val url = exportThumbnailUrl(profile, export.thumbnailPath)
+            ?: return Result.failure(IllegalArgumentException("This saved recording has no safe preview."))
+        return refresh(cacheKey(profile, export), url, height)
+    }
+
+    private suspend fun refresh(
+        key: String,
+        url: HttpUrl,
+        height: Int,
     ): Result<ReviewImage> = runCatching {
         val refreshGeneration = cacheGeneration
         require(height in 120..1080) { "Review image height is out of range." }
-        val url = reviewThumbnailUrl(profile, item.thumbnailPath)
-            ?: error("This Review item has no safe thumbnail.")
-        val key = cacheKey(profile, item)
         requestLocks.computeIfAbsent(key) { Mutex() }.withLock {
-            cached(profile, item)?.takeIf { it.bitmap.height >= height } ?: requestLimit.withPermit {
+            synchronized(cache) { cache.get(key) }?.takeIf { it.bitmap.height >= height }
+                ?: requestLimit.withPermit {
                 withContext(ioDispatcher) {
                     client.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
                         check(response.isSuccessful) { "Review thumbnail request failed." }
@@ -94,7 +130,13 @@ class ReviewImageRepository(
     }
 
     private fun cacheKey(profile: ConnectionProfile, item: ReviewItem): String =
-        "${profile.apiBaseUrl}|${item.id}|${item.thumbnailPath.orEmpty()}"
+        "${profile.apiBaseUrl}|review|${item.id}|${item.thumbnailPath.orEmpty()}"
+
+    private fun cacheKey(profile: ConnectionProfile, event: SearchEvent): String =
+        "${profile.apiBaseUrl}|event|${event.id}"
+
+    private fun cacheKey(profile: ConnectionProfile, export: RecordingExport): String =
+        "${profile.apiBaseUrl}|export|${export.id}|${export.thumbnailPath.orEmpty()}"
 
     private fun decodeReviewBitmap(bytes: ByteArray, targetHeight: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -123,6 +165,15 @@ class ReviewImageRepository(
     }
 }
 
+internal fun eventThumbnailUrl(profile: ConnectionProfile, eventId: String): HttpUrl {
+    require(eventId.isNotBlank()) { "Event ID is required." }
+    return profile.apiBaseUrl.toHttpUrl().newBuilder()
+        .addPathSegments("api/events")
+        .addPathSegment(eventId)
+        .addPathSegment("thumbnail.jpg")
+        .build()
+}
+
 internal fun reviewThumbnailUrl(
     profile: ConnectionProfile,
     thumbnailPath: String?,
@@ -139,4 +190,21 @@ internal fun reviewThumbnailUrl(
         .build()
 }
 
+internal fun exportThumbnailUrl(
+    profile: ConnectionProfile,
+    thumbnailPath: String?,
+): HttpUrl? {
+    val relative = thumbnailPath
+        ?.takeIf { it.startsWith(EXPORT_THUMBNAIL_MEDIA_PREFIX) }
+        ?.removePrefix(EXPORT_THUMBNAIL_MEDIA_PREFIX)
+        ?: return null
+    val segments = relative.split('/').filter(String::isNotBlank)
+    if (segments.isEmpty() || segments.any { it == "." || it == ".." || '\\' in it }) return null
+    return profile.apiBaseUrl.toHttpUrl().newBuilder()
+        .addPathSegments("clips/export")
+        .apply { segments.forEach { addPathSegment(it) } }
+        .build()
+}
+
 private const val REVIEW_MEDIA_PREFIX = "/media/frigate/clips/review/"
+private const val EXPORT_THUMBNAIL_MEDIA_PREFIX = "/media/frigate/clips/export/"

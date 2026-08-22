@@ -3,15 +3,24 @@ package app.opah.tv.data
 import app.opah.tv.data.model.AudioCodec
 import app.opah.tv.data.model.BirdseyeStatus
 import app.opah.tv.data.model.Camera
+import app.opah.tv.data.model.CameraGroup
+import app.opah.tv.data.model.CameraPtzInfo
 import app.opah.tv.data.model.AcceleratorPerformance
 import app.opah.tv.data.model.CameraPerformance
 import app.opah.tv.data.model.DetectorPerformance
 import app.opah.tv.data.model.FrigatePerformanceSummary
 import app.opah.tv.data.model.RecordingStorageVolume
 import app.opah.tv.data.model.LiveStreamOption
+import app.opah.tv.data.model.MotionActivity
+import app.opah.tv.data.model.RecordingHourSummary
 import app.opah.tv.data.model.RecordingSegment
+import app.opah.tv.data.model.RecordingExport
+import app.opah.tv.data.model.RecordingExportStart
 import app.opah.tv.data.model.ReviewItem
+import app.opah.tv.data.model.ReviewCounts
+import app.opah.tv.data.model.ReviewSummaryMetadata
 import app.opah.tv.data.model.ReviewSeverity
+import app.opah.tv.data.model.SearchEvent
 import app.opah.tv.data.model.StreamMetadata
 import app.opah.tv.data.model.TemperatureReading
 import app.opah.tv.data.model.VideoCodec
@@ -42,6 +51,31 @@ class FrigateJsonParsers(
         return root.obj("cameras")?.keys.orEmpty()
     }
 
+    fun parsePtzConfiguredCameraNames(configJson: String): Set<String> {
+        val cameras = json.parseToJsonElement(configJson).jsonObject.obj("cameras")
+            ?: return emptySet()
+        return cameras.mapNotNull { (name, value) ->
+            val camera = value as? JsonObject ?: return@mapNotNull null
+            val onvif = camera.obj("onvif") ?: return@mapNotNull null
+            name.takeIf { !onvif.string("host").isNullOrBlank() }
+        }.toSet()
+    }
+
+    fun parsePtzInfo(cameraName: String, rawJson: String): CameraPtzInfo? {
+        val root = json.parseToJsonElement(rawJson) as? JsonObject ?: return null
+        val returnedName = root.string("name")?.takeIf(String::isNotBlank) ?: return null
+        if (returnedName != cameraName) return null
+        val features = root.stringList("features")
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .toSet()
+        val presets = root.stringList("presets")
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+        return CameraPtzInfo(returnedName, features, presets)
+    }
+
     fun parseAuthorizedCameraNames(
         configJson: String,
         allowedCameras: Set<String>,
@@ -53,6 +87,33 @@ class FrigateJsonParsers(
             val camera = value as? JsonObject ?: return@mapNotNull null
             name to (camera.string("friendly_name")?.takeIf(String::isNotBlank) ?: humanize(name))
         }.toMap()
+    }
+
+    fun parseCameraGroups(
+        configJson: String,
+        visibleCameraNames: Set<String>,
+    ): List<CameraGroup> {
+        val groups = json.parseToJsonElement(configJson).jsonObject.obj("camera_groups")
+            ?: return emptyList()
+        return groups.mapNotNull { (name, element) ->
+            val group = element as? JsonObject ?: return@mapNotNull null
+            val cameraNames = when (val cameras = group["cameras"]) {
+                is JsonArray -> cameras.mapNotNull { it.jsonPrimitive.contentOrNull }
+                else -> (cameras as? kotlinx.serialization.json.JsonPrimitive)
+                    ?.contentOrNull
+                    ?.let(::listOf)
+                    .orEmpty()
+            }.map(String::trim)
+                .filter { it in visibleCameraNames }
+                .distinct()
+            if (cameraNames.size < 2) return@mapNotNull null
+            CameraGroup(
+                name = name,
+                displayName = humanize(name).replaceFirstChar(Char::uppercase),
+                cameraNames = cameraNames,
+                order = group.int("order") ?: Int.MAX_VALUE,
+            )
+        }.sortedWith(compareBy<CameraGroup> { it.order }.thenBy { it.displayName })
     }
 
     fun parseCameras(
@@ -133,6 +194,7 @@ class FrigateJsonParsers(
             val camera = item.string("camera") ?: return@mapNotNull null
             val start = item.double("start_time") ?: return@mapNotNull null
             val data = item.obj("data")
+            val metadata = data?.obj("metadata")
             ReviewItem(
                 id = id,
                 camera = camera,
@@ -144,11 +206,101 @@ class FrigateJsonParsers(
                     else -> ReviewSeverity.UNKNOWN
                 },
                 thumbnailPath = item.string("thumb_path"),
-                objects = data.stringList("objects") + data.stringList("audio"),
+                objects = data.stringList("objects"),
                 zones = data.stringList("zones"),
                 hasBeenReviewed = item.bool("has_been_reviewed") ?: false,
+                audio = data.stringList("audio"),
+                detectionIds = data.stringList("detections"),
+                subLabels = data.stringList("sub_labels"),
+                summary = metadata?.let {
+                    ReviewSummaryMetadata(
+                        title = it.string("title")?.takeIf(String::isNotBlank),
+                        shortSummary = (it.string("shortSummary") ?: it.string("short_summary"))
+                            ?.takeIf(String::isNotBlank),
+                        scene = it.string("scene")?.takeIf(String::isNotBlank),
+                        potentialThreatLevel = it.int("potential_threat_level"),
+                        otherConcerns = it.stringList("other_concerns"),
+                    )
+                }?.takeIf { summary ->
+                    summary.title != null || summary.shortSummary != null || summary.scene != null ||
+                        summary.potentialThreatLevel != null || summary.otherConcerns.isNotEmpty()
+                },
             )
         }
+    }
+
+    fun parseReviewCounts(rawJson: String): ReviewCounts {
+        val root = runCatching { json.parseToJsonElement(rawJson) as? JsonObject }.getOrNull()
+            ?: return ReviewCounts()
+        val counts = root.obj("last24Hours") ?: return ReviewCounts()
+        return ReviewCounts(
+            reviewedAlerts = counts.int("reviewed_alert") ?: 0,
+            reviewedDetections = counts.int("reviewed_detection") ?: 0,
+            totalAlerts = counts.int("total_alert") ?: 0,
+            totalDetections = counts.int("total_detection") ?: 0,
+        )
+    }
+
+    fun parseSearchEvents(rawJson: String): List<SearchEvent> {
+        val array = json.parseToJsonElement(rawJson) as? JsonArray ?: return emptyList()
+        return array.mapNotNull { element ->
+            val event = element as? JsonObject ?: return@mapNotNull null
+            val id = event.string("id") ?: return@mapNotNull null
+            val camera = event.string("camera") ?: return@mapNotNull null
+            val label = event.string("label") ?: return@mapNotNull null
+            val start = event.double("start_time") ?: return@mapNotNull null
+            SearchEvent(
+                id = id,
+                camera = camera,
+                label = label,
+                subLabel = event.string("sub_label"),
+                zones = event.stringList("zones"),
+                startTime = start,
+                endTime = event.double("end_time"),
+                description = event.obj("data")?.string("description"),
+                recognizedLicensePlate = event.string("recognized_license_plate")
+                    ?: event.obj("data")?.string("recognized_license_plate"),
+                recognizedLicensePlateScore = event.double("recognized_license_plate_score")
+                    ?: event.obj("data")?.double("recognized_license_plate_score"),
+                averageEstimatedSpeed = event.double("average_estimated_speed")
+                    ?: event.obj("data")?.double("average_estimated_speed"),
+                attributes = event.obj("data").stringList("attributes"),
+                hasClip = event.bool("has_clip") ?: true,
+            )
+        }.distinctBy(SearchEvent::id)
+    }
+
+    fun parseRecordingHourSummaries(rawJson: String): List<RecordingHourSummary> {
+        val days = runCatching { json.parseToJsonElement(rawJson) as? JsonArray }.getOrNull()
+            ?: return emptyList()
+        return days.flatMap { element ->
+            val day = element as? JsonObject ?: return@flatMap emptyList()
+            val date = day.string("day") ?: return@flatMap emptyList()
+            (day["hours"] as? JsonArray).orEmpty().mapNotNull { hourElement ->
+                val hour = hourElement as? JsonObject ?: return@mapNotNull null
+                RecordingHourSummary(
+                    day = date,
+                    hour = hour.string("hour")?.toIntOrNull() ?: hour.int("hour") ?: return@mapNotNull null,
+                    durationSeconds = hour.int("duration") ?: 0,
+                    motionSeconds = hour.double("motion") ?: 0.0,
+                    objectSeconds = hour.double("objects") ?: 0.0,
+                    eventCount = hour.int("events") ?: 0,
+                )
+            }
+        }.sortedWith(compareByDescending<RecordingHourSummary> { it.day }.thenByDescending { it.hour })
+    }
+
+    fun parseMotionActivity(rawJson: String): List<MotionActivity> {
+        val array = runCatching { json.parseToJsonElement(rawJson) as? JsonArray }.getOrNull()
+            ?: return emptyList()
+        return array.mapNotNull { element ->
+            val item = element as? JsonObject ?: return@mapNotNull null
+            MotionActivity(
+                startTime = item.double("start_time") ?: return@mapNotNull null,
+                motion = (item.double("motion") ?: 0.0).coerceAtLeast(0.0),
+                camera = item.string("camera") ?: return@mapNotNull null,
+            )
+        }.sortedBy(MotionActivity::startTime)
     }
 
     fun parseRecordingSegments(rawJson: String): List<RecordingSegment> {
@@ -189,6 +341,44 @@ class FrigateJsonParsers(
                 bandwidthMiBPerHour = (item.double("bandwidth") ?: 0.0).coerceAtLeast(0.0),
             )
         }
+    }
+
+    fun parseRecordingExports(
+        rawJson: String,
+        allowedCameras: Set<String>,
+    ): List<RecordingExport> {
+        val root = runCatching { json.parseToJsonElement(rawJson) as? JsonArray }.getOrNull()
+            ?: return emptyList()
+        return root.mapNotNull { element ->
+            val item = element as? JsonObject ?: return@mapNotNull null
+            val id = item.string("id")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+            val camera = item.string("camera")?.takeIf { it in allowedCameras } ?: return@mapNotNull null
+            val videoPath = item.string("video_path") ?: return@mapNotNull null
+            val date = item.double("date") ?: return@mapNotNull null
+            RecordingExport(
+                id = id,
+                camera = camera,
+                name = item.string("name")?.takeIf(String::isNotBlank) ?: id,
+                createdAt = date,
+                videoPath = videoPath,
+                thumbnailPath = item.string("thumb_path")?.takeIf(String::isNotBlank),
+                inProgress = item.bool("in_progress") ?: false,
+            )
+        }.sortedByDescending(RecordingExport::createdAt)
+    }
+
+    fun parseRecordingExportStart(rawJson: String): RecordingExportStart {
+        val root = json.parseToJsonElement(rawJson) as? JsonObject
+            ?: error("Frigate did not return a valid saved clip response.")
+        if (root.bool("success") != true) {
+            error(root.string("message") ?: "Frigate could not save this clip.")
+        }
+        val id = root.string("export_id")?.takeIf(String::isNotBlank)
+            ?: error("Frigate did not return a saved clip ID.")
+        return RecordingExportStart(
+            exportId = id,
+            message = root.string("message").orEmpty(),
+        )
     }
 
     fun parsePerformanceSummary(

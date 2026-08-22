@@ -1,10 +1,13 @@
 package app.opah.tv.data.network
 
 import app.opah.tv.data.model.ConnectionProfile
+import app.opah.tv.data.model.EventSearchQuery
 import app.opah.tv.data.model.FrigateUserProfile
 import app.opah.tv.data.model.ReviewItem
 import app.opah.tv.data.model.ReviewSearchQuery
 import app.opah.tv.data.model.ReviewSeverity
+import app.opah.tv.data.model.RecordingExport
+import app.opah.tv.data.model.isSafeLiteralLicensePlateFilter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -102,6 +105,16 @@ class FrigateApiClient(
                 .build(),
         )
 
+    override suspend fun getPtzInfo(profile: ConnectionProfile, camera: String): String {
+        require(camera.isNotBlank()) { "Camera is required." }
+        return executeText(
+            Request.Builder()
+                .url(apiUrl(profile, camera, "ptz", "info"))
+                .get()
+                .build(),
+        )
+    }
+
     override suspend fun getReview(profile: ConnectionProfile, query: ReviewSearchQuery): String {
         require(query.cameras.isNotEmpty()) { "At least one permitted camera is required." }
         require(query.before == null || query.after == null || query.before >= query.after) {
@@ -123,6 +136,79 @@ class FrigateApiClient(
         query.before?.let { builder.addQueryParameter("before", it.toString()) }
         val url = builder.build()
         return executeText(Request.Builder().url(url).get().build())
+    }
+
+    override suspend fun getReviewSummary(
+        profile: ConnectionProfile,
+        cameras: Set<String>,
+        timezone: String,
+    ): String {
+        require(cameras.isNotEmpty()) { "At least one permitted camera is required." }
+        val url = apiUrl(profile, "review", "summary").newBuilder()
+            .addQueryParameter("cameras", cameras.sorted().joinToString(","))
+            .addQueryParameter("timezone", timezone)
+            .build()
+        return executeText(Request.Builder().url(url).get().build())
+    }
+
+    override suspend fun getReviewMotionActivity(
+        profile: ConnectionProfile,
+        cameras: Set<String>,
+        after: Double,
+        before: Double,
+    ): String {
+        require(cameras.isNotEmpty()) { "At least one permitted camera is required." }
+        require(before >= after) { "Motion range end must not precede its start." }
+        val url = apiUrl(profile, "review", "activity", "motion").newBuilder()
+            .addQueryParameter("cameras", cameras.sorted().joinToString(","))
+            .addQueryParameter("after", after.toString())
+            .addQueryParameter("before", before.toString())
+            .addQueryParameter("scale", "30")
+            .build()
+        return executeText(Request.Builder().url(url).get().build())
+    }
+
+    override suspend fun getEventsByIds(
+        profile: ConnectionProfile,
+        eventIds: Set<String>,
+    ): String {
+        require(eventIds.isNotEmpty()) { "At least one event is required." }
+        require(eventIds.none(String::isBlank)) { "Event IDs cannot be blank." }
+        val url = apiUrl(profile, "event_ids").newBuilder()
+            .addQueryParameter("ids", eventIds.sorted().joinToString(","))
+            .build()
+        return executeText(Request.Builder().url(url).get().build())
+    }
+
+    override suspend fun searchEvents(profile: ConnectionProfile, query: EventSearchQuery): String {
+        val text = query.text?.trim().orEmpty()
+        val eventId = query.eventId?.trim().orEmpty()
+        val recognizedLicensePlate = query.recognizedLicensePlate?.trim().orEmpty()
+        require(text.isNotEmpty() || eventId.isNotEmpty()) { "Search text or an activity item is required." }
+        require(text.length <= MAX_SEARCH_TEXT_LENGTH) { "Search text is too long." }
+        require(query.cameras.isNotEmpty()) { "At least one permitted camera is required." }
+        require(query.before == null || query.after == null || query.before >= query.after) {
+            "Search range end must not precede its start."
+        }
+        require(
+            recognizedLicensePlate.isEmpty() || isSafeLiteralLicensePlateFilter(recognizedLicensePlate),
+        ) { "License plate filters may contain only letters, numbers, spaces, hyphens, or underscores." }
+        val builder = apiUrl(profile, "events", "search").newBuilder()
+            .addQueryParameter("search_type", if (eventId.isNotEmpty()) "similarity" else "thumbnail")
+            .addQueryParameter("include_thumbnails", "0")
+            .addQueryParameter("cameras", query.cameras.sorted().joinToString(","))
+            .addQueryParameter("limit", query.limit.coerceIn(1, 100).toString())
+        text.takeIf(String::isNotEmpty)?.let { builder.addQueryParameter("query", it) }
+        eventId.takeIf(String::isNotEmpty)?.let { builder.addQueryParameter("event_id", it) }
+        query.label?.takeIf(String::isNotBlank)?.let { builder.addQueryParameter("labels", it) }
+        query.subLabel?.takeIf(String::isNotBlank)?.let { builder.addQueryParameter("sub_labels", it) }
+        query.zone?.takeIf(String::isNotBlank)?.let { builder.addQueryParameter("zones", it) }
+        recognizedLicensePlate.takeIf(String::isNotEmpty)?.let {
+            builder.addQueryParameter("recognized_license_plate", it)
+        }
+        query.after?.let { builder.addQueryParameter("after", it.toString()) }
+        query.before?.let { builder.addQueryParameter("before", it.toString()) }
+        return executeText(Request.Builder().url(builder.build()).get().build())
     }
 
     override suspend fun setReviewsViewed(
@@ -161,19 +247,111 @@ class FrigateApiClient(
         return executeText(Request.Builder().url(url).get().build())
     }
 
+    override suspend fun getRecordingSummary(
+        profile: ConnectionProfile,
+        camera: String,
+        timezone: String,
+    ): String {
+        require(camera.isNotBlank()) { "Camera is required." }
+        val url = apiUrl(profile, camera, "recordings", "summary").newBuilder()
+            .addQueryParameter("timezone", timezone)
+            .build()
+        return executeText(Request.Builder().url(url).get().build())
+    }
+
+    override suspend fun getExports(profile: ConnectionProfile): String =
+        executeText(Request.Builder().url(apiUrl(profile, "exports")).get().build())
+
+    override suspend fun startRecordingExport(
+        profile: ConnectionProfile,
+        camera: String,
+        startTime: Double,
+        endTime: Double,
+        name: String,
+    ): String {
+        require(camera.isNotBlank()) { "Camera is required." }
+        require(endTime > startTime) { "Recording end must follow its start." }
+        require(name.isNotBlank() && name.length <= 256) { "Clip name is invalid." }
+        val payload = buildString {
+            append("{\"playback\":\"realtime\",\"source\":\"recordings\",\"name\":")
+            append(json.encodeToString(name))
+            append('}')
+        }
+        return executeText(
+            Request.Builder()
+                .url(
+                    apiUrl(
+                        profile,
+                        "export",
+                        camera,
+                        "start",
+                        startTime.coerceAtLeast(0.0).toString(),
+                        "end",
+                        endTime.toString(),
+                    ),
+                )
+                .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+                .build(),
+        )
+    }
+
+    override suspend fun deleteExport(profile: ConnectionProfile, exportId: String) {
+        require(exportId.isNotBlank()) { "Saved recording is required." }
+        executeText(
+            Request.Builder()
+                .url(apiUrl(profile, "export", exportId))
+                .delete()
+                .build(),
+        )
+    }
+
+    override suspend fun deleteExports(profile: ConnectionProfile, exportIds: Set<String>) {
+        require(exportIds.isNotEmpty() && exportIds.none(String::isBlank)) { "Saved recording is required." }
+        val payload = "{\"ids\":${json.encodeToString(exportIds.toList())}}"
+        executeText(
+            Request.Builder()
+                .url(apiUrl(profile, "exports", "delete"))
+                .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+                .build(),
+        )
+    }
+
     override fun reviewPlaybackUrl(profile: ConnectionProfile, item: ReviewItem): String {
         val start = (item.startTime - REVIEW_PADDING_SECONDS).coerceAtLeast(0.0)
         val end = (item.endTime ?: (System.currentTimeMillis() / 1000.0)) + REVIEW_PADDING_SECONDS
+        return recordingPlaybackUrl(profile, item.camera, start, end)
+    }
+
+    override fun recordingPlaybackUrl(
+        profile: ConnectionProfile,
+        camera: String,
+        startTime: Double,
+        endTime: Double,
+    ): String {
+        require(camera.isNotBlank()) { "Camera is required." }
+        require(endTime > startTime) { "Recording end must follow its start." }
         return rootUrl(
             profile,
             "vod",
-            item.camera,
+            camera,
             "start",
-            start.toString(),
+            startTime.coerceAtLeast(0.0).toString(),
             "end",
-            end.toString(),
+            endTime.toString(),
             "master.m3u8",
         ).toString()
+    }
+
+    override fun exportPlaybackUrl(
+        profile: ConnectionProfile,
+        export: RecordingExport,
+    ): String? {
+        if (export.inProgress) return null
+        val relative = export.videoPath.removePrefix(EXPORT_MEDIA_PREFIX)
+        if (relative == export.videoPath || relative.isBlank()) return null
+        val segments = relative.split('/')
+        if (segments.any { it.isBlank() || it == "." || it == ".." || '\\' in it }) return null
+        return rootUrl(profile, "exports", *segments.toTypedArray()).toString()
     }
 
     private suspend fun getProfile(profile: ConnectionProfile): FrigateUserProfile {
@@ -296,6 +474,8 @@ class FrigateApiClient(
     companion object {
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val REVIEW_PADDING_SECONDS = 8.0
+        private const val MAX_SEARCH_TEXT_LENGTH = 160
+        private const val EXPORT_MEDIA_PREFIX = "/media/frigate/exports/"
 
         fun defaultClient(cookieJar: CookieJar): OkHttpClient = OkHttpClient.Builder()
             .cookieJar(cookieJar)

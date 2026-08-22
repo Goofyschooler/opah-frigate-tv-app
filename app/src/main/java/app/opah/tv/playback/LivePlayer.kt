@@ -17,5 +17,5 @@ interface LivePlayer {
 }
 
 fun interface LivePlayerFactory {
-    fun create(context: Context): LivePlayer
+    fun create(context: Context, preferSoftwareVideoDecoder: Boolean): LivePlayer
 }

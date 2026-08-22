@@ -35,9 +35,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -79,13 +80,13 @@ import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import androidx.tv.material3.Button
 import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import app.opah.tv.OpahApplication
 import app.opah.tv.BuildConfig
 import app.opah.tv.PictureInPictureRequest
+import app.opah.tv.R
 import app.opah.tv.pipAspectRatio
 import app.opah.tv.shouldOfferLivePictureInPicture
 import app.opah.tv.playback.LivePlaybackOptions
@@ -121,22 +122,72 @@ internal data class PlaybackControlAvailability(
     val previous: Boolean,
     val seek: Boolean,
     val next: Boolean,
+    val earlier: Boolean,
 )
 
 internal fun playbackControlAvailability(
     kind: PlaybackKind,
     hasPrevious: Boolean,
     hasNext: Boolean,
+    hasEarlier: Boolean,
 ): PlaybackControlAvailability = PlaybackControlAvailability(
     previous = kind == PlaybackKind.LIVE && hasPrevious,
     seek = kind == PlaybackKind.RECORDED,
     next = kind == PlaybackKind.LIVE && hasNext,
+    earlier = kind == PlaybackKind.LIVE && hasEarlier,
 )
 
-internal fun shouldRevealPlaybackControlsOnBack(
+internal fun recordedMediaMimeType(uri: String): String? = when {
+    uri.substringBefore('?').lowercase().endsWith(".m3u8") -> MimeTypes.APPLICATION_M3U8
+    uri.substringBefore('?').lowercase().endsWith(".mp4") -> MimeTypes.VIDEO_MP4
+    else -> null
+}
+
+internal fun videoResizeMode(stretched: Boolean): Int = if (stretched) {
+    AspectRatioFrameLayout.RESIZE_MODE_FILL
+} else {
+    AspectRatioFrameLayout.RESIZE_MODE_FIT
+}
+
+internal enum class PlaybackBackAction { HIDE_OVERLAY, EXIT }
+
+internal enum class DecoderRecoveryAction { LOWER_QUALITY, SOFTWARE_DECODER, NONE }
+
+internal fun decoderRecoveryAction(
+    kind: PlaybackKind,
+    errorCode: Int,
+    fallbackUri: String?,
+    lowerQualityActive: Boolean,
+    softwareDecoderActive: Boolean,
+): DecoderRecoveryAction {
+    if (errorCode !in DECODER_PLAYBACK_ERROR_CODES) return DecoderRecoveryAction.NONE
+    if (kind == PlaybackKind.LIVE && !lowerQualityActive && !fallbackUri.isNullOrBlank()) {
+        return DecoderRecoveryAction.LOWER_QUALITY
+    }
+    return if (!softwareDecoderActive) {
+        DecoderRecoveryAction.SOFTWARE_DECODER
+    } else {
+        DecoderRecoveryAction.NONE
+    }
+}
+
+internal fun playbackBackAction(
     controlsVisible: Boolean,
+    diagnosticsVisible: Boolean,
     pictureInPictureActive: Boolean,
-): Boolean = !controlsVisible && !pictureInPictureActive
+): PlaybackBackAction = when {
+    pictureInPictureActive -> PlaybackBackAction.EXIT
+    controlsVisible || diagnosticsVisible -> PlaybackBackAction.HIDE_OVERLAY
+    else -> PlaybackBackAction.EXIT
+}
+
+internal fun playbackContextLabel(
+    kind: PlaybackKind,
+    startupFallbackActive: Boolean,
+): String = when (kind) {
+    PlaybackKind.RECORDED -> "Recording"
+    PlaybackKind.LIVE -> if (startupFallbackActive) "Live • Lower quality" else "Live"
+}
 
 @UnstableApi
 private class PlayerSession(
@@ -160,8 +211,20 @@ fun PlaybackScreen(
     pictureInPictureAvailable: Boolean = false,
     pictureInPictureActive: Boolean = false,
     onEnterPictureInPicture: (PictureInPictureRequest) -> Boolean = { false },
+    previousCameraName: String? = null,
     onPrevious: (() -> Unit)? = null,
+    nextCameraName: String? = null,
     onNext: (() -> Unit)? = null,
+    onOpenEarlier: (() -> Unit)? = null,
+    activityReviewed: Boolean? = null,
+    markingActivityReviewed: Boolean = false,
+    onMarkActivityReviewed: (() -> Unit)? = null,
+    stretchVideo: Boolean = false,
+    onToggleStretchVideo: (() -> Unit)? = null,
+    savingActivityRecording: Boolean = false,
+    activityRecordingSaved: Boolean = false,
+    activityRecordingMessage: String? = null,
+    onSaveActivityRecording: (() -> Unit)? = null,
 ) {
     if (BuildConfig.DOCUMENTATION_MODE && request.uri.startsWith(DOCUMENTATION_URI_PREFIX)) {
         DocumentationPlaybackScreen(
@@ -172,8 +235,20 @@ fun PlaybackScreen(
             pictureInPictureAvailable = pictureInPictureAvailable,
             pictureInPictureActive = pictureInPictureActive,
             onEnterPictureInPicture = onEnterPictureInPicture,
+            previousCameraName = previousCameraName,
             onPrevious = onPrevious,
+            nextCameraName = nextCameraName,
             onNext = onNext,
+            onOpenEarlier = onOpenEarlier,
+            activityReviewed = activityReviewed,
+            markingActivityReviewed = markingActivityReviewed,
+            onMarkActivityReviewed = onMarkActivityReviewed,
+            stretchVideo = stretchVideo,
+            onToggleStretchVideo = onToggleStretchVideo,
+            savingActivityRecording = savingActivityRecording,
+            activityRecordingSaved = activityRecordingSaved,
+            activityRecordingMessage = activityRecordingMessage,
+            onSaveActivityRecording = onSaveActivityRecording,
         )
         return
     }
@@ -181,8 +256,9 @@ fun PlaybackScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val application = context.applicationContext as OpahApplication
     var startupFallbackActive by rememberSaveable(request.uri) { mutableStateOf(false) }
+    var softwareDecoderActive by rememberSaveable(request.uri) { mutableStateOf(false) }
     val activeUri = if (startupFallbackActive) request.startupFallbackUri ?: request.uri else request.uri
-    val activeDetail = if (startupFallbackActive) request.startupFallbackDetail ?: request.detail else request.detail
+    val activeDetail = playbackContextLabel(request.kind, startupFallbackActive)
     var forceTcp by rememberSaveable(request.uri, request.kind) {
         mutableStateOf(request.kind == PlaybackKind.LIVE && preferRtpTcp)
     }
@@ -192,7 +268,10 @@ fun PlaybackScreen(
     var diagnosticsVisible by rememberSaveable(request.uri) { mutableStateOf(false) }
     var controlsVisible by rememberSaveable(request.uri) { mutableStateOf(true) }
     var controlsInteractionToken by remember { mutableIntStateOf(0) }
+    var overlayRenderPass by remember { mutableIntStateOf(0) }
     var consumeRevealKeyUp by remember { mutableStateOf(false) }
+    val hiddenControlsFocusRequester = remember(request.uri) { FocusRequester() }
+    val playButtonFocusRequester = remember(request.uri) { FocusRequester() }
     var retryToken by remember { mutableIntStateOf(0) }
     var automaticRetryAttempts by rememberSaveable(request.uri) { mutableIntStateOf(0) }
     var pendingAutomaticRetryMs by remember(request.uri) { mutableStateOf<Long?>(null) }
@@ -204,7 +283,15 @@ fun PlaybackScreen(
     var playerView by remember(request.uri) { mutableStateOf<PlayerView?>(null) }
     val lastVideoFrameAtMs = remember(session) { AtomicLong(0L) }
 
-    DisposableEffect(lifecycleOwner, activeUri, request.kind, forceTcp, videoOnly, retryToken) {
+    DisposableEffect(
+        lifecycleOwner,
+        activeUri,
+        request.kind,
+        forceTcp,
+        videoOnly,
+        softwareDecoderActive,
+        retryToken,
+    ) {
         fun startPlayback() {
             if (session != null) return
             session = createPlayerSession(
@@ -213,6 +300,7 @@ fun PlaybackScreen(
                 request = request.copy(uri = activeUri),
                 forceTcp = forceTcp,
                 videoOnly = videoOnly,
+                preferSoftwareVideoDecoder = softwareDecoderActive,
                 recordedPositionMs = recordedPositionMs,
                 playWhenReady = resumeWhenStarted,
             )
@@ -317,10 +405,9 @@ fun PlaybackScreen(
             if (retry == null) {
                 telemetry = telemetry.copy(
                     state = "Playback stalled",
-                    safeError = "The live stream stopped producing video after " +
-                        "$MAX_LIVE_AUTOMATIC_RETRIES automatic reconnect attempts. " +
-                        "Check the camera, Frigate, and network, then retry.",
+                    safeError = "Live video stopped. Check the camera, your server, and network, then try again.",
                 )
+                controlsVisible = true
             } else {
                 automaticRetryAttempts = retry.attempt
                 pendingAutomaticRetryMs = retry.delayMs
@@ -349,6 +436,19 @@ fun PlaybackScreen(
         }
     }
 
+    LaunchedEffect(controlsVisible, diagnosticsVisible) {
+        withFrameNanos { }
+        overlayRenderPass += 1
+    }
+    LaunchedEffect(controlsVisible) {
+        withFrameNanos { }
+        if (controlsVisible) {
+            playButtonFocusRequester.requestFocus()
+        } else {
+            hiddenControlsFocusRequester.requestFocus()
+        }
+    }
+
     LaunchedEffect(
         pipRequested,
         session,
@@ -361,7 +461,7 @@ fun PlaybackScreen(
         if (telemetry.safeError != null) {
             pipRequested = false
             controlsVisible = true
-            pipError = "Pop out could not start because the video-only stream failed."
+            pipError = "Picture in Picture could not start because the video did not load."
             return@LaunchedEffect
         }
         val activeSession = session ?: return@LaunchedEffect
@@ -374,7 +474,7 @@ fun PlaybackScreen(
         val entered = onEnterPictureInPicture(
             PictureInPictureRequest(
                 title = request.title,
-                subtitle = "Live • Video only",
+                subtitle = "Live",
                 aspectRatio = pipAspectRatio(telemetry.videoWidth, telemetry.videoHeight),
                 sourceRectHint = sourceRect,
             ),
@@ -382,7 +482,7 @@ fun PlaybackScreen(
         pipRequested = false
         if (!entered) {
             controlsVisible = true
-            pipError = "Picture-in-picture was unavailable. Video remains open in Opah."
+            pipError = "Picture in Picture is unavailable. Video remains open in Opah."
         }
     }
 
@@ -437,6 +537,25 @@ fun PlaybackScreen(
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                when (
+                    decoderRecoveryAction(
+                        kind = request.kind,
+                        errorCode = error.errorCode,
+                        fallbackUri = request.startupFallbackUri,
+                        lowerQualityActive = startupFallbackActive,
+                        softwareDecoderActive = softwareDecoderActive,
+                    )
+                ) {
+                    DecoderRecoveryAction.LOWER_QUALITY -> {
+                        startupFallbackActive = true
+                        return
+                    }
+                    DecoderRecoveryAction.SOFTWARE_DECODER -> {
+                        softwareDecoderActive = true
+                        return
+                    }
+                    DecoderRecoveryAction.NONE -> Unit
+                }
                 if (
                     request.kind == PlaybackKind.LIVE &&
                     !forceTcp &&
@@ -447,7 +566,7 @@ fun PlaybackScreen(
                     return
                 }
                 if (request.kind == PlaybackKind.RECORDED && error.hasHttpStatus(401)) {
-                    onSessionExpired("The Frigate session expired during recording playback. Sign in again.")
+                    onSessionExpired("Your sign-in expired while the recording was playing. Sign in again.")
                     return
                 }
                 playbackRetryDecision(
@@ -459,7 +578,7 @@ fun PlaybackScreen(
                     pendingAutomaticRetryMs = retry.delayMs
                     telemetry = telemetry.copy(
                         state = "Reconnecting",
-                        safeError = "Live stream interrupted. Reconnecting automatically " +
+                        safeError = "Live video was interrupted. Reconnecting automatically " +
                             "(${retry.attempt}/$MAX_LIVE_AUTOMATIC_RETRIES)…",
                     )
                     return
@@ -468,6 +587,7 @@ fun PlaybackScreen(
                     state = "Playback failed",
                     safeError = safePlaybackError(error, request.kind),
                 )
+                controlsVisible = true
             }
         }
         val analyticsListener = object : AnalyticsListener {
@@ -526,11 +646,12 @@ fun PlaybackScreen(
     }
 
     BackHandler {
-        if (shouldRevealPlaybackControlsOnBack(controlsVisible, pictureInPictureActive)) {
-            controlsInteractionToken += 1
-            controlsVisible = true
-        } else {
-            onBack()
+        when (playbackBackAction(controlsVisible, diagnosticsVisible, pictureInPictureActive)) {
+            PlaybackBackAction.HIDE_OVERLAY -> {
+                diagnosticsVisible = false
+                controlsVisible = false
+            }
+            PlaybackBackAction.EXIT -> onBack()
         }
     }
 
@@ -538,6 +659,10 @@ fun PlaybackScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .drawWithContent {
+                overlayRenderPass
+                drawContent()
+            }
             .onPreviewKeyEvent { event ->
                 if (event.key == Key.Back) {
                     false
@@ -556,7 +681,9 @@ fun PlaybackScreen(
                         false
                     }
                 }
-            },
+            }
+            .focusRequester(hiddenControlsFocusRequester)
+            .focusable(enabled = !controlsVisible),
     ) {
         session?.let { activeSession ->
             key(activeSession) {
@@ -569,13 +696,14 @@ fun PlaybackScreen(
                             )
                             useController = false
                             keepScreenOn = true
-                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                            resizeMode = videoResizeMode(stretchVideo)
                             player = activeSession.player
                             playerView = this
                         }
                     },
                     update = {
                         it.player = activeSession.player
+                        it.resizeMode = videoResizeMode(stretchVideo)
                         playerView = it
                     },
                     modifier = Modifier.fillMaxSize(),
@@ -605,15 +733,13 @@ fun PlaybackScreen(
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                 )
-                activeDetail?.let {
-                    Text(
-                        text = it,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                Text(
+                    text = activeDetail,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 telemetry.safeError?.let { error ->
                     Text(
                         text = error,
@@ -627,6 +753,13 @@ fun PlaybackScreen(
                     Text(
                         text = it,
                         color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                activityRecordingMessage?.let {
+                    Text(
+                        text = it,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -650,65 +783,74 @@ fun PlaybackScreen(
 
         if (!pictureInPictureActive) {
             session?.let { activeSession ->
-                PlaybackControls(
-                    request = request,
-                    telemetry = telemetry,
-                    muted = muted,
-                    videoOnly = videoOnly,
-                    forceTcp = forceTcp,
-                    player = activeSession.player,
-                    onBack = onBack,
-                    onRetry = {
-                        pendingAutomaticRetryMs = null
-                        automaticRetryAttempts = 0
-                        if (request.kind == PlaybackKind.RECORDED) {
-                            recordedPositionMs = 0L
-                            resumeWhenStarted = true
-                        }
-                        retryToken += 1
-                    },
-                    onToggleMute = { muted = !muted },
-                    onToggleVideoOnly = { videoOnly = !videoOnly },
-                    pictureInPictureVisible = shouldOfferLivePictureInPicture(
-                        sdkInt = Build.VERSION.SDK_INT,
-                        hasSystemFeature = pictureInPictureAvailable,
-                        kind = request.kind,
-                        firstFrameRendered = telemetry.firstFrameMs != null,
-                    ),
-                    pipRequested = pipRequested,
-                    onPopOut = {
-                        pipError = null
-                        pipRequested = true
-                        muted = true
-                        diagnosticsVisible = false
-                        controlsVisible = false
-                        videoOnly = true
-                    },
-                    onToggleForceTcp = {
-                        automaticTcpFallback = false
-                        forceTcp = !forceTcp
-                    },
-                    diagnosticsAvailable = diagnosticsAvailable,
-                    diagnosticsVisible = diagnosticsVisible,
-                    onToggleDiagnostics = { diagnosticsVisible = !diagnosticsVisible },
-                    onPrevious = onPrevious,
-                    onNext = onNext,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .padding(horizontal = 30.dp, vertical = 20.dp)
-                        .alpha(if (controlsVisible || telemetry.safeError != null) 1f else 0f)
-                        .background(
-                            color = Color.Black.copy(alpha = 0.66f),
-                            shape = RoundedCornerShape(16.dp),
-                        )
-                        .border(
-                            width = 1.dp,
-                            color = Color.White.copy(alpha = 0.14f),
-                            shape = RoundedCornerShape(16.dp),
-                        )
-                        .padding(horizontal = 18.dp, vertical = 13.dp),
+                val pictureInPictureVisible = shouldOfferLivePictureInPicture(
+                    sdkInt = Build.VERSION.SDK_INT,
+                    hasSystemFeature = pictureInPictureAvailable,
+                    kind = request.kind,
+                    firstFrameRendered = telemetry.firstFrameMs != null,
                 )
+                val openPictureInPicture = {
+                    pipError = null
+                    pipRequested = true
+                    muted = true
+                    diagnosticsVisible = false
+                    controlsVisible = false
+                    videoOnly = true
+                }
+                if (controlsVisible) {
+                    PlaybackControls(
+                        request = request,
+                        telemetry = telemetry,
+                        player = activeSession.player,
+                        onRetry = {
+                            pendingAutomaticRetryMs = null
+                            automaticRetryAttempts = 0
+                            if (request.kind == PlaybackKind.RECORDED) {
+                                recordedPositionMs = 0L
+                                resumeWhenStarted = true
+                            }
+                            retryToken += 1
+                        },
+                        previousCameraName = previousCameraName,
+                        onPrevious = onPrevious,
+                        nextCameraName = nextCameraName,
+                        onNext = onNext,
+                        onOpenEarlier = onOpenEarlier,
+                        activityReviewed = activityReviewed,
+                        markingActivityReviewed = markingActivityReviewed,
+                        onMarkActivityReviewed = onMarkActivityReviewed,
+                        stretchVideo = stretchVideo,
+                        onToggleStretchVideo = onToggleStretchVideo,
+                        savingActivityRecording = savingActivityRecording,
+                        activityRecordingSaved = activityRecordingSaved,
+                        onSaveActivityRecording = onSaveActivityRecording,
+                        muted = muted,
+                        audioHelpActive = videoOnly,
+                        diagnosticsAvailable = diagnosticsAvailable,
+                        diagnosticsVisible = diagnosticsVisible,
+                        pictureInPictureVisible = pictureInPictureVisible,
+                        pipRequested = pipRequested,
+                        onToggleMute = { muted = !muted },
+                        onToggleAudioHelp = { videoOnly = !videoOnly },
+                        onPictureInPicture = openPictureInPicture,
+                        onToggleDiagnostics = { diagnosticsVisible = !diagnosticsVisible },
+                        playFocusRequester = playButtonFocusRequester,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .widthIn(max = 1120.dp)
+                            .padding(bottom = 16.dp)
+                            .background(
+                                color = Color.Black.copy(alpha = 0.68f),
+                                shape = RoundedCornerShape(16.dp),
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = Color.White.copy(alpha = 0.14f),
+                                shape = RoundedCornerShape(16.dp),
+                            )
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                    )
+                }
             } ?: Text(
                 text = "Playback resources released while Opah is in the background.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -728,11 +870,23 @@ private fun DocumentationPlaybackScreen(
     pictureInPictureAvailable: Boolean,
     pictureInPictureActive: Boolean,
     onEnterPictureInPicture: (PictureInPictureRequest) -> Boolean,
+    previousCameraName: String?,
     onPrevious: (() -> Unit)?,
+    nextCameraName: String?,
     onNext: (() -> Unit)?,
+    onOpenEarlier: (() -> Unit)?,
+    activityReviewed: Boolean?,
+    markingActivityReviewed: Boolean,
+    onMarkActivityReviewed: (() -> Unit)?,
+    stretchVideo: Boolean,
+    onToggleStretchVideo: (() -> Unit)?,
+    savingActivityRecording: Boolean,
+    activityRecordingSaved: Boolean,
+    activityRecordingMessage: String?,
+    onSaveActivityRecording: (() -> Unit)?,
 ) {
     val context = LocalContext.current
-    val resourceName = when (request.uri.removePrefix(DOCUMENTATION_URI_PREFIX)) {
+    val resourceName = when (request.uri.removePrefix(DOCUMENTATION_URI_PREFIX).substringBefore('?')) {
         "garden" -> "docs_camera_garden"
         "driveway" -> "docs_camera_driveway"
         "birdseye" -> "docs_camera_birdseye"
@@ -742,8 +896,14 @@ private fun DocumentationPlaybackScreen(
     val player = remember { ExoPlayer.Builder(context).build().apply { playWhenReady = true } }
     DisposableEffect(player) { onDispose(player::release) }
     var controlsVisible by rememberSaveable(request.uri) { mutableStateOf(true) }
+    var controlsInteractionToken by remember { mutableIntStateOf(0) }
+    var overlayRenderPass by remember { mutableIntStateOf(0) }
     var consumeRevealKeyUp by remember { mutableStateOf(false) }
+    val hiddenControlsFocusRequester = remember(request.uri) { FocusRequester() }
+    val playButtonFocusRequester = remember(request.uri) { FocusRequester() }
     var muted by rememberSaveable(request.uri) { mutableStateOf(startMuted) }
+    var documentationPlaying by rememberSaveable(request.uri) { mutableStateOf(true) }
+    var documentationPositionMs by rememberSaveable(request.uri) { mutableLongStateOf(24_000L) }
     var videoOnly by rememberSaveable(request.uri) { mutableStateOf(false) }
     var forceTcp by rememberSaveable(request.uri) { mutableStateOf(request.kind == PlaybackKind.LIVE) }
     var diagnosticsVisible by rememberSaveable(request.uri) { mutableStateOf(false) }
@@ -752,8 +912,8 @@ private fun DocumentationPlaybackScreen(
     val recorded = request.kind == PlaybackKind.RECORDED
     val telemetry = PlaybackTelemetry(
         state = "Ready",
-        isPlaying = true,
-        playWhenReady = true,
+        isPlaying = documentationPlaying,
+        playWhenReady = documentationPlaying,
         videoDecoder = "Reference hardware decoder",
         audioDecoder = if (videoOnly) null else "Reference AAC decoder",
         videoFormat = if (resourceName == "docs_camera_driveway") "H.265 / HEVC • 3840×2160" else "H.264 / AVC • 2560×1440",
@@ -761,17 +921,39 @@ private fun DocumentationPlaybackScreen(
         videoWidth = 1920,
         videoHeight = 1080,
         firstFrameMs = 118L,
-        positionMs = if (recorded) 24_000L else 0L,
+        positionMs = if (recorded) documentationPositionMs else 0L,
         bufferedPositionMs = if (recorded) 56_000L else 0L,
         durationMs = if (recorded) 78_000L else 0L,
         seekable = recorded,
     )
 
-    BackHandler {
-        if (shouldRevealPlaybackControlsOnBack(controlsVisible, pictureInPictureActive)) {
-            controlsVisible = true
+    LaunchedEffect(controlsVisible, diagnosticsVisible) {
+        withFrameNanos { }
+        overlayRenderPass += 1
+    }
+    LaunchedEffect(controlsVisible) {
+        withFrameNanos { }
+        if (controlsVisible) {
+            playButtonFocusRequester.requestFocus()
         } else {
-            onBack()
+            hiddenControlsFocusRequester.requestFocus()
+        }
+    }
+
+    LaunchedEffect(request.uri, controlsInteractionToken, diagnosticsVisible) {
+        if (!diagnosticsVisible) {
+            delay(PLAYBACK_CONTROLS_TIMEOUT_MS)
+            controlsVisible = false
+        }
+    }
+
+    BackHandler {
+        when (playbackBackAction(controlsVisible, diagnosticsVisible, pictureInPictureActive)) {
+            PlaybackBackAction.HIDE_OVERLAY -> {
+                diagnosticsVisible = false
+                controlsVisible = false
+            }
+            PlaybackBackAction.EXIT -> onBack()
         }
     }
 
@@ -779,6 +961,10 @@ private fun DocumentationPlaybackScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .drawWithContent {
+                overlayRenderPass
+                drawContent()
+            }
             .onPreviewKeyEvent { event ->
                 if (event.key == Key.Back) {
                     false
@@ -787,19 +973,24 @@ private fun DocumentationPlaybackScreen(
                     true
                 } else if (event.type != KeyEventType.KeyDown) {
                     false
-                } else if (!controlsVisible) {
-                    controlsVisible = true
-                    consumeRevealKeyUp = true
-                    true
                 } else {
-                    false
+                    controlsInteractionToken += 1
+                    if (!controlsVisible) {
+                        controlsVisible = true
+                        consumeRevealKeyUp = true
+                        true
+                    } else {
+                        false
+                    }
                 }
-            },
+            }
+            .focusRequester(hiddenControlsFocusRequester)
+            .focusable(enabled = !controlsVisible),
     ) {
         Image(
             painter = painterResource(imageResource),
             contentDescription = null,
-            contentScale = ContentScale.Fit,
+            contentScale = if (stretchVideo) ContentScale.FillBounds else ContentScale.Fit,
             modifier = Modifier.fillMaxSize(),
         )
 
@@ -818,15 +1009,19 @@ private fun DocumentationPlaybackScreen(
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                 )
-                request.detail?.let {
-                    Text(
-                        text = it,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
+                Text(
+                    text = buildString {
+                        append(playbackContextLabel(request.kind, startupFallbackActive = false))
+                        if (!documentationPlaying) append(" • Paused")
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 pipError?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                activityRecordingMessage?.let {
+                    Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -845,25 +1040,13 @@ private fun DocumentationPlaybackScreen(
         }
 
         if (!pictureInPictureActive) {
-            PlaybackControls(
-                request = request,
-                telemetry = telemetry,
-                muted = muted,
-                videoOnly = videoOnly,
-                forceTcp = forceTcp,
-                player = player,
-                onBack = onBack,
-                onRetry = {},
-                onToggleMute = { muted = !muted },
-                onToggleVideoOnly = { videoOnly = !videoOnly },
-                pictureInPictureVisible = shouldOfferLivePictureInPicture(
-                    sdkInt = Build.VERSION.SDK_INT,
-                    hasSystemFeature = pictureInPictureAvailable,
-                    kind = request.kind,
-                    firstFrameRendered = true,
-                ),
-                pipRequested = pipRequested,
-                onPopOut = {
+            val pictureInPictureVisible = shouldOfferLivePictureInPicture(
+                sdkInt = Build.VERSION.SDK_INT,
+                hasSystemFeature = pictureInPictureAvailable,
+                kind = request.kind,
+                firstFrameRendered = true,
+            )
+            val openPictureInPicture = {
                     pipRequested = true
                     muted = true
                     videoOnly = true
@@ -872,7 +1055,7 @@ private fun DocumentationPlaybackScreen(
                     val entered = onEnterPictureInPicture(
                         PictureInPictureRequest(
                             title = request.title,
-                            subtitle = "Live • Video only",
+                            subtitle = "Live",
                             aspectRatio = pipAspectRatio(1920, 1080),
                             sourceRectHint = null,
                         ),
@@ -882,21 +1065,49 @@ private fun DocumentationPlaybackScreen(
                         controlsVisible = true
                         pipError = "Picture-in-picture was unavailable."
                     }
-                },
-                onToggleForceTcp = { forceTcp = !forceTcp },
-                diagnosticsAvailable = diagnosticsAvailable,
-                diagnosticsVisible = diagnosticsVisible,
-                onToggleDiagnostics = { diagnosticsVisible = !diagnosticsVisible },
-                onPrevious = onPrevious,
-                onNext = onNext,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(horizontal = 30.dp, vertical = 20.dp)
-                    .background(Color.Black.copy(alpha = 0.66f), RoundedCornerShape(16.dp))
-                    .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(16.dp))
-                    .padding(horizontal = 18.dp, vertical = 13.dp),
-            )
+                Unit
+            }
+            if (controlsVisible) {
+                PlaybackControls(
+                    request = request,
+                    telemetry = telemetry,
+                    player = player,
+                    onRetry = {},
+                    previousCameraName = previousCameraName,
+                    onPrevious = onPrevious,
+                    nextCameraName = nextCameraName,
+                    onNext = onNext,
+                    onOpenEarlier = onOpenEarlier,
+                    activityReviewed = activityReviewed,
+                    markingActivityReviewed = markingActivityReviewed,
+                    onMarkActivityReviewed = onMarkActivityReviewed,
+                    stretchVideo = stretchVideo,
+                    onToggleStretchVideo = onToggleStretchVideo,
+                    savingActivityRecording = savingActivityRecording,
+                    activityRecordingSaved = activityRecordingSaved,
+                    onSaveActivityRecording = onSaveActivityRecording,
+                    muted = muted,
+                    audioHelpActive = videoOnly,
+                    pictureInPictureVisible = pictureInPictureVisible,
+                    pipRequested = pipRequested,
+                    onToggleMute = { muted = !muted },
+                    onToggleAudioHelp = { videoOnly = !videoOnly },
+                    onPictureInPicture = openPictureInPicture,
+                    diagnosticsAvailable = diagnosticsAvailable,
+                    diagnosticsVisible = diagnosticsVisible,
+                    onToggleDiagnostics = { diagnosticsVisible = !diagnosticsVisible },
+                    onPlaybackStateChanged = { playing -> documentationPlaying = playing },
+                    onSeekPositionChanged = { position -> documentationPositionMs = position },
+                    playFocusRequester = playButtonFocusRequester,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .widthIn(max = 1120.dp)
+                        .padding(bottom = 16.dp)
+                        .background(Color.Black.copy(alpha = 0.68f), RoundedCornerShape(16.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(16.dp))
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                )
+            }
         }
     }
 }
@@ -930,13 +1141,17 @@ private fun createPlayerSession(
     request: PlaybackRequest,
     forceTcp: Boolean,
     videoOnly: Boolean,
+    preferSoftwareVideoDecoder: Boolean,
     recordedPositionMs: Long,
     playWhenReady: Boolean,
 ): PlayerSession {
     val startedAt = SystemClock.elapsedRealtime()
     return when (request.kind) {
         PlaybackKind.LIVE -> {
-            val livePlayer = application.container.livePlayerFactory.create(context)
+            val livePlayer = application.container.livePlayerFactory.create(
+                context,
+                preferSoftwareVideoDecoder,
+            )
             val player = livePlayer.player
             livePlayer.prepare(
                 request.uri,
@@ -946,14 +1161,17 @@ private fun createPlayerSession(
         }
 
         PlaybackKind.RECORDED -> {
-            val player = RecordedPlayerFactory.create(context, application.container.httpClient)
-            player.disableAudio(videoOnly)
-            player.setMediaItem(
-                MediaItem.Builder()
-                    .setUri(request.uri)
-                    .setMimeType(MimeTypes.APPLICATION_M3U8)
-                    .build(),
+            val player = RecordedPlayerFactory.create(
+                context,
+                application.container.httpClient,
+                preferSoftwareVideoDecoder,
             )
+            player.disableAudio(videoOnly)
+            val mediaItem = MediaItem.Builder()
+                .setUri(request.uri)
+                .apply { recordedMediaMimeType(request.uri)?.let(::setMimeType) }
+                .build()
+            player.setMediaItem(mediaItem)
             if (recordedPositionMs > 0L) player.seekTo(recordedPositionMs)
             player.playWhenReady = playWhenReady
             player.prepare()
@@ -1039,48 +1257,73 @@ private fun DiagnosticLine(label: String, value: String) {
 private fun PlaybackControls(
     request: PlaybackRequest,
     telemetry: PlaybackTelemetry,
-    muted: Boolean,
-    videoOnly: Boolean,
-    forceTcp: Boolean,
     player: Player,
-    onBack: () -> Unit,
     onRetry: () -> Unit,
-    onToggleMute: () -> Unit,
-    onToggleVideoOnly: () -> Unit,
-    pictureInPictureVisible: Boolean,
-    pipRequested: Boolean,
-    onPopOut: () -> Unit,
-    onToggleForceTcp: () -> Unit,
+    previousCameraName: String?,
+    onPrevious: (() -> Unit)?,
+    nextCameraName: String?,
+    onNext: (() -> Unit)?,
+    onOpenEarlier: (() -> Unit)?,
+    activityReviewed: Boolean?,
+    markingActivityReviewed: Boolean,
+    onMarkActivityReviewed: (() -> Unit)?,
+    stretchVideo: Boolean,
+    onToggleStretchVideo: (() -> Unit)?,
+    savingActivityRecording: Boolean,
+    activityRecordingSaved: Boolean,
+    onSaveActivityRecording: (() -> Unit)?,
+    muted: Boolean,
+    audioHelpActive: Boolean,
     diagnosticsAvailable: Boolean,
     diagnosticsVisible: Boolean,
+    pictureInPictureVisible: Boolean,
+    pipRequested: Boolean,
+    onToggleMute: () -> Unit,
+    onToggleAudioHelp: () -> Unit,
+    onPictureInPicture: () -> Unit,
     onToggleDiagnostics: () -> Unit,
-    onPrevious: (() -> Unit)?,
-    onNext: (() -> Unit)?,
+    playFocusRequester: FocusRequester,
     modifier: Modifier = Modifier,
+    onPlaybackStateChanged: ((Boolean) -> Unit)? = null,
+    onSeekPositionChanged: ((Long) -> Unit)? = null,
 ) {
-    val playFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(player) { playFocusRequester.requestFocus() }
     val isRecorded = request.kind == PlaybackKind.RECORDED
     val availability = playbackControlAvailability(
         kind = request.kind,
         hasPrevious = onPrevious != null,
         hasNext = onNext != null,
+        hasEarlier = onOpenEarlier != null,
     )
     val canSeekRecording = availability.seek && telemetry.seekable && telemetry.durationMs > 0L
+    val seekToPosition = { positionMs: Long ->
+        player.seekTo(positionMs)
+        onSeekPositionChanged?.invoke(positionMs)
+        Unit
+    }
+    var focusedControlLabel by remember(request.uri) {
+        mutableStateOf(if (telemetry.playWhenReady) "Pause video" else "Play video")
+    }
+    LaunchedEffect(activityRecordingSaved) {
+        if (activityRecordingSaved) focusedControlLabel = "Recording saved"
+    }
     val togglePlayback = {
         if (isRecorded && telemetry.ended) {
             player.seekTo(0L)
             player.play()
+            onPlaybackStateChanged?.invoke(true)
         } else if (telemetry.playWhenReady) {
             player.pause()
+            onPlaybackStateChanged?.invoke(false)
         } else {
             player.play()
+            onPlaybackStateChanged?.invoke(true)
         }
+        Unit
     }
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (isRecorded) {
             RecordedTimeline(
@@ -1088,111 +1331,288 @@ private fun PlaybackControls(
                 bufferedPositionMs = telemetry.bufferedPositionMs,
                 durationMs = telemetry.durationMs,
                 enabled = canSeekRecording,
-                onSeek = { player.seekTo(it) },
+                onSeek = seekToPosition,
                 onTogglePlayback = togglePlayback,
+                modifier = Modifier.width(640.dp),
             )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                MediaControlButton(
-                    iconRes = android.R.drawable.ic_media_previous,
-                    label = "Restart",
-                    onClick = { player.seekTo(0L) },
-                    enabled = canSeekRecording,
-                )
-                MediaControlButton(
-                    iconRes = android.R.drawable.ic_media_rew,
-                    label = "Back 10 s",
-                    onClick = {
-                        player.seekTo(
-                            boundedSeekPosition(player.currentPosition, telemetry.durationMs, -10_000L),
-                        )
-                    },
-                    enabled = canSeekRecording,
-                )
-                MediaControlButton(
-                    iconRes = if (telemetry.playWhenReady && !telemetry.ended) {
-                        android.R.drawable.ic_media_pause
-                    } else {
-                        android.R.drawable.ic_media_play
-                    },
-                    label = recordedPlaybackButtonLabel(
-                        playWhenReady = telemetry.playWhenReady,
-                        ended = telemetry.ended,
-                    ),
-                    modifier = Modifier.focusRequester(playFocusRequester),
-                    onClick = togglePlayback,
-                )
-                MediaControlButton(
-                    iconRes = android.R.drawable.ic_media_ff,
-                    label = "Forward 10 s",
-                    onClick = {
-                        player.seekTo(
-                            boundedSeekPosition(player.currentPosition, telemetry.durationMs, 10_000L),
-                        )
-                    },
-                    enabled = canSeekRecording,
-                )
-            }
-        } else {
-            Text(
-                text = "LIVE  •  Real-time stream",
-                color = MaterialTheme.colorScheme.primary,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold,
-            )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                MediaControlButton(
-                    iconRes = android.R.drawable.ic_media_previous,
-                    label = "Previous camera",
-                    onClick = { onPrevious?.invoke() },
-                    enabled = availability.previous,
-                )
-                MediaControlButton(
-                    iconRes = if (telemetry.playWhenReady) {
-                        android.R.drawable.ic_media_pause
-                    } else {
-                        android.R.drawable.ic_media_play
-                    },
-                    label = if (telemetry.playWhenReady) "Pause view" else "Resume live",
-                    modifier = Modifier.focusRequester(playFocusRequester),
-                    onClick = togglePlayback,
-                )
-                MediaControlButton(
-                    iconRes = android.R.drawable.ic_media_next,
-                    label = "Next camera",
-                    onClick = { onNext?.invoke() },
-                    enabled = availability.next,
-                )
-            }
         }
         Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Button(onClick = onBack) { Text("Back") }
-            if (telemetry.safeError != null) Button(onClick = onRetry) { Text("Retry") }
-            Button(onClick = onToggleMute, enabled = !videoOnly) { Text(if (muted) "Unmute" else "Mute") }
-            Button(onClick = onToggleVideoOnly) { Text(if (videoOnly) "Enable audio" else "Video only") }
-            if (pictureInPictureVisible) {
-                Button(onClick = onPopOut, enabled = !pipRequested) {
-                    Text(if (pipRequested) "Preparing…" else "Pop out")
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (isRecorded) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_replay,
+                        label = "Back 10 seconds",
+                        enabled = canSeekRecording,
+                        onFocused = { focusedControlLabel = it },
+                        onClick = {
+                            seekToPosition(
+                                boundedSeekPosition(
+                                    telemetry.positionMs,
+                                    telemetry.durationMs,
+                                    -TIMELINE_SEEK_STEP_MS,
+                                ),
+                            )
+                        },
+                    )
+                } else {
+                    CameraNeighborButton(
+                        cameraName = previousCameraName,
+                        previous = true,
+                        onClick = onPrevious,
+                        onFocused = { focusedControlLabel = it },
+                    )
+                }
+                PlaybackPlayButton(
+                    iconRes = if (telemetry.playWhenReady && !telemetry.ended) {
+                        R.drawable.ic_pause
+                    } else {
+                        R.drawable.ic_play
+                    },
+                    label = if (isRecorded) {
+                        recordedPlaybackButtonLabel(telemetry.playWhenReady, telemetry.ended)
+                    } else if (telemetry.playWhenReady) {
+                        "Pause live video"
+                    } else {
+                        "Resume live video"
+                    },
+                    focusRequester = playFocusRequester,
+                    onFocused = { focusedControlLabel = it },
+                    onClick = togglePlayback,
+                )
+                if (isRecorded) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_forward,
+                        label = "Forward 10 seconds",
+                        enabled = canSeekRecording,
+                        onFocused = { focusedControlLabel = it },
+                        onClick = {
+                            seekToPosition(
+                                boundedSeekPosition(
+                                    telemetry.positionMs,
+                                    telemetry.durationMs,
+                                    TIMELINE_SEEK_STEP_MS,
+                                ),
+                            )
+                        },
+                    )
+                } else {
+                    CameraNeighborButton(
+                        cameraName = nextCameraName,
+                        previous = false,
+                        onClick = onNext,
+                        onFocused = { focusedControlLabel = it },
+                    )
+                }
+                if (telemetry.safeError != null) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_retry,
+                        label = "Retry video",
+                        onClick = onRetry,
+                        onFocused = { focusedControlLabel = it },
+                    )
+                }
+                if (availability.earlier && onOpenEarlier != null) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_replay,
+                        label = "Earlier video",
+                        onClick = onOpenEarlier,
+                        onFocused = { focusedControlLabel = it },
+                    )
+                }
+                if (isRecorded && onMarkActivityReviewed != null) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_mark_reviewed,
+                        label = when {
+                            markingActivityReviewed -> "Saving review status"
+                            activityReviewed == true -> "Mark as not reviewed"
+                            else -> "Mark as reviewed"
+                        },
+                        enabled = !markingActivityReviewed,
+                        selected = activityReviewed == true,
+                        onClick = onMarkActivityReviewed,
+                        onFocused = { focusedControlLabel = it },
+                    )
+                }
+                if (isRecorded && onSaveActivityRecording != null) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_save_recording,
+                        label = when {
+                            savingActivityRecording -> "Saving recording"
+                            activityRecordingSaved -> "Recording saved"
+                            else -> "Save recording"
+                        },
+                        enabled = !savingActivityRecording && !activityRecordingSaved,
+                        selected = activityRecordingSaved,
+                        onClick = onSaveActivityRecording,
+                        onFocused = { focusedControlLabel = it },
+                    )
+                }
+                if (onToggleStretchVideo != null) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_stretch,
+                        label = if (stretchVideo) "Fit video to screen" else "Stretch video to screen",
+                        selected = stretchVideo,
+                        onClick = onToggleStretchVideo,
+                        onFocused = { focusedControlLabel = it },
+                    )
+                }
+                CompactPlaybackAction(
+                    iconRes = if (muted || audioHelpActive) {
+                        R.drawable.ic_volume_off
+                    } else {
+                        R.drawable.ic_volume_on
+                    },
+                    label = when {
+                        audioHelpActive -> "Audio help is on"
+                        muted -> "Turn on audio"
+                        else -> "Mute audio"
+                    },
+                    enabled = !audioHelpActive,
+                    onClick = onToggleMute,
+                    selected = muted,
+                    onFocused = { focusedControlLabel = it },
+                )
+                CompactPlaybackAction(
+                    iconRes = R.drawable.ic_audio_help,
+                    label = if (audioHelpActive) "Use normal audio" else "Audio help",
+                    onClick = onToggleAudioHelp,
+                    selected = audioHelpActive,
+                    onFocused = { focusedControlLabel = it },
+                )
+                if (pictureInPictureVisible) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_picture_in_picture,
+                        label = "Pop out video",
+                        enabled = !pipRequested,
+                        onClick = onPictureInPicture,
+                        onFocused = { focusedControlLabel = it },
+                    )
+                }
+                if (diagnosticsAvailable) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_playback_info,
+                        label = if (diagnosticsVisible) "Hide playback information" else "Playback information",
+                        onClick = onToggleDiagnostics,
+                        selected = diagnosticsVisible,
+                        onFocused = { focusedControlLabel = it },
+                    )
                 }
             }
-            if (!isRecorded) {
-                Button(onClick = onToggleForceTcp) {
-                    Text(if (forceTcp) "RTP: TCP" else "RTP: Auto")
-                }
-            }
-            if (diagnosticsAvailable) {
-                Button(onClick = onToggleDiagnostics) {
-                    Text(if (diagnosticsVisible) "Hide info" else "Info")
-                }
-            }
+        }
+        Box(
+            modifier = Modifier.widthIn(min = 240.dp, max = 640.dp).height(18.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = focusedControlLabel,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CameraNeighborButton(
+    cameraName: String?,
+    previous: Boolean,
+    onClick: (() -> Unit)?,
+    onFocused: (String) -> Unit,
+) {
+    if (cameraName == null || onClick == null) return
+    val accessibilityLabel = cameraNeighborAccessibilityLabel(cameraName, previous)
+    FocusCard(
+        focusKey = "playback:${if (previous) "previous" else "next"}:$cameraName",
+        restoreFocusKey = null,
+        onFocusRestored = {},
+        onClick = onClick,
+        accessibilityLabel = accessibilityLabel,
+        onFocused = { onFocused(accessibilityLabel) },
+        containerColor = Color.White.copy(alpha = 0.10f),
+        modifier = Modifier.size(40.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            PlaybackChevron(if (previous) R.drawable.ic_chevron_left else R.drawable.ic_chevron_right)
+        }
+    }
+}
+
+internal fun cameraNeighborVisibleLabel(cameraName: String, previous: Boolean): String =
+    cameraName
+
+internal fun cameraNeighborAccessibilityLabel(cameraName: String, previous: Boolean): String =
+    if (previous) "Previous camera, $cameraName" else "Next camera, $cameraName"
+
+@Composable
+private fun PlaybackChevron(@DrawableRes iconRes: Int) {
+    Image(
+        painter = painterResource(iconRes),
+        contentDescription = null,
+        colorFilter = ColorFilter.tint(LocalContentColor.current),
+        modifier = Modifier.size(18.dp),
+    )
+}
+
+@Composable
+private fun PlaybackPlayButton(
+    @DrawableRes iconRes: Int,
+    label: String,
+    focusRequester: FocusRequester,
+    onFocused: (String) -> Unit,
+    onClick: () -> Unit,
+) {
+    CompactPlaybackAction(
+        iconRes = iconRes,
+        label = label,
+        onClick = onClick,
+        focusRequester = focusRequester,
+        onFocused = onFocused,
+        controlSize = 44.dp,
+        iconSize = 23.dp,
+    )
+}
+
+@Composable
+private fun CompactPlaybackAction(
+    @DrawableRes iconRes: Int,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    focusRequester: FocusRequester? = null,
+    iconSize: androidx.compose.ui.unit.Dp = 19.dp,
+    selected: Boolean = false,
+    onFocused: (String) -> Unit = {},
+    controlSize: androidx.compose.ui.unit.Dp = 40.dp,
+) {
+    FocusCard(
+        focusKey = "playback:quick:$label",
+        restoreFocusKey = null,
+        onFocusRestored = {},
+        onClick = onClick,
+        enabled = enabled,
+        selected = selected,
+        accessibilityLabel = label,
+        externalFocusRequester = focusRequester,
+        onFocused = { onFocused(label) },
+        containerColor = Color.White.copy(alpha = 0.10f),
+        modifier = modifier.size(controlSize),
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Image(
+                painter = painterResource(iconRes),
+                contentDescription = null,
+                colorFilter = ColorFilter.tint(LocalContentColor.current),
+                modifier = Modifier.size(iconSize),
+            )
         }
     }
 }
@@ -1205,6 +1625,7 @@ private fun RecordedTimeline(
     enabled: Boolean,
     onSeek: (Long) -> Unit,
     onTogglePlayback: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
     val positionFraction = timelineFraction(positionMs, durationMs)
@@ -1212,8 +1633,7 @@ private fun RecordedTimeline(
     val shape = RoundedCornerShape(10.dp)
     val accentColor = MaterialTheme.colorScheme.primary
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
+        modifier = modifier
             .onPreviewKeyEvent { event ->
                 if (!enabled || event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val deltaMs = when (event.key) {
@@ -1232,7 +1652,7 @@ private fun RecordedTimeline(
             .clearAndSetSemantics {
                 role = Role.Button
                 contentDescription = if (enabled) {
-                    "Playback timeline, ${formatPlaybackTime(positionMs)} of ${formatPlaybackTime(durationMs)}. Left and right seek five seconds."
+                    "Playback timeline, ${formatPlaybackTime(positionMs)} of ${formatPlaybackTime(durationMs)}. Left and right seek ten seconds."
                 } else {
                     "Playback timeline loading"
                 }
@@ -1253,7 +1673,7 @@ private fun RecordedTimeline(
                 shape = shape,
             )
             .padding(horizontal = 14.dp, vertical = 9.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1274,7 +1694,7 @@ private fun RecordedTimeline(
         Canvas(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(14.dp),
+                .height(10.dp),
         ) {
             val trackHeight = 5.dp.toPx()
             val trackTop = (size.height - trackHeight) / 2f
@@ -1339,26 +1759,6 @@ internal fun recordedPlaybackButtonLabel(playWhenReady: Boolean, ended: Boolean)
     ended -> "Replay"
     playWhenReady -> "Pause"
     else -> "Play"
-}
-
-@Composable
-private fun MediaControlButton(
-    @DrawableRes iconRes: Int,
-    label: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-) {
-    Button(onClick = onClick, enabled = enabled, modifier = modifier) {
-        Image(
-            painter = painterResource(iconRes),
-            contentDescription = null,
-            colorFilter = ColorFilter.tint(LocalContentColor.current),
-            modifier = Modifier.size(22.dp),
-        )
-        Spacer(Modifier.width(7.dp))
-        Text(label)
-    }
 }
 
 private fun selectedTrackDescription(tracks: Tracks, trackType: Int): String? {
@@ -1458,22 +1858,30 @@ internal const val MAX_LIVE_AUTOMATIC_RETRIES = 2
 private val LIVE_RETRY_DELAYS_MS = longArrayOf(1_000L, 3_000L)
 private const val PLAYBACK_CONTROLS_TIMEOUT_MS = 5_500L
 private const val PLAYBACK_PROGRESS_REFRESH_MS = 250L
-private const val TIMELINE_SEEK_STEP_MS = 5_000L
+private const val TIMELINE_SEEK_STEP_MS = 10_000L
+
+private val DECODER_PLAYBACK_ERROR_CODES = setOf(
+    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+    PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+    PlaybackException.ERROR_CODE_DECODING_FAILED,
+    PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+    PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_DECODING_RESOURCES_RECLAIMED,
+)
 
 internal fun safePlaybackError(error: PlaybackException, kind: PlaybackKind): String {
-    val source = if (kind == PlaybackKind.LIVE) "RTSP stream" else "Frigate recording"
-    val causeName = error.cause?.javaClass?.simpleName
     val httpStatus = error.httpStatusCode()
     if (kind == PlaybackKind.RECORDED && httpStatus == 404) {
-        return "No recording is available for this review window (HTTP 404). Try another review item or verify that Frigate recording retention covers this camera and time."
+        return "This recording is no longer available. Try another activity item."
     }
-    val guidance = safePlaybackGuidance(error.errorCode)
-    return buildString {
-        append("$source failed: ${error.errorCodeName}")
-        if (httpStatus != null) append(" (HTTP $httpStatus)")
-        if (!causeName.isNullOrBlank()) append(" ($causeName)")
-        append(". $guidance Connection details are intentionally omitted.")
+    if (error.errorCode in DECODER_PLAYBACK_ERROR_CODES) {
+        return if (kind == PlaybackKind.RECORDED) {
+            "This TV couldn't play this recording"
+        } else {
+            "This TV couldn't play this camera stream"
+        }
     }
+    return safePlaybackGuidance(error.errorCode)
 }
 
 internal fun safePlaybackGuidance(errorCode: Int): String = when (errorCode) {
@@ -1482,15 +1890,15 @@ internal fun safePlaybackGuidance(errorCode: Int): String = when (errorCode) {
         PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
-        -> "The source is unreachable or stopped responding. Check the camera, Frigate, and network, then retry."
+        -> "Video couldn't connect. Check the camera, your server, and network, then try again."
 
         PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
         PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
-        -> "The source returned malformed stream information. Check the camera or restream configuration."
+        -> "This video could not be read. Try a different video quality."
 
         PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
         PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
-        -> "This stream format is not supported by the player. Try another configured stream."
+        -> "This video format isn't supported. Try a different video quality."
 
         PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
         PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
@@ -1498,13 +1906,13 @@ internal fun safePlaybackGuidance(errorCode: Int): String = when (errorCode) {
         PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
         PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
         PlaybackException.ERROR_CODE_DECODING_RESOURCES_RECLAIMED,
-        -> "The TV could not decode this stream. Try a lower-bandwidth or differently encoded stream."
+        -> "This device couldn't play the video. Try a lower video quality."
 
         PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
         PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED,
         PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_INIT_FAILED,
         PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_WRITE_FAILED,
-        -> "Audio output failed. Retry with Video only to isolate the camera audio track."
+        -> "Audio could not start. Try Audio help from More."
 
-        else -> "Check reachability, stream codec, and Frigate permissions, then retry."
+        else -> "Video couldn't play. Try again or choose another camera."
 }

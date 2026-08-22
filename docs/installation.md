@@ -15,9 +15,12 @@ You need:
 
 ## Download the correct file
 
-1. Open the project's [GitHub Releases page](https://github.com/VibeCodingAntagonist/opah-frigate-tv-app/releases).
-2. Open the newest release.
-3. Under **Assets**, download the file named like `opah-v0.2.2.apk`.
+Use the [permanent latest Opah download](https://github.com/VibeCodingAntagonist/opah-frigate-tv-app/releases/latest/download/opah-latest.apk).
+This link always downloads `opah-latest.apk` from the newest published release.
+
+You can also open the project's [GitHub Releases page](https://github.com/VibeCodingAntagonist/opah-frigate-tv-app/releases),
+choose the newest release, and download the versioned file named like
+`opah-v0.3.0.apk`. Both APK names in that release contain the same app.
 
 Do not download Opah from an unofficial mirror or APK website.
 
@@ -48,9 +51,21 @@ successful sign-in, Opah can remember the connection and sign in automatically.
 
 ## Update Opah
 
-Download the newer Opah APK from this repository and open it on the TV. Android
-should offer to update the existing app. Your saved server and sign-in should
-remain in place.
+When Opah finds a newer release, a small dot appears inside the Settings gear.
+Open **Settings** > **Update** to:
+
+1. read what is new;
+2. choose **Download update**; and
+3. choose **Install now** after the download is checked.
+
+Android may ask you to let Opah open installation files. This permission lets
+Android show its normal installer; Opah still cannot install anything without
+your action.
+
+You can also download the newer APK from the Releases page above, send it to the
+TV, and open it yourself. Android should offer to update the existing app. Your
+saved server, sign-in, camera groups, and display choices should remain in
+place.
 
 ### One-time step when moving from 0.2.0 to 0.2.1
 
@@ -62,6 +77,9 @@ connection.
 If Android says the update is not compatible with the installed copy, stop and
 make sure both copies came from this official repository. Do not uninstall the
 working app unless you are prepared to enter your connection details again.
+
+Opah checks for updates through the official GitHub release page. It does not
+download or install an update automatically.
 
 ## Remove Opah
 
@@ -76,15 +94,15 @@ with the APK to confirm the download was not damaged or changed.
 On Windows PowerShell:
 
 ```powershell
-Get-FileHash .\opah-v0.2.2.apk -Algorithm SHA256
-Get-Content .\opah-v0.2.2.apk.sha256
+Get-FileHash .\opah-v0.3.0.apk -Algorithm SHA256
+Get-Content .\opah-v0.3.0.apk.sha256
 ```
 
 On macOS or Linux:
 
 ```bash
-sha256sum opah-v0.2.2.apk
-cat opah-v0.2.2.apk.sha256
+sha256sum opah-v0.3.0.apk
+cat opah-v0.3.0.apk.sha256
 ```
 
 The long strings of letters and numbers should match exactly.
@@ -95,7 +113,7 @@ ADB is an Android developer tool. You do not need it for a normal installation.
 If you already use ADB, connect to the intended TV and run:
 
 ```text
-adb install opah-v0.2.2.apk
+adb install opah-v0.3.0.apk
 ```
 
 Turn off wireless debugging when you finish.

@@ -6,10 +6,10 @@ plugins {
 
 val opahVersionCode = providers.gradleProperty("opah.versionCode")
     .map(String::toInt)
-    .orElse(2002)
+    .orElse(3008)
     .get()
 val opahVersionName = providers.gradleProperty("opah.versionName")
-    .orElse("0.2.2-dev")
+    .orElse("0.3.0-dev")
     .get()
 
 val releaseKeystoreFile = providers.environmentVariable("OPAH_RELEASE_KEYSTORE_FILE").orNull
@@ -82,10 +82,11 @@ android {
             )
         }
         create("documentation") {
-            initWith(getByName("debug"))
+            initWith(getByName("release"))
             applicationIdSuffix = ".docs"
             versionNameSuffix = "-documentation"
-            matchingFallbacks += "debug"
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
             buildConfigField("boolean", "DOCUMENTATION_MODE", "true")
         }
     }

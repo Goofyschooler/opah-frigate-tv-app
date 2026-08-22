@@ -45,6 +45,7 @@ class DeviceMediaCapabilityService {
             adaptivePlayback = capabilities?.isFeatureSupported(
                 MediaCodecInfo.CodecCapabilities.FEATURE_AdaptivePlayback,
             ) == true,
+            maxSupportedInstances = capabilities?.maxSupportedInstances,
         )
     }
 
@@ -57,4 +58,3 @@ class DeviceMediaCapabilityService {
         )
     }
 }
-

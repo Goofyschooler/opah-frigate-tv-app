@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -14,19 +15,19 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -49,12 +50,13 @@ import androidx.tv.material3.Text
 import app.opah.tv.data.model.Camera
 import app.opah.tv.data.model.ReviewItem
 import app.opah.tv.data.model.ReviewSeverity
+import app.opah.tv.data.model.SearchEvent
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
-private enum class ReviewPicker { CAMERA, LABEL, ZONE, TIME }
+private enum class ReviewPicker { CAMERA, LABEL, ZONE, TIME, REVIEW_STATUS }
 
 private data class ReviewPickerOption(
     val key: String,
@@ -67,16 +69,18 @@ internal fun ReviewScreen(
     restoreFocusKey: String?,
     onFocusRestored: () -> Unit,
     onLoad: () -> Unit,
-    onSeverity: (ReviewSeverity) -> Unit,
-    onCamera: (String?) -> Unit,
-    onLabel: (String?) -> Unit,
-    onZone: (String?) -> Unit,
-    onTimeRange: (ReviewTimeRange) -> Unit,
+    onLoadMore: () -> Unit,
+    onMarkAllShownReviewed: () -> Unit,
+    onPage: (ActivityPage) -> Unit,
+    onSeverity: (ReviewSeverity?) -> Unit,
+    onApplyFilters: (ReviewFilters) -> Unit,
     onResetFilters: () -> Unit,
     onSelectItem: (ReviewItem, String) -> Unit,
     onCloseItem: () -> Unit,
     onPlayItem: (ReviewItem) -> Unit,
-    onMarkReviewed: (ReviewItem) -> Unit,
+    onSetReviewed: (ReviewItem, Boolean) -> Unit,
+    onSaveClip: (ReviewItem) -> Unit,
+    onFindSimilar: (ReviewItem) -> Unit,
     cachedBitmap: (ReviewItem) -> Bitmap?,
     refreshBitmap: suspend (ReviewItem, Int) -> Bitmap?,
 ) {
@@ -84,10 +88,24 @@ internal fun ReviewScreen(
     val selected = review.selectedItemId?.let { selectedId ->
         review.items.firstOrNull { it.id == selectedId }
     }
-    var picker by rememberSaveable { mutableStateOf<ReviewPicker?>(null) }
+    var filtersVisible by rememberSaveable { mutableStateOf(false) }
+    var filtersFocusRestoreToken by rememberSaveable { mutableIntStateOf(0) }
+    val filtersFocusRequester = remember { FocusRequester() }
 
     LaunchedEffect(review.loadedOnce) {
         if (!review.loadedOnce && !review.loading) onLoad()
+    }
+    LaunchedEffect(filtersFocusRestoreToken) {
+        if (filtersFocusRestoreToken > 0) {
+            delay(100)
+            filtersFocusRequester.requestFocus()
+        }
+    }
+    LaunchedEffect(review.items.isEmpty(), restoreFocusKey) {
+        if (review.items.isEmpty() && restoreFocusKey != null) {
+            delay(100)
+            if (filtersFocusRequester.requestFocus()) onFocusRestored()
+        }
     }
 
     if (selected != null) {
@@ -97,8 +115,13 @@ internal fun ReviewScreen(
             errorMessage = review.detailErrorMessage,
             onBack = onCloseItem,
             onPlay = { onPlayItem(selected) },
-            onMarkReviewed = { onMarkReviewed(selected) },
+            onSetReviewed = { reviewed -> onSetReviewed(selected, reviewed) },
             markingReviewed = review.markingReviewedItemId == selected.id,
+            onSaveClip = { onSaveClip(selected) },
+            savingClip = review.savingClipItemId == selected.id,
+            savedClip = selected.id in review.savedClipItemIds,
+            savedClipMessage = review.savedClipMessage.takeIf { review.savedClipItemId == selected.id },
+            onFindSimilar = { onFindSimilar(selected) },
             cachedBitmap = { cachedBitmap(selected) },
             refreshBitmap = { refreshBitmap(selected, 720) },
         )
@@ -116,16 +139,27 @@ internal fun ReviewScreen(
                 verticalAlignment = Alignment.Bottom,
             ) {
                 Column {
-                    Text("Review", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                    Text("Activity", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "Frigate Alerts and Detections, designed for the television remote.",
+                        "Find alerts and other recorded activity",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (review.loading) {
-                    Text("Refreshing…", color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
+                Column(horizontalAlignment = Alignment.End) {
+                    if (review.counts.unreviewedTotal > 0) {
+                        Text(
+                            "${review.counts.unreviewedTotal} not reviewed",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    if (review.loading || review.countsLoading) {
+                        Text("Refreshing…", color = MaterialTheme.colorScheme.secondary)
+                    }
                 }
             }
+
+            ActivityNavigation(ActivityPage.RECENT, restoreFocusKey, onFocusRestored, onPage)
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -137,57 +171,46 @@ internal fun ReviewScreen(
                     onClick = { onSeverity(ReviewSeverity.ALERT) },
                 )
                 ReviewCategoryButton(
-                    label = "Detections",
-                    selected = review.filters.severity == ReviewSeverity.DETECTION,
-                    onClick = { onSeverity(ReviewSeverity.DETECTION) },
+                    label = "All activity",
+                    selected = review.filters.severity == null,
+                    onClick = { onSeverity(null) },
                 )
-                Spacer(Modifier.width(8.dp))
-                Button(
-                    onClick = { picker = ReviewPicker.CAMERA },
-                    modifier = Modifier.weight(1.1f),
-                ) {
-                    Text(
-                        "Camera: ${cameraLabel(review.filters.camera, state.snapshot?.cameras.orEmpty())}",
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                Spacer(Modifier.weight(1f))
+                if (review.items.any { !it.hasBeenReviewed }) {
+                    Button(
+                        onClick = onMarkAllShownReviewed,
+                        enabled = !review.markingAllReviewed,
+                    ) {
+                        Text(if (review.markingAllReviewed) "Saving…" else "Mark all shown reviewed")
+                    }
                 }
                 Button(
-                    onClick = { picker = ReviewPicker.LABEL },
-                    modifier = Modifier.weight(0.9f),
+                    onClick = {
+                        filtersVisible = true
+                    },
+                    modifier = Modifier.focusRequester(filtersFocusRequester),
                 ) {
-                    Text(
-                        "Label: ${friendlyName(review.filters.label) ?: "All"}",
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    val count = review.filters.activeDetailCount()
+                    Text(if (count == 0) "Filters" else "Filters ($count)")
                 }
-                Button(
-                    onClick = { picker = ReviewPicker.ZONE },
-                    modifier = Modifier.weight(1.1f),
-                ) {
-                    Text(
-                        "Zone: ${friendlyName(review.filters.zone) ?: "All"}",
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                if (review.filters.activeDetailCount() > 0) {
+                    Button(
+                        onClick = {
+                            onResetFilters()
+                            filtersFocusRestoreToken += 1
+                        },
+                    ) { Text("Clear") }
                 }
-                Button(
-                    onClick = { picker = ReviewPicker.TIME },
-                    modifier = Modifier.weight(1.1f),
-                ) {
-                    Text(
-                        "Time: ${review.filters.timeRange.displayName}",
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Button(
-                    onClick = onResetFilters,
-                    modifier = Modifier.weight(0.6f),
-                ) { Text("Reset", maxLines = 1) }
             }
-        }
+            Text(
+                review.filters.summary(state.snapshot?.cameras.orEmpty()),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 2.dp),
+            )
+            }
 
         review.errorMessage?.let { error ->
             Row(
@@ -205,7 +228,7 @@ internal fun ReviewScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("Loading Review activity…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Loading activity…", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             review.items.isEmpty() -> Box(
@@ -213,7 +236,7 @@ internal fun ReviewScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    "No ${review.filters.severity.displayName().lowercase()} match these filters.",
+                    review.filters.emptyMessage(),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -225,25 +248,25 @@ internal fun ReviewScreen(
                 onSelectItem = onSelectItem,
                 cachedBitmap = cachedBitmap,
                 refreshBitmap = refreshBitmap,
+                hasMore = review.hasMore,
+                loadingMore = review.loadingMore,
+                onLoadMore = onLoadMore,
             )
         }
     }
 
-    picker?.let { activePicker ->
-        val options = pickerOptions(activePicker, state)
-        ReviewPickerDialog(
-            title = activePicker.title(),
-            options = options,
-            selectedKey = selectedPickerKey(activePicker, review.filters),
-            onDismiss = { picker = null },
-            onSelected = { key ->
-                when (activePicker) {
-                    ReviewPicker.CAMERA -> onCamera(key.takeUnless { it == ALL_FILTER_KEY })
-                    ReviewPicker.LABEL -> onLabel(key.takeUnless { it == ALL_FILTER_KEY })
-                    ReviewPicker.ZONE -> onZone(key.takeUnless { it == ALL_FILTER_KEY })
-                    ReviewPicker.TIME -> onTimeRange(ReviewTimeRange.valueOf(key))
-                }
-                picker = null
+    if (filtersVisible) {
+        ReviewFiltersDialog(
+            filters = review.filters,
+            state = state,
+            onDismiss = {
+                filtersVisible = false
+                filtersFocusRestoreToken += 1
+            },
+            onApply = { filters ->
+                filtersVisible = false
+                filtersFocusRestoreToken += 1
+                onApplyFilters(filters)
             },
         )
     }
@@ -261,7 +284,7 @@ private fun ReviewCategoryButton(
         onFocusRestored = {},
         onClick = onClick,
         selected = selected,
-        accessibilityLabel = "$label Review category",
+        accessibilityLabel = "$label category",
     ) {
         Text(
             text = label,
@@ -280,29 +303,36 @@ private fun ReviewGrid(
     onSelectItem: (ReviewItem, String) -> Unit,
     cachedBitmap: (ReviewItem) -> Bitmap?,
     refreshBitmap: suspend (ReviewItem, Int) -> Bitmap?,
+    hasMore: Boolean,
+    loadingMore: Boolean,
+    onLoadMore: () -> Unit,
 ) {
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(3),
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 18.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
+    val effectiveRestoreFocusKey = restoreFocusKey?.let { requested ->
+        requested.takeIf { key -> items.any { "review:item:${it.id}" == key } }
+            ?: items.firstOrNull()?.let { "review:item:${it.id}" }
+    }
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val cardWidth = ((maxWidth - 76.dp) / 3).coerceIn(280.dp, 360.dp)
+        LazyRow(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
         items(items, key = ReviewItem::id) { item ->
             val focusKey = "review:item:${item.id}"
             FocusCard(
                 focusKey = focusKey,
-                restoreFocusKey = restoreFocusKey,
+                restoreFocusKey = effectiveRestoreFocusKey,
                 onFocusRestored = onFocusRestored,
                 onClick = { onSelectItem(item, focusKey) },
                 accessibilityLabel = reviewAccessibilityLabel(item),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.width(cardWidth),
             ) {
                 Column {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .aspectRatio(16f / 9f),
+                            .height(120.dp),
                     ) {
                         ReviewThumbnail(
                             item = item,
@@ -334,15 +364,20 @@ private fun ReviewGrid(
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
                             Text(
-                                item.objects.firstOrNull()?.let(::friendlyName) ?: item.severity.displayName(),
+                                item.summary?.title
+                                    ?: item.objects.firstOrNull()?.let(::friendlyName)
+                                    ?: item.severity.displayName(),
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
                             )
                             Text(
                                 formatReviewDateTime(item.startTime),
                                 color = MaterialTheme.colorScheme.secondary,
                                 style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                modifier = Modifier.padding(start = 10.dp),
                             )
                         }
                         Text(
@@ -351,7 +386,7 @@ private fun ReviewGrid(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        val detail = (item.objects.drop(1) + item.zones).distinct()
+                        val detail = (item.objects.drop(1) + item.audio + item.zones).distinct()
                             .joinToString(" • ") { friendlyName(it).orEmpty() }
                         Text(
                             text = detail.ifBlank { reviewDuration(item) },
@@ -360,6 +395,21 @@ private fun ReviewGrid(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                    }
+                }
+            }
+        }
+            if (hasMore || loadingMore) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .width(240.dp)
+                            .fillMaxHeight(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Button(onClick = onLoadMore, enabled = !loadingMore) {
+                            Text(if (loadingMore) "Loading…" else "More activity")
+                        }
                     }
                 }
             }
@@ -374,18 +424,47 @@ private fun ReviewDetail(
     errorMessage: String?,
     onBack: () -> Unit,
     onPlay: () -> Unit,
-    onMarkReviewed: () -> Unit,
+    onSetReviewed: (Boolean) -> Unit,
     markingReviewed: Boolean,
+    onSaveClip: () -> Unit,
+    savingClip: Boolean,
+    savedClip: Boolean,
+    savedClipMessage: String?,
+    onFindSimilar: () -> Unit,
     cachedBitmap: () -> Bitmap?,
     refreshBitmap: suspend () -> Bitmap?,
 ) {
     val initialFocusRequester = remember(item.id) { FocusRequester() }
     val playFocusRequester = remember(item.id) { FocusRequester() }
     val markReviewedFocusRequester = remember(item.id) { FocusRequester() }
+    val facts = buildList {
+        add("Camera" to friendlyName(item.camera).orEmpty())
+        add("Duration" to reviewDuration(item))
+        add("Objects" to item.objects.joinFriendly())
+        if (item.audio.isNotEmpty()) add("Sounds" to item.audio.joinFriendly())
+        add("Areas" to item.zones.joinFriendly())
+        val recognized = (item.subLabels + item.linkedEvents.mapNotNull { it.subLabel }).distinct()
+        if (recognized.isNotEmpty()) add("Recognized" to recognized.joinFriendly())
+        item.linkedEvents.mapNotNull { it.recognizedLicensePlate }.distinct().takeIf { it.isNotEmpty() }
+            ?.let { add("License plate" to it.joinToString(", ")) }
+        item.summary?.shortSummary?.let { add("Summary" to it) }
+        if (item.summary?.shortSummary == null) {
+            item.linkedEvents.firstNotNullOfOrNull(SearchEvent::description)
+                ?.let { add("What happened" to it) }
+        }
+        item.summary?.scene?.takeIf { it != item.summary.shortSummary }
+            ?.let { add("What happened" to it) }
+        item.linkedEvents.flatMap(SearchEvent::attributes).distinct().takeIf { it.isNotEmpty() }
+            ?.let { add("Details" to it.joinFriendly()) }
+        item.summary?.potentialThreatLevel?.let { add("Attention" to threatLevelLabel(it)) }
+        if (item.summary?.otherConcerns?.isNotEmpty() == true) {
+            add("Also noticed" to item.summary.otherConcerns.joinFriendly())
+        }
+        add("Video" to recordingState.recordingLabel())
+    }
     LaunchedEffect(item.id, item.hasBeenReviewed) {
         // Returning from full-screen Media3 playback recreates the connected shell.
-        // A completed Review action also removes its button. Give the shell one
-        // layout pass before taking focus back from the navigation rail.
+        // Give the shell one layout pass before taking focus back from the navigation rail.
         delay(100)
         initialFocusRequester.requestFocus()
     }
@@ -401,7 +480,11 @@ private fun ReviewDetail(
             verticalAlignment = Alignment.Bottom,
         ) {
             Column {
-                Text("Review details", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    item.summary?.title ?: "Activity details",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                )
                 Text(
                     "${item.severity.displayName()} • ${formatReviewDateTime(item.startTime)}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -429,15 +512,11 @@ private fun ReviewDetail(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight(),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                ReviewDetailLine("Camera", friendlyName(item.camera).orEmpty())
-                ReviewDetailLine("Started", formatReviewDateTime(item.startTime))
-                ReviewDetailLine("Duration", reviewDuration(item))
-                ReviewDetailLine("Labels", item.objects.joinFriendly())
-                ReviewDetailLine("Zones", item.zones.joinFriendly())
-                ReviewDetailLine("Recording", recordingState.recordingLabel())
+                ReviewDetailFacts(facts)
                 errorMessage?.let { ScreenMessage(it, isError = true) }
+                savedClipMessage?.let { ScreenMessage(it, isError = false) }
                 Spacer(Modifier.weight(1f))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(
@@ -446,9 +525,9 @@ private fun ReviewDetail(
                             .focusRequester(initialFocusRequester)
                             .focusProperties {
                                 right = playFocusRequester
-                                if (!item.hasBeenReviewed) down = markReviewedFocusRequester
+                                down = markReviewedFocusRequester
                             },
-                    ) { Text("Back to Review") }
+                    ) { Text("Back to Activity") }
                     Button(
                         onClick = onPlay,
                         enabled = recordingState == ReviewRecordingState.AVAILABLE,
@@ -456,23 +535,45 @@ private fun ReviewDetail(
                             .focusRequester(playFocusRequester)
                             .focusProperties {
                                 left = initialFocusRequester
-                                if (!item.hasBeenReviewed) down = markReviewedFocusRequester
+                                down = markReviewedFocusRequester
                             },
                     ) {
                         Text(if (recordingState == ReviewRecordingState.CHECKING) "Checking…" else "Play recording")
                     }
                 }
-                if (!item.hasBeenReviewed) {
-                    Button(
-                        onClick = onMarkReviewed,
-                        enabled = !markingReviewed,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(markReviewedFocusRequester)
-                            .focusProperties { up = initialFocusRequester },
-                    ) {
-                        Text(if (markingReviewed) "Saving…" else "Mark as reviewed")
+                Button(
+                    onClick = { onSetReviewed(!item.hasBeenReviewed) },
+                    enabled = !markingReviewed,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(markReviewedFocusRequester)
+                        .focusProperties { up = initialFocusRequester },
+                ) {
+                    Text(
+                        when {
+                            markingReviewed -> "Saving…"
+                            item.hasBeenReviewed -> "Mark not reviewed"
+                            else -> "Mark reviewed"
+                        },
+                    )
+                }
+                if (item.linkedEvents.isNotEmpty()) {
+                    Button(onClick = onFindSimilar, modifier = Modifier.fillMaxWidth()) {
+                        Text("Find similar activity")
                     }
+                }
+                Button(
+                    onClick = onSaveClip,
+                    enabled = recordingState == ReviewRecordingState.AVAILABLE && !savingClip && !savedClip,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        when {
+                            savingClip -> "Saving recording…"
+                            savedClip -> "Recording saved"
+                            else -> "Save recording"
+                        },
+                    )
                 }
             }
         }
@@ -480,10 +581,34 @@ private fun ReviewDetail(
 }
 
 @Composable
-private fun ReviewDetailLine(label: String, value: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-        Text(value, fontWeight = FontWeight.SemiBold)
+private fun ReviewDetailFacts(facts: List<Pair<String, String>>) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        facts.chunked(2).forEach { rowFacts ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                rowFacts.forEach { (label, value) ->
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            label,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            value,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                if (rowFacts.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
     }
 }
 
@@ -525,42 +650,114 @@ internal fun ReviewThumbnail(
 }
 
 @Composable
-private fun ReviewPickerDialog(
-    title: String,
-    options: List<ReviewPickerOption>,
-    selectedKey: String,
+private fun ReviewFiltersDialog(
+    filters: ReviewFilters,
+    state: Phase0UiState,
     onDismiss: () -> Unit,
-    onSelected: (String) -> Unit,
+    onApply: (ReviewFilters) -> Unit,
 ) {
-    Dialog(onDismissRequest = onDismiss) {
-        val initialFocusKey = "review:picker:${selectedKey.takeIf { selected -> options.any { it.key == selected } }
-            ?: options.firstOrNull()?.key.orEmpty()}"
+    var draft by remember(filters) { mutableStateOf(filters) }
+    var picker by rememberSaveable { mutableStateOf<ReviewPicker?>(null) }
+    var returnFocusPicker by rememberSaveable { mutableStateOf<ReviewPicker?>(null) }
+    Dialog(
+        onDismissRequest = {
+            if (picker != null) {
+                returnFocusPicker = picker
+                picker = null
+            } else {
+                onDismiss()
+            }
+        },
+    ) {
         Column(
             modifier = Modifier
-                .widthIn(min = 460.dp, max = 620.dp)
-                .heightIn(max = 720.dp)
+                .widthIn(min = 540.dp, max = 680.dp)
+                .heightIn(max = 700.dp)
                 .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(14.dp))
                 .border(1.dp, MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(options, key = ReviewPickerOption::key) { option ->
-                    FocusCard(
-                        focusKey = "review:picker:${option.key}",
-                        restoreFocusKey = initialFocusKey,
-                        onFocusRestored = {},
-                        onClick = { onSelected(option.key) },
-                        selected = option.key == selectedKey,
-                        accessibilityLabel = option.label,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            option.label,
-                            fontWeight = if (option.key == selectedKey) FontWeight.Bold else FontWeight.Normal,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
-                        )
+            val activePicker = picker
+            if (activePicker == null) {
+                Text("Filters", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Narrow the activity shown", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ReviewFilterRow(
+                        picker = ReviewPicker.CAMERA,
+                        label = "Camera",
+                        value = cameraLabel(draft.camera, state.snapshot?.cameras.orEmpty()),
+                        restoreFocusPicker = returnFocusPicker ?: ReviewPicker.CAMERA,
+                        onClick = { picker = ReviewPicker.CAMERA },
+                    )
+                    ReviewFilterRow(
+                        picker = ReviewPicker.LABEL,
+                        label = "Object",
+                        value = friendlyName(draft.label) ?: "All",
+                        restoreFocusPicker = returnFocusPicker,
+                        onClick = { picker = ReviewPicker.LABEL },
+                    )
+                    ReviewFilterRow(
+                        picker = ReviewPicker.ZONE,
+                        label = "Area",
+                        value = friendlyName(draft.zone) ?: "All",
+                        restoreFocusPicker = returnFocusPicker,
+                        onClick = { picker = ReviewPicker.ZONE },
+                    )
+                    ReviewFilterRow(
+                        picker = ReviewPicker.TIME,
+                        label = "Time",
+                        value = draft.timeRange.displayName,
+                        restoreFocusPicker = returnFocusPicker,
+                        onClick = { picker = ReviewPicker.TIME },
+                    )
+                    ReviewFilterRow(
+                        picker = ReviewPicker.REVIEW_STATUS,
+                        label = "Review status",
+                        value = draft.reviewStatus.displayName,
+                        restoreFocusPicker = returnFocusPicker,
+                        onClick = { picker = ReviewPicker.REVIEW_STATUS },
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                ) {
+                    Button(onClick = { draft = draft.clearDetails() }) { Text("Clear") }
+                    Button(onClick = onDismiss) { Text("Cancel") }
+                    Button(onClick = { onApply(draft) }) { Text("Apply") }
+                }
+            } else {
+                val options = pickerOptions(activePicker, state)
+                val selectedKey = selectedPickerKey(activePicker, draft)
+                val initialFocusKey = "review:picker:${selectedKey.takeIf { selected ->
+                    options.any { it.key == selected }
+                } ?: options.firstOrNull()?.key.orEmpty()}"
+                Text(activePicker.title(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 590.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(options, key = ReviewPickerOption::key) { option ->
+                        FocusCard(
+                            focusKey = "review:picker:${option.key}",
+                            restoreFocusKey = initialFocusKey,
+                            onFocusRestored = {},
+                            onClick = {
+                                draft = draft.withPickerSelection(activePicker, option.key)
+                                returnFocusPicker = activePicker
+                                picker = null
+                            },
+                            selected = option.key == selectedKey,
+                            accessibilityLabel = option.label,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                option.label,
+                                fontWeight = if (option.key == selectedKey) FontWeight.Bold else FontWeight.Normal,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -568,14 +765,43 @@ private fun ReviewPickerDialog(
     }
 }
 
+@Composable
+private fun ReviewFilterRow(
+    picker: ReviewPicker,
+    label: String,
+    value: String,
+    restoreFocusPicker: ReviewPicker?,
+    onClick: () -> Unit,
+) {
+    FocusCard(
+        focusKey = "review:filter:${picker.name}",
+        restoreFocusKey = restoreFocusPicker?.let { "review:filter:${it.name}" },
+        onFocusRestored = {},
+        onClick = onClick,
+        accessibilityLabel = "$label, $value",
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 11.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(value, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
 private fun pickerOptions(picker: ReviewPicker, state: Phase0UiState): List<ReviewPickerOption> = when (picker) {
     ReviewPicker.CAMERA -> listOf(ReviewPickerOption(ALL_FILTER_KEY, "All cameras")) +
         state.snapshot?.cameras.orEmpty().map { ReviewPickerOption(it.name, it.displayName) }
-    ReviewPicker.LABEL -> listOf(ReviewPickerOption(ALL_FILTER_KEY, "All labels")) +
+    ReviewPicker.LABEL -> listOf(ReviewPickerOption(ALL_FILTER_KEY, "All objects")) +
         state.review.knownLabels.sorted().map { ReviewPickerOption(it, friendlyName(it).orEmpty()) }
-    ReviewPicker.ZONE -> listOf(ReviewPickerOption(ALL_FILTER_KEY, "All zones")) +
+    ReviewPicker.ZONE -> listOf(ReviewPickerOption(ALL_FILTER_KEY, "All areas")) +
         state.review.knownZones.sorted().map { ReviewPickerOption(it, friendlyName(it).orEmpty()) }
     ReviewPicker.TIME -> ReviewTimeRange.entries.map { ReviewPickerOption(it.name, it.displayName) }
+    ReviewPicker.REVIEW_STATUS -> ReviewStatusFilter.entries.map { ReviewPickerOption(it.name, it.displayName) }
 }
 
 private fun selectedPickerKey(picker: ReviewPicker, filters: ReviewFilters): String = when (picker) {
@@ -583,26 +809,43 @@ private fun selectedPickerKey(picker: ReviewPicker, filters: ReviewFilters): Str
     ReviewPicker.LABEL -> filters.label ?: ALL_FILTER_KEY
     ReviewPicker.ZONE -> filters.zone ?: ALL_FILTER_KEY
     ReviewPicker.TIME -> filters.timeRange.name
+    ReviewPicker.REVIEW_STATUS -> filters.reviewStatus.name
+}
+
+private fun ReviewFilters.withPickerSelection(picker: ReviewPicker, key: String): ReviewFilters = when (picker) {
+    ReviewPicker.CAMERA -> copy(camera = key.takeUnless { it == ALL_FILTER_KEY })
+    ReviewPicker.LABEL -> copy(label = key.takeUnless { it == ALL_FILTER_KEY })
+    ReviewPicker.ZONE -> copy(zone = key.takeUnless { it == ALL_FILTER_KEY })
+    ReviewPicker.TIME -> copy(timeRange = ReviewTimeRange.valueOf(key))
+    ReviewPicker.REVIEW_STATUS -> copy(reviewStatus = ReviewStatusFilter.valueOf(key))
 }
 
 private fun ReviewPicker.title(): String = when (this) {
     ReviewPicker.CAMERA -> "Choose camera"
-    ReviewPicker.LABEL -> "Choose label"
-    ReviewPicker.ZONE -> "Choose zone"
+    ReviewPicker.LABEL -> "Choose object"
+    ReviewPicker.ZONE -> "Choose area"
     ReviewPicker.TIME -> "Choose recent period"
+    ReviewPicker.REVIEW_STATUS -> "Choose review status"
 }
 
 private fun ReviewSeverity.displayName(): String = when (this) {
-    ReviewSeverity.ALERT -> "Alerts"
-    ReviewSeverity.DETECTION -> "Detections"
+    ReviewSeverity.ALERT -> "Alert"
+    ReviewSeverity.DETECTION -> "Activity"
     ReviewSeverity.UNKNOWN -> "Activity"
+}
+
+private fun threatLevelLabel(level: Int): String = when (level) {
+    0 -> "Nothing concerning noted"
+    1 -> "Worth a closer look"
+    2 -> "Needs attention"
+    else -> "Review recommended"
 }
 
 private fun ReviewRecordingState.recordingLabel(): String = when (this) {
     ReviewRecordingState.IDLE -> "Not checked"
-    ReviewRecordingState.CHECKING -> "Checking retained footage…"
+    ReviewRecordingState.CHECKING -> "Checking saved video…"
     ReviewRecordingState.AVAILABLE -> "Available"
-    ReviewRecordingState.UNAVAILABLE -> "No longer retained"
+    ReviewRecordingState.UNAVAILABLE -> "No longer available"
     ReviewRecordingState.UNKNOWN -> "Could not confirm"
 }
 
@@ -618,6 +861,24 @@ private fun reviewAccessibilityLabel(item: ReviewItem): String = buildString {
 private fun cameraLabel(camera: String?, cameras: List<Camera>): String =
     camera?.let { selected -> cameras.firstOrNull { it.name == selected }?.displayName ?: friendlyName(selected) }
         ?: "All"
+
+private fun ReviewFilters.summary(cameras: List<Camera>): String = buildList {
+    add(if (severity == ReviewSeverity.ALERT) "Alerts" else "All activity")
+    camera?.let { add(cameraLabel(it, cameras)) }
+    label?.let { friendlyName(it)?.let(::add) }
+    zone?.let { friendlyName(it)?.let(::add) }
+    add(timeRange.displayName)
+    if (reviewStatus != ReviewStatusFilter.ALL) add(reviewStatus.displayName)
+}.joinToString(" • ")
+
+private fun ReviewFilters.emptyMessage(): String {
+    val category = if (severity == ReviewSeverity.ALERT) "alerts" else "activity"
+    return if (activeDetailCount() == 0) {
+        "No $category in the last 24 hours"
+    } else {
+        "No $category matches these filters"
+    }
+}
 
 private fun formatReviewDateTime(epochSeconds: Double): String =
     DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date((epochSeconds * 1000).toLong()))

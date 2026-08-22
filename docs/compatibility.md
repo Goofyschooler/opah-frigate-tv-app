@@ -15,8 +15,13 @@ try when a camera does not play.
 | H.264 camera video | Tested |
 | H.265 camera video | Tested on a TV that supports H.265 |
 | Birdseye | Tested |
-| Review recordings | Browsing, filtering, reviewed status, seeking, and playback tested |
-| Picture-in-picture | Tested on the main device; support varies by TV |
+| Activity recordings | Browsing, filtering, reviewed status, seeking, saving, and playback tested |
+| Saved recordings | Preview pictures, details, playback, and administrator deletion tested |
+| Activity search | Available on Frigate 0.17.2 and 0.18 when search is turned on in Frigate |
+| Activity summaries | Shown when Frigate has created a summary for that activity |
+| Camera groups | Two and four cameras tested on the main device; results depend on the TV's video hardware |
+| Picture-in-picture | Requires Android TV 14 or newer and support from the TV |
+| Camera controls | Built for compatible Frigate PTZ cameras; physical-camera testing is still needed |
 
 Newer Frigate releases may work before they are listed here, but they have not
 completed the same checks yet. Future Opah updates will aim to support new
@@ -35,7 +40,7 @@ Codec.
 
 If a camera stays on **Preparing** or does not start:
 
-1. Turn on **Force RTP over TCP** in Opah's playback options.
+1. Turn on **Compatibility mode** under **Settings** > **Playback**.
 2. Try the camera's lower-resolution stream.
 3. Turn off Smart Codec, H.264+, or H.265+ in the camera settings.
 4. Make sure the camera creates a full video frame regularly. Camera interfaces
@@ -49,6 +54,35 @@ audio back to a camera or doorbell.
 
 Pausing a live camera freezes the current picture. Opah does not record a
 temporary copy of live video, so live rewind is not available.
+
+The screen-size control can fit the whole camera picture inside the television
+or fill the screen. The fill choice is saved separately for each camera.
+
+## Activity search
+
+Search appears only when Frigate reports that the feature is available. Search
+must also be turned on and ready in Frigate. A short description such as
+`red car` usually works better than a long sentence.
+
+**Find similar activity** uses the same Frigate search feature. If Search is
+unavailable, check the Frigate search setup before changing anything in Opah.
+
+## Camera groups and controls
+
+Camera groups use muted video and choose lower-bandwidth streams when they are
+available. Two cameras may also use picture-in-picture on a supported Android
+TV 14 device. If a group struggles to play, try fewer cameras or lower camera
+resolutions.
+
+Camera movement, zoom, focus, and saved positions appear only when both Frigate
+and the camera report support. These controls have not yet been tested with a
+physical PTZ camera, so support may vary.
+
+## Saved recordings
+
+Saved recordings stay on the Frigate server. If a saved recording does not
+play, first confirm that the same saved recording opens in Frigate. Deleting a
+saved recording requires a Frigate administrator account and cannot be undone.
 
 ## Network setup
 
@@ -72,7 +106,7 @@ Please include:
 - the exact Frigate version;
 - the TV brand/model and Android version;
 - the camera video format and resolution; and
-- whether **Force RTP over TCP** or the lower-resolution stream works.
+- whether **Compatibility mode** or the lower-resolution stream works.
 
 Do not post your password, server address, camera names or images, Frigate
 configuration, or unedited logs. See [Contributing to Opah](../CONTRIBUTING.md)

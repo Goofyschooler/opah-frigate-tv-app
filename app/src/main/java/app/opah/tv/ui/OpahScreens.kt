@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -31,10 +32,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -45,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -56,11 +54,19 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -68,6 +74,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -78,23 +85,32 @@ import app.opah.tv.BuildConfig
 import app.opah.tv.R
 import app.opah.tv.data.model.AppearanceMode
 import app.opah.tv.data.model.Camera
+import app.opah.tv.data.model.CameraGroup
+import app.opah.tv.data.model.CameraPtzInfo
 import app.opah.tv.data.model.CameraStorageUsage
 import app.opah.tv.data.model.CustomThemeColors
+import app.opah.tv.data.model.FrigateCapabilityEvidence
+import app.opah.tv.data.model.FrigateFeature
 import app.opah.tv.data.model.FrigatePerformanceSummary
-import app.opah.tv.data.model.HslColor
-import app.opah.tv.data.model.LiveStreamOption
+import app.opah.tv.data.network.PtzCommand
+import app.opah.tv.data.network.PtzConnectionStatus
 import app.opah.tv.data.model.ReviewItem
 import app.opah.tv.data.model.ReviewSeverity
 import app.opah.tv.data.model.RecordingStorageSummary
+import app.opah.tv.data.model.RecordingExport
+import app.opah.tv.data.model.SavedCameraView
 import app.opah.tv.data.model.StreamPreference
 import app.opah.tv.data.model.ThemeColorPolicy
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
 
-private enum class InformationTab { PERFORMANCE, STORAGE }
-
+private enum class InformationTab(val label: String) {
+    PERFORMANCE("Performance"),
+    STORAGE("Storage"),
+}
 private const val SETUP_ADDRESS_INPUT = "setup:address"
 private const val SETUP_USERNAME_INPUT = "setup:username"
 private const val SETUP_PASSWORD_INPUT = "setup:password"
@@ -102,6 +118,9 @@ private const val SETUP_RTSP_HOST_INPUT = "setup:rtsp-host"
 private const val SETUP_RTSP_PORT_INPUT = "setup:rtsp-port"
 private const val SETTINGS_RTSP_HOST_INPUT = "settings:rtsp-host"
 private const val SETTINGS_RTSP_PORT_INPUT = "settings:rtsp-port"
+private const val MIN_CAMERA_GROUP_SIZE = 2
+private const val MAX_CAMERA_GROUP_SIZE = 4
+private val CAMERA_GROUP_CARD_WIDTH = 230.dp
 
 internal const val OPAH_REPOSITORY_URL = "https://github.com/VibeCodingAntagonist/opah-frigate-tv-app"
 internal const val OPAH_INDEPENDENCE_NOTICE =
@@ -490,6 +509,7 @@ internal fun HomeScreen(
     state: Phase0UiState,
     restoreFocusKey: String?,
     onFocusRestored: () -> Unit,
+    onFocusKeyChanged: (String) -> Unit,
     initialCameraFocusRequester: FocusRequester,
     onOpenCameras: () -> Unit,
     onOpenReview: () -> Unit,
@@ -501,8 +521,13 @@ internal fun HomeScreen(
     refreshReviewBitmap: suspend (ReviewItem, Int) -> Bitmap?,
 ) {
     val snapshot = state.snapshot ?: return
-    val alerts = snapshot.recentReviewItems.filter { it.severity == ReviewSeverity.ALERT }.take(8)
-    val detections = snapshot.recentReviewItems.filter { it.severity == ReviewSeverity.DETECTION }.take(8)
+    val cameras = snapshot.cameras.take(HOME_ROW_ITEM_LIMIT)
+    val alerts = snapshot.recentReviewItems
+        .filter { it.severity == ReviewSeverity.ALERT }
+        .take(HOME_ROW_ITEM_LIMIT)
+    val detections = snapshot.recentReviewItems
+        .filter { it.severity == ReviewSeverity.DETECTION }
+        .take(HOME_ROW_ITEM_LIMIT)
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 24.dp, vertical = 18.dp),
@@ -526,7 +551,16 @@ internal fun HomeScreen(
         }
         item {
             SectionHeader("Cameras", "Current images — select a camera to watch") {
-                Button(onClick = onOpenCameras) { Text("View all") }
+                FocusCard(
+                    focusKey = "home:open-cameras",
+                    restoreFocusKey = restoreFocusKey,
+                    onFocusRestored = onFocusRestored,
+                    onClick = onOpenCameras,
+                    onFocused = onFocusKeyChanged,
+                    accessibilityLabel = "View all cameras",
+                ) {
+                    Text("View all", modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
+                }
             }
         }
         item {
@@ -536,7 +570,7 @@ internal fun HomeScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(18.dp),
                 ) {
-                    itemsIndexed(snapshot.cameras, key = { _, camera -> camera.name }) { index, camera ->
+                    itemsIndexed(cameras, key = { _, camera -> camera.name }) { index, camera ->
                         val focusKey = "home:camera:${camera.name}"
                         CameraCard(
                             camera = camera,
@@ -548,8 +582,9 @@ internal fun HomeScreen(
                             refreshBitmap = refreshBitmap,
                             initialRefreshDelayMillis = index * CAMERA_REFRESH_STAGGER_MS,
                             externalFocusRequester = initialCameraFocusRequester.takeIf {
-                                camera == snapshot.cameras.firstOrNull()
+                                camera == cameras.firstOrNull()
                             },
+                            onFocused = onFocusKeyChanged,
                             modifier = Modifier.width(cardWidth),
                         )
                     }
@@ -558,8 +593,17 @@ internal fun HomeScreen(
         }
         if (alerts.isNotEmpty()) {
             item {
-                SectionHeader("Recent alerts", "Recording-backed activity from Frigate") {
-                    Button(onClick = onOpenReview) { Text("Open Review") }
+                SectionHeader("Recent alerts", "Important activity saved by your system") {
+                    FocusCard(
+                        focusKey = "home:open-alerts",
+                        restoreFocusKey = restoreFocusKey,
+                        onFocusRestored = onFocusRestored,
+                        onClick = onOpenReview,
+                        onFocused = onFocusKeyChanged,
+                        accessibilityLabel = "Open activity",
+                    ) {
+                        Text("Open Activity", modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
+                    }
                 }
             }
             item {
@@ -568,6 +612,7 @@ internal fun HomeScreen(
                     items = alerts,
                     restoreFocusKey = restoreFocusKey,
                     onFocusRestored = onFocusRestored,
+                    onFocused = onFocusKeyChanged,
                     onPlay = onPlayReview,
                     cachedBitmap = cachedReviewBitmap,
                     refreshBitmap = refreshReviewBitmap,
@@ -576,8 +621,17 @@ internal fun HomeScreen(
         }
         if (detections.isNotEmpty()) {
             item {
-                SectionHeader("Recent detections", "Other detected activity") {
-                    Button(onClick = onOpenReview) { Text("Open Review") }
+                SectionHeader("Recent activity", "Other activity saved by your system") {
+                    FocusCard(
+                        focusKey = "home:open-activity",
+                        restoreFocusKey = restoreFocusKey,
+                        onFocusRestored = onFocusRestored,
+                        onClick = onOpenReview,
+                        onFocused = onFocusKeyChanged,
+                        accessibilityLabel = "Open activity",
+                    ) {
+                        Text("Open Activity", modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
+                    }
                 }
             }
             item {
@@ -586,17 +640,21 @@ internal fun HomeScreen(
                     items = detections,
                     restoreFocusKey = restoreFocusKey,
                     onFocusRestored = onFocusRestored,
+                    onFocused = onFocusKeyChanged,
                     onPlay = onPlayReview,
                     cachedBitmap = cachedReviewBitmap,
                     refreshBitmap = refreshReviewBitmap,
                 )
             }
         }
-        if (alerts.isEmpty() && detections.isEmpty()) {
-            item { ScreenMessage("No recent alerts or detections were returned by Frigate.", isError = false) }
+        if (shouldShowHomeRecentActivityEmptyState(state.recentActivityLoaded, alerts.size + detections.size)) {
+            item { ScreenMessage("No recent activity yet", isError = false) }
         }
     }
 }
+
+internal fun shouldShowHomeRecentActivityEmptyState(loaded: Boolean, itemCount: Int): Boolean =
+    loaded && itemCount == 0
 
 @Composable
 internal fun CamerasScreen(
@@ -604,29 +662,413 @@ internal fun CamerasScreen(
     restoreFocusKey: String?,
     onFocusRestored: () -> Unit,
     onPlayCamera: (Camera, String) -> Unit,
-    onPlayStream: (Camera, LiveStreamOption, String) -> Unit,
+    onOpenControls: (Camera) -> Unit,
+    onRetryControls: () -> Unit,
+    onCloseControls: () -> Unit,
+    onPtzCommand: (PtzCommand) -> Unit,
+    onOpenCameraGroup: (String, List<String>, String) -> Unit,
+    onSaveCameraView: (String, List<String>) -> Unit,
+    onDeleteCameraView: (String) -> Unit,
     cachedBitmap: (String) -> Bitmap?,
     refreshBitmap: suspend (String, Int) -> Bitmap?,
 ) {
     val snapshot = state.snapshot ?: return
     val cameras = snapshot.cameras
+    var chooser by remember { mutableStateOf<CameraGroupChoice?>(null) }
+    var saveSelection by remember { mutableStateOf<List<String>?>(null) }
+    var deleteView by remember { mutableStateOf<SavedCameraView?>(null) }
     Column(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.padding(start = 24.dp, top = 18.dp, end = 24.dp, bottom = 12.dp)) {
-            Text("Cameras", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 24.dp, top = 18.dp, end = 24.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column {
+                Text("Cameras", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    text = "Watch one camera or several together",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (cameras.size >= MIN_CAMERA_GROUP_SIZE) {
             Text(
-                text = "Select a camera for your default stream, or choose a stream override below it.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                text = "Camera groups",
+                modifier = Modifier.padding(horizontal = 24.dp),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            CameraGroupRow(
+                cameras = cameras,
+                frigateGroups = snapshot.cameraGroups,
+                savedViews = state.settings.savedCameraViews,
+                onChoose = { chooser = it },
+                onOpen = onOpenCameraGroup,
+                onDelete = { deleteView = it },
             )
         }
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(3),
+        Text(
+            text = "All cameras",
+            modifier = Modifier.padding(start = 24.dp, top = 8.dp, end = 24.dp, bottom = 6.dp),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+        )
+        Box(modifier = Modifier.weight(1f)) {
+            CameraGrid(
+                cameras = cameras,
+                ptzCameras = snapshot.ptzCameras,
+                restoreFocusKey = restoreFocusKey,
+                onFocusRestored = onFocusRestored,
+                onPlayCamera = onPlayCamera,
+                onOpenControls = onOpenControls,
+                cachedBitmap = cachedBitmap,
+                refreshBitmap = refreshBitmap,
+            )
+        }
+    }
+
+    chooser?.let { choice ->
+        CameraGroupChooserDialog(
+            title = choice.title,
+            cameras = cameras.filter { it.name in choice.cameraNames },
+            onDismiss = { chooser = null },
+            onWatch = { selected ->
+                chooser = null
+                onOpenCameraGroup(choice.title, selected, choice.returnFocusKey)
+            },
+            onSave = { selected ->
+                chooser = null
+                saveSelection = selected
+            },
+        )
+    }
+    saveSelection?.let { selected ->
+        SaveCameraViewDialog(
+            cameras = cameras,
+            selectedCameraNames = selected,
+            onDismiss = { saveSelection = null },
+            onSave = { name ->
+                onSaveCameraView(name, selected)
+                saveSelection = null
+                chooser = null
+            },
+        )
+    }
+    deleteView?.let { view ->
+        DeleteCameraViewDialog(
+            view = view,
+            onDismiss = { deleteView = null },
+            onDelete = {
+                onDeleteCameraView(view.id)
+                deleteView = null
+            },
+        )
+    }
+
+    val controlledCamera = state.ptz.cameraName?.let { cameraName ->
+        cameras.firstOrNull { it.name == cameraName }
+    }
+    val ptzInfo = controlledCamera?.let { snapshot.ptzCameras[it.name] }
+    if (controlledCamera != null && ptzInfo != null) {
+        PtzControlsDialog(
+            camera = controlledCamera,
+            info = ptzInfo,
+            state = state.ptz,
+            onRetry = onRetryControls,
+            onClose = onCloseControls,
+            onCommand = onPtzCommand,
+            cachedBitmap = cachedBitmap,
+            refreshBitmap = refreshBitmap,
+        )
+    }
+}
+
+private data class CameraGroupChoice(
+    val title: String,
+    val cameraNames: Set<String>,
+    val returnFocusKey: String,
+)
+
+@Composable
+private fun CameraGroupRow(
+    cameras: List<Camera>,
+    frigateGroups: List<CameraGroup>,
+    savedViews: List<SavedCameraView>,
+    onChoose: (CameraGroupChoice) -> Unit,
+    onOpen: (String, List<String>, String) -> Unit,
+    onDelete: (SavedCameraView) -> Unit,
+) {
+    val availableNames = cameras.mapTo(mutableSetOf(), Camera::name)
+    val cameraLabels = cameras.associate { it.name to it.displayName }
+    val availableSavedViews = savedViews.filter { view -> view.cameraNames.all { it in availableNames } }
+    LazyRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(132.dp),
+        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        item(key = "dual:create") {
+            CameraGroupCard(
+                focusKey = "dual:create",
+                title = "Watch cameras together",
+                subtitle = "Choose two to four",
+                onClick = {
+                    onChoose(CameraGroupChoice("Camera group", availableNames, "dual:create"))
+                },
+            )
+        }
+        items(availableSavedViews, key = { "dual:saved:${it.id}" }) { view ->
+            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                CameraGroupCard(
+                    focusKey = "dual:saved:${view.id}",
+                    title = view.name,
+                    subtitle = view.cameraNames.joinToString(" • ") { cameraLabels[it] ?: it },
+                    onClick = { onOpen(view.name, view.cameraNames, "dual:saved:${view.id}") },
+                )
+                CameraAction(
+                    label = "Remove",
+                    focusKey = "dual:remove:${view.id}",
+                    restoreFocusKey = null,
+                    onFocusRestored = {},
+                    onClick = { onDelete(view) },
+                    accessibilityLabel = "Remove ${view.name}",
+                    modifier = Modifier.width(CAMERA_GROUP_CARD_WIDTH),
+                )
+            }
+        }
+        items(frigateGroups, key = { "dual:frigate:${it.name}" }) { group ->
+            val names = group.cameraNames.filter { it in availableNames }
+            if (names.size >= MIN_CAMERA_GROUP_SIZE) {
+                CameraGroupCard(
+                    focusKey = "dual:frigate:${group.name}",
+                    title = group.displayName,
+                    subtitle = if (names.size <= MAX_CAMERA_GROUP_SIZE) {
+                        names.joinToString(" • ") { cameraLabels[it] ?: it }
+                    } else {
+                        "${names.size} cameras • Choose up to four"
+                    },
+                    onClick = {
+                        if (names.size <= MAX_CAMERA_GROUP_SIZE) {
+                            onOpen(group.displayName, names, "dual:frigate:${group.name}")
+                        } else {
+                            onChoose(
+                                CameraGroupChoice(
+                                    group.displayName,
+                                    names.toSet(),
+                                    "dual:frigate:${group.name}",
+                                ),
+                            )
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CameraGroupCard(
+    focusKey: String,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+) {
+    FocusCard(
+        focusKey = focusKey,
+        restoreFocusKey = null,
+        onFocusRestored = {},
+        onClick = onClick,
+        accessibilityLabel = "$title, $subtitle",
+        modifier = Modifier
+            .width(CAMERA_GROUP_CARD_WIDTH)
+            .height(72.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold)
+            Text(
+                subtitle,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CameraGroupChooserDialog(
+    title: String,
+    cameras: List<Camera>,
+    onDismiss: () -> Unit,
+    onWatch: (List<String>) -> Unit,
+    onSave: (List<String>) -> Unit,
+) {
+    var selected by remember(title, cameras) { mutableStateOf(emptyList<String>()) }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Column(
+            modifier = Modifier
+                .width(760.dp)
+                .fillMaxHeight(0.84f)
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(18.dp))
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(
+                text = "Choose two to four cameras • ${selected.size} selected",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                items(cameras, key = Camera::name) { camera ->
+                    val isSelected = camera.name in selected
+                    FocusCard(
+                        focusKey = "dual:choose:${camera.name}",
+                        restoreFocusKey = null,
+                        onFocusRestored = {},
+                        onClick = { selected = toggleCameraGroupSelection(selected, camera.name) },
+                        selected = isSelected,
+                        accessibilityLabel = if (isSelected) {
+                            "${camera.displayName}, selected"
+                        } else {
+                            "${camera.displayName}, not selected"
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(camera.displayName, fontWeight = FontWeight.Bold)
+                            if (isSelected) {
+                                Text("Selected", color = MaterialTheme.colorScheme.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = onDismiss) { Text("Cancel") }
+                Button(
+                    onClick = { onWatch(selected) },
+                    enabled = selected.size in MIN_CAMERA_GROUP_SIZE..MAX_CAMERA_GROUP_SIZE,
+                ) { Text("Watch") }
+                Button(
+                    onClick = { onSave(selected) },
+                    enabled = selected.size in MIN_CAMERA_GROUP_SIZE..MAX_CAMERA_GROUP_SIZE,
+                ) { Text("Save view") }
+            }
+        }
+    }
+}
+
+internal fun toggleCameraGroupSelection(selected: List<String>, cameraName: String): List<String> = when {
+    cameraName in selected -> selected - cameraName
+    selected.size < MAX_CAMERA_GROUP_SIZE -> selected + cameraName
+    else -> selected
+}
+
+@Composable
+private fun SaveCameraViewDialog(
+    cameras: List<Camera>,
+    selectedCameraNames: List<String>,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    val labels = cameras.associate { it.name to it.displayName }
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .width(560.dp)
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(18.dp))
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text("Save camera view", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(
+                selectedCameraNames.joinToString(" • ") { labels[it] ?: it },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            ProductionTvInput(
+                label = "View name",
+                value = name,
+                onValueChange = { name = it.take(40) },
+                placeholder = "For example, Outside",
+                enabled = true,
+                imeAction = ImeAction.Done,
+                requestInitialFocus = true,
+                inputKey = "dual:view-name",
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = onDismiss) { Text("Cancel") }
+                Button(onClick = { onSave(name) }, enabled = name.isNotBlank()) { Text("Save") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeleteCameraViewDialog(
+    view: SavedCameraView,
+    onDismiss: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .width(520.dp)
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(18.dp))
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text("Remove ${view.name}?", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("The cameras will not be changed", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = onDismiss) { Text("Keep") }
+                Button(onClick = onDelete) { Text("Remove") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CameraGrid(
+    cameras: List<Camera>,
+    ptzCameras: Map<String, CameraPtzInfo>,
+    restoreFocusKey: String?,
+    onFocusRestored: () -> Unit,
+    onPlayCamera: (Camera, String) -> Unit,
+    onOpenControls: (Camera) -> Unit,
+    cachedBitmap: (String) -> Bitmap?,
+    refreshBitmap: suspend (String, Int) -> Bitmap?,
+) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val cardWidth = (maxWidth - 76.dp) / 3
+        LazyRow(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 18.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            gridItemsIndexed(cameras, key = { _, camera -> camera.name }) { index, camera ->
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            itemsIndexed(cameras, key = { _, camera -> camera.name }) { index, camera ->
+                Column(
+                    modifier = Modifier.width(cardWidth),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     val automaticKey = "cameras:auto:${camera.name}"
                     CameraCard(
                         camera = camera,
@@ -639,26 +1081,16 @@ internal fun CamerasScreen(
                         initialRefreshDelayMillis = index * CAMERA_REFRESH_STAGGER_MS,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        camera.streams.forEachIndexed { index, option ->
-                            val streamKey = "cameras:stream:${camera.name}:${option.streamName}"
-                            FocusCard(
-                                focusKey = streamKey,
-                                restoreFocusKey = restoreFocusKey,
-                                onFocusRestored = onFocusRestored,
-                                onClick = { onPlayStream(camera, option, streamKey) },
-                                accessibilityLabel = "${camera.displayName}, ${option.label}",
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                Text(
-                                    text = option.label.ifBlank { "Stream ${index + 1}" },
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
-                        }
+                    if (ptzCameras[camera.name]?.hasControls == true) {
+                        CameraAction(
+                            label = "Controls",
+                            focusKey = "cameras:controls:${camera.name}",
+                            restoreFocusKey = restoreFocusKey,
+                            onFocusRestored = onFocusRestored,
+                            onClick = { onOpenControls(camera) },
+                            accessibilityLabel = "Control ${camera.displayName}",
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
             }
@@ -667,12 +1099,38 @@ internal fun CamerasScreen(
 }
 
 @Composable
+private fun CameraAction(
+    label: String,
+    focusKey: String,
+    restoreFocusKey: String?,
+    onFocusRestored: () -> Unit,
+    onClick: () -> Unit,
+    accessibilityLabel: String,
+    modifier: Modifier,
+) {
+    FocusCard(
+        focusKey = focusKey,
+        restoreFocusKey = restoreFocusKey,
+        onFocusRestored = onFocusRestored,
+        onClick = onClick,
+        accessibilityLabel = accessibilityLabel,
+        modifier = modifier,
+    ) {
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+            maxLines = 1,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+@Composable
 internal fun BirdseyeScreen(
     state: Phase0UiState,
     restoreFocusKey: String?,
     onFocusRestored: () -> Unit,
-    initialFocusRequester: FocusRequester,
-    onPlay: () -> Unit,
+    onPlay: (String) -> Unit,
     cachedBitmap: (String) -> Bitmap?,
     refreshBitmap: suspend (String, Int) -> Bitmap?,
 ) {
@@ -683,46 +1141,216 @@ internal fun BirdseyeScreen(
             .padding(horizontal = 24.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Text("Birdseye", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text(
-            "Frigate's live composite view of your permitted cameras.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    FocusCard(
-        focusKey = "birdseye:watch",
-        restoreFocusKey = restoreFocusKey,
-        onFocusRestored = onFocusRestored,
-        onClick = onPlay,
-        accessibilityLabel = "Watch Birdseye composite",
-        externalFocusRequester = initialFocusRequester,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            CameraSnapshot(
-                cameraName = BIRDSEYE_CAMERA_NAME,
-                cachedBitmap = { cachedBitmap(BIRDSEYE_CAMERA_NAME) },
-                refreshBitmap = { refreshBitmap(BIRDSEYE_CAMERA_NAME, 300) },
-                modifier = Modifier
-                    .width(534.dp)
-                    .aspectRatio(16f / 9f),
-            )
-            Column(
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text("Birdseye", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text("See all cameras together", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (snapshot.birdseye.playable) {
+            val focusKey = "birdseye:watch"
+            FocusCard(
+                focusKey = focusKey,
+                restoreFocusKey = restoreFocusKey,
+                onFocusRestored = onFocusRestored,
+                onClick = { onPlay(focusKey) },
+                accessibilityLabel = "Watch Birdseye",
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("BIRDSEYE", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.ExtraBold)
-                Text("Live camera overview", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(
-                    "One efficient composite for up to ${snapshot.authorizedCameraNames.size} permitted cameras.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text("Watch", color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    CameraSnapshot(
+                        cameraName = BIRDSEYE_CAMERA_NAME,
+                        cachedBitmap = { cachedBitmap(BIRDSEYE_CAMERA_NAME) },
+                        refreshBitmap = { refreshBitmap(BIRDSEYE_CAMERA_NAME, 300) },
+                        modifier = Modifier
+                            .width(534.dp)
+                            .aspectRatio(16f / 9f),
+                    )
+                    Column(
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("BIRDSEYE", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.ExtraBold)
+                        Text("All cameras at a glance", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text("Watch live", color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        } else {
+            ScreenMessage(
+                message = when {
+                    snapshot.capabilities[FrigateFeature.BIRDSEYE].evidence ==
+                        FrigateCapabilityEvidence.CAMERA_ACCESS_RESTRICTED ->
+                        "Birdseye is not available for this account"
+                    snapshot.birdseye.enabled -> "Birdseye is not ready right now"
+                    else -> "Birdseye is not turned on in Frigate"
+                },
+                isError = false,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PtzControlsDialog(
+    camera: Camera,
+    info: CameraPtzInfo,
+    state: PtzUiState,
+    onRetry: () -> Unit,
+    onClose: () -> Unit,
+    onCommand: (PtzCommand) -> Unit,
+    cachedBitmap: (String) -> Bitmap?,
+    refreshBitmap: suspend (String, Int) -> Bitmap?,
+) {
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background.copy(alpha = 0.98f))
+                .padding(40.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 1180.dp),
+                horizontalArrangement = Arrangement.spacedBy(30.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1.45f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(camera.displayName, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                    CameraSnapshot(
+                        cameraName = camera.name,
+                        cachedBitmap = { cachedBitmap(camera.name) },
+                        refreshBitmap = { refreshBitmap(camera.name, 540) },
+                        refreshMillis = 1_000L,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(16f / 9f)
+                            .clip(RoundedCornerShape(14.dp)),
+                    )
+                    Text(
+                        "Hold a control to move the camera",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    when (state.connection.status) {
+                        PtzConnectionStatus.CONNECTING, PtzConnectionStatus.DISCONNECTED -> {
+                            Text("Getting camera controls ready…")
+                            Button(onClick = onClose) { Text("Close") }
+                        }
+                        PtzConnectionStatus.FAILED -> {
+                            Text(state.connection.message ?: "Camera controls could not connect")
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Button(onClick = onRetry) { Text("Try again") }
+                                Button(onClick = onClose) { Text("Close") }
+                            }
+                        }
+                        PtzConnectionStatus.CONNECTED -> {
+                            PtzConnectedControls(info, state.errorMessage, onCommand, onClose)
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+@Composable
+private fun PtzConnectedControls(
+    info: CameraPtzInfo,
+    errorMessage: String?,
+    onCommand: (PtzCommand) -> Unit,
+    onClose: () -> Unit,
+) {
+    if (info.canMove) {
+        PtzHoldButton("Up", "↑", PtzCommand.MoveUp, onCommand)
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            PtzHoldButton("Left", "←", PtzCommand.MoveLeft, onCommand)
+            Button(onClick = { onCommand(PtzCommand.Stop) }) { Text("Stop") }
+            PtzHoldButton("Right", "→", PtzCommand.MoveRight, onCommand)
+        }
+        PtzHoldButton("Down", "↓", PtzCommand.MoveDown, onCommand)
+    }
+    if (info.canZoom) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            PtzHoldButton("Zoom out", "Zoom −", PtzCommand.ZoomOut, onCommand)
+            PtzHoldButton("Zoom in", "Zoom +", PtzCommand.ZoomIn, onCommand)
+        }
+    }
+    if (info.canFocus) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            PtzHoldButton("Focus nearer", "Focus −", PtzCommand.FocusOut, onCommand)
+            PtzHoldButton("Focus farther", "Focus +", PtzCommand.FocusIn, onCommand)
+        }
+    }
+    if (info.presets.isNotEmpty()) {
+        Text("Saved positions", fontWeight = FontWeight.Bold)
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(info.presets, key = { "preset:$it" }) { preset ->
+                Button(onClick = { onCommand(PtzCommand.Preset(preset)) }) {
+                    Text(preset.replace('_', ' ').replaceFirstChar(Char::uppercase))
+                }
+            }
+        }
+    }
+    errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    Button(onClick = onClose) { Text("Close") }
+}
+
+@Composable
+private fun PtzHoldButton(
+    accessibilityLabel: String,
+    label: String,
+    command: PtzCommand,
+    onCommand: (PtzCommand) -> Unit,
+) {
+    var held by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    DisposableEffect(Unit) {
+        onDispose {
+            if (held) onCommand(PtzCommand.Stop)
+        }
+    }
+    Button(
+        onClick = {
+            scope.launch {
+                onCommand(command)
+                delay(PTZ_STEP_MILLIS)
+                onCommand(PtzCommand.Stop)
+            }
+        },
+        modifier = Modifier
+            .onFocusChanged { focus ->
+                if (!focus.isFocused && held) {
+                    held = false
+                    onCommand(PtzCommand.Stop)
+                }
+            }
+            .onPreviewKeyEvent { event ->
+                if (event.key != Key.DirectionCenter && event.key != Key.Enter) return@onPreviewKeyEvent false
+                when (event.type) {
+                    KeyEventType.KeyDown -> if (!held) {
+                        held = true
+                        onCommand(command)
+                    }
+                    KeyEventType.KeyUp -> if (held) {
+                        held = false
+                        onCommand(PtzCommand.Stop)
+                    }
+                    else -> Unit
+                }
+                true
+            }
+            .semantics { contentDescription = accessibilityLabel },
+    ) {
+        Text(label)
     }
 }
 
@@ -737,6 +1365,7 @@ private fun CameraCard(
     refreshBitmap: suspend (String, Int) -> Bitmap?,
     initialRefreshDelayMillis: Long = 0L,
     externalFocusRequester: FocusRequester? = null,
+    onFocused: (String) -> Unit = {},
     modifier: Modifier,
 ) {
     FocusCard(
@@ -746,6 +1375,7 @@ private fun CameraCard(
         onClick = onClick,
         accessibilityLabel = "Watch ${camera.displayName}",
         externalFocusRequester = externalFocusRequester,
+        onFocused = onFocused,
         modifier = modifier,
     ) {
         Column {
@@ -773,6 +1403,8 @@ private fun CameraCard(
 }
 
 private const val CAMERA_REFRESH_STAGGER_MS = 140L
+private const val HOME_ROW_ITEM_LIMIT = 8
+private const val PTZ_STEP_MILLIS = 350L
 
 @Composable
 private fun ReviewRow(
@@ -780,6 +1412,7 @@ private fun ReviewRow(
     items: List<ReviewItem>,
     restoreFocusKey: String?,
     onFocusRestored: () -> Unit,
+    onFocused: (String) -> Unit = {},
     onPlay: (ReviewItem, String) -> Unit,
     cachedBitmap: (ReviewItem) -> Bitmap?,
     refreshBitmap: suspend (ReviewItem, Int) -> Bitmap?,
@@ -796,6 +1429,7 @@ private fun ReviewRow(
                     focusKey = focusKey,
                     restoreFocusKey = restoreFocusKey,
                     onFocusRestored = onFocusRestored,
+                    onFocused = onFocused,
                     onClick = { onPlay(item, focusKey) },
                     enabled = item.recordingAvailable != false,
                     accessibilityLabel = "${item.severity.name.lowercase()} at ${item.camera.replace('_', ' ')}",
@@ -914,7 +1548,7 @@ internal fun SettingsScreen(
             }
         }
         item {
-            SettingsSection("Default live stream", "Explicit stream buttons in Cameras remain session-only overrides.") {
+            SettingsSection("Default live video", "Opah uses this choice whenever you open a camera") {
                 ChoiceRow(
                     values = StreamPreference.entries,
                     selected = state.settings.streamPreference,
@@ -1012,7 +1646,10 @@ internal fun SettingsScreen(
 }
 
 @Composable
-internal fun AboutScreen() {
+internal fun AboutScreen(
+    onBack: (() -> Unit)? = null,
+    initialFocusRequester: FocusRequester? = null,
+) {
     val uriHandler = LocalUriHandler.current
     var repositoryButtonFocused by remember { mutableStateOf(false) }
     var repositoryButtonArmed by remember { mutableStateOf(false) }
@@ -1031,6 +1668,13 @@ internal fun AboutScreen() {
             .padding(horizontal = 34.dp, vertical = 24.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
+        onBack?.let {
+            SafeBackButton(
+                onClick = it,
+                initialFocusRequester = initialFocusRequester,
+                label = "Back to Settings",
+            )
+        }
         Row(
             horizontalArrangement = Arrangement.spacedBy(18.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1043,7 +1687,7 @@ internal fun AboutScreen() {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("Opah", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
                 Text(
-                    "Version ${BuildConfig.VERSION_NAME}",
+                    "Version ${installedAppVersionLabel()}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.titleMedium,
                 )
@@ -1270,9 +1914,13 @@ internal fun InformationScreen(
     state: Phase0UiState,
     onLoad: () -> Unit,
     onRefresh: () -> Unit,
+    onBack: (() -> Unit)? = null,
+    initialFocusRequester: FocusRequester? = null,
     initialTabName: String? = null,
 ) {
-    LaunchedEffect(state.activeProfile) { onLoad() }
+    LaunchedEffect(state.activeProfile) {
+        onLoad()
+    }
     val information = state.information
     val summary = information.summary
     var tabName by rememberSaveable(initialTabName) {
@@ -1290,12 +1938,24 @@ internal fun InformationScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column {
-                    Text("Information", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                    Text(
-                        "System performance and recording storage",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    onBack?.let {
+                        SafeBackButton(
+                            onClick = it,
+                            initialFocusRequester = initialFocusRequester,
+                            label = "Back to Settings",
+                        )
+                    }
+                    Column {
+                        Text("System", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Performance and recording space",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 Button(onClick = onRefresh, enabled = !information.loading) {
                     Text(if (information.loading) "Refreshing…" else "Refresh")
@@ -1311,11 +1971,11 @@ internal fun InformationScreen(
                         onFocusRestored = {},
                         onClick = { tabName = item.name },
                         selected = item == tab,
-                        accessibilityLabel = "${item.name.lowercase().replaceFirstChar(Char::uppercase)} information",
+                        accessibilityLabel = item.label,
                         modifier = Modifier.width(170.dp),
                     ) {
                         Text(
-                            item.name.lowercase().replaceFirstChar(Char::uppercase),
+                            item.label,
                             modifier = Modifier.padding(horizontal = 18.dp, vertical = 11.dp),
                             fontWeight = if (item == tab) FontWeight.Bold else FontWeight.Normal,
                         )
@@ -1368,7 +2028,309 @@ internal fun InformationScreen(
                     }
                 }
             }
+
         }
+    }
+}
+
+@Composable
+internal fun SavedRecordingsScreen(
+    state: Phase0UiState,
+    restoreFocusKey: String?,
+    onFocusRestored: () -> Unit,
+    onLoad: () -> Unit,
+    onSelect: (RecordingExport, String) -> Unit,
+    onClose: () -> Unit,
+    onPlay: (RecordingExport) -> Unit,
+    onDelete: (RecordingExport) -> Unit,
+    cachedBitmap: (RecordingExport) -> Bitmap?,
+    refreshBitmap: suspend (RecordingExport, Int) -> Bitmap?,
+) {
+    val snapshot = state.snapshot ?: return
+    LaunchedEffect(state.activeProfile, state.exports.loadedOnce) {
+        if (!state.exports.loadedOnce) onLoad()
+    }
+    val selected = state.exports.selectedItemId?.let { selectedId ->
+        state.exports.items.firstOrNull { it.id == selectedId }
+    }
+    if (selected != null) {
+        SavedRecordingDetail(
+            export = selected,
+            cameraLabel = snapshot.authorizedCameraNames[selected.camera]
+                ?: snapshot.cameras.firstOrNull { it.name == selected.camera }?.displayName
+                ?: selected.camera.replace('_', ' '),
+            canDelete = canDeleteSavedRecordings(snapshot.user.role),
+            deleting = state.exports.deletingItemId == selected.id,
+            errorMessage = state.exports.errorMessage,
+            onBack = onClose,
+            onPlay = { onPlay(selected) },
+            onDelete = { onDelete(selected) },
+            cachedBitmap = { cachedBitmap(selected) },
+            refreshBitmap = { refreshBitmap(selected, 720) },
+        )
+        return
+    }
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("Saved", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text("Recordings you chose to keep", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        state.exports.errorMessage?.let { message ->
+            item { ScreenMessage(message, isError = true) }
+        }
+        when {
+            state.exports.loading && state.exports.items.isEmpty() ->
+                item { ScreenMessage("Loading saved recordings…", isError = false) }
+            state.exports.loadedOnce && state.exports.items.isEmpty() ->
+                item { ScreenMessage("There are no saved recordings", isError = false) }
+            else -> items(state.exports.items, key = RecordingExport::id) { export ->
+                val focusKey = "saved:recording:${export.id}"
+                SavedRecordingRow(
+                    export = export,
+                    cameraLabel = snapshot.authorizedCameraNames[export.camera]
+                        ?: snapshot.cameras.firstOrNull { it.name == export.camera }?.displayName
+                        ?: export.camera.replace('_', ' '),
+                    focusKey = focusKey,
+                    restoreFocusKey = restoreFocusKey,
+                    onFocusRestored = onFocusRestored,
+                    onOpen = { onSelect(export, focusKey) },
+                    cachedBitmap = { cachedBitmap(export) },
+                    refreshBitmap = { refreshBitmap(export, 240) },
+                )
+            }
+        }
+    }
+}
+
+internal fun canDeleteSavedRecordings(role: String): Boolean = role.equals("admin", ignoreCase = true)
+
+@Composable
+private fun SavedRecordingRow(
+    export: RecordingExport,
+    cameraLabel: String,
+    focusKey: String,
+    restoreFocusKey: String?,
+    onFocusRestored: () -> Unit,
+    onOpen: () -> Unit,
+    cachedBitmap: () -> Bitmap?,
+    refreshBitmap: suspend () -> Bitmap?,
+) {
+    val title = export.name.replace('_', ' ')
+    val date = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+        .format(Date((export.createdAt * 1_000).toLong()))
+    FocusCard(
+        focusKey = focusKey,
+        restoreFocusKey = restoreFocusKey,
+        onFocusRestored = onFocusRestored,
+        onClick = onOpen,
+        accessibilityLabel = "$title, recording details",
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            SavedRecordingThumbnail(
+                export = export,
+                cachedBitmap = cachedBitmap,
+                refreshBitmap = refreshBitmap,
+                modifier = Modifier.size(width = 160.dp, height = 90.dp),
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    "$cameraLabel • $date",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Text(
+                if (export.inProgress) "Saving…" else "Details",
+                color = MaterialTheme.colorScheme.secondary,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SavedRecordingDetail(
+    export: RecordingExport,
+    cameraLabel: String,
+    canDelete: Boolean,
+    deleting: Boolean,
+    errorMessage: String?,
+    onBack: () -> Unit,
+    onPlay: () -> Unit,
+    onDelete: () -> Unit,
+    cachedBitmap: () -> Bitmap?,
+    refreshBitmap: suspend () -> Bitmap?,
+) {
+    var showDeleteConfirmation by rememberSaveable(export.id) { mutableStateOf(false) }
+    val initialFocusRequester = remember(export.id) { FocusRequester() }
+    BackHandler(onBack = onBack)
+    LaunchedEffect(export.id) {
+        withFrameNanos { }
+        initialFocusRequester.requestFocus()
+    }
+    Column(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text("Recording details", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(export.name.replace('_', ' '), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            horizontalArrangement = Arrangement.spacedBy(22.dp),
+        ) {
+            SavedRecordingThumbnail(
+                export = export,
+                cachedBitmap = cachedBitmap,
+                refreshBitmap = refreshBitmap,
+                modifier = Modifier.weight(1.65f).aspectRatio(16f / 9f),
+            )
+            Column(
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                SavedRecordingDetailLine("Camera", cameraLabel)
+                SavedRecordingDetailLine(
+                    "Saved",
+                    DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+                        .format(Date((export.createdAt * 1_000).toLong())),
+                )
+                SavedRecordingDetailLine("Video", if (export.inProgress) "Still saving" else "Ready to play")
+                errorMessage?.let { ScreenMessage(it, isError = true) }
+                Spacer(Modifier.weight(1f))
+                SafeBackButton(
+                    onClick = onBack,
+                    initialFocusRequester = initialFocusRequester,
+                    label = "Back to Saved",
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Button(
+                    onClick = onPlay,
+                    enabled = !export.inProgress && !deleting,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Play recording") }
+                if (canDelete && !export.inProgress) {
+                    Button(
+                        onClick = { showDeleteConfirmation = true },
+                        enabled = !deleting,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(if (deleting) "Deleting…" else "Delete recording") }
+                }
+            }
+        }
+    }
+    if (showDeleteConfirmation) {
+        DeleteSavedRecordingDialog(
+            export = export,
+            onDismiss = { showDeleteConfirmation = false },
+            onConfirm = {
+                showDeleteConfirmation = false
+                onDelete()
+            },
+        )
+    }
+}
+
+@Composable
+private fun SavedRecordingThumbnail(
+    export: RecordingExport,
+    cachedBitmap: () -> Bitmap?,
+    refreshBitmap: suspend () -> Bitmap?,
+    modifier: Modifier,
+) {
+    var bitmap by remember(export.id, export.thumbnailPath) { mutableStateOf(cachedBitmap()) }
+    var unavailable by remember(export.id, export.thumbnailPath) {
+        mutableStateOf(export.thumbnailPath == null)
+    }
+    LaunchedEffect(export.id, export.thumbnailPath) {
+        if (export.thumbnailPath != null) {
+            val loaded = refreshBitmap()
+            if (loaded == null) unavailable = true else bitmap = loaded
+        }
+    }
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center,
+    ) {
+        bitmap?.let { current ->
+            Image(
+                bitmap = remember(current) { current.asImageBitmap() },
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } ?: Text(
+            when {
+                export.inProgress -> "Preview preparing…"
+                unavailable -> "Preview unavailable"
+                else -> "Loading preview…"
+            },
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+@Composable
+private fun SavedRecordingDetailLine(label: String, value: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        Text(value, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun DeleteSavedRecordingDialog(
+    export: RecordingExport,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val keepRecordingFocusRequester = remember(export.id) { FocusRequester() }
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .widthIn(min = 440.dp, max = 620.dp)
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(14.dp))
+                .border(
+                    1.dp,
+                    MaterialTheme.colorScheme.error.copy(alpha = 0.55f),
+                    RoundedCornerShape(14.dp),
+                )
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text("Delete saved recording?", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "${export.name.replace('_', ' ')} will be permanently deleted from Frigate and cannot be recovered",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = onDismiss,
+                    modifier = Modifier.focusRequester(keepRecordingFocusRequester),
+                ) { Text("Keep recording") }
+                Button(onClick = onConfirm) { Text("Delete recording") }
+            }
+        }
+    }
+    LaunchedEffect(export.id) {
+        withFrameNanos { }
+        keepRecordingFocusRequester.requestFocus()
     }
 }
 
@@ -1724,7 +2686,7 @@ private fun SectionHeader(
 }
 
 @Composable
-private fun SettingsSection(
+internal fun SettingsSection(
     title: String,
     subtitle: String? = null,
     isFocusable: Boolean = false,
@@ -1761,7 +2723,7 @@ private fun SettingsSection(
 }
 
 @Composable
-private fun <T> ChoiceRow(
+internal fun <T> ChoiceRow(
     values: List<T>,
     selected: T,
     label: (T) -> String,
@@ -1785,36 +2747,29 @@ private fun <T> ChoiceRow(
 }
 
 @Composable
-private fun ThemeColorEditor(
+internal fun ThemeColorEditor(
     colors: CustomThemeColors,
     onChange: (CustomThemeColors) -> Unit,
 ) {
     val safeColors = ThemeColorPolicy.sanitize(colors)
-    val contrast = ThemeColorPolicy.contrastRatio(
-        safeColors.accentArgb,
-        safeColors.backgroundArgb,
-    )
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        ThemeColorControls(
-            label = "Accent",
-            argb = safeColors.accentArgb,
-            onColorChange = { accent ->
-                onChange(ThemeColorPolicy.sanitize(safeColors.copy(accentArgb = accent)))
-            },
-            modifier = Modifier.weight(1f),
-        )
-        ThemeColorControls(
-            label = "Background",
-            argb = safeColors.backgroundArgb,
-            onColorChange = { background ->
-                onChange(ThemeColorPolicy.sanitize(safeColors.copy(backgroundArgb = background)))
-            },
-            modifier = Modifier.weight(1f),
-        )
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        CUSTOM_THEME_PRESETS.chunked(3).forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                row.forEach { preset ->
+                    val presetColors = ThemeColorPolicy.sanitize(preset.colors)
+                    ThemePresetCard(
+                        preset = preset.copy(colors = presetColors),
+                        selected = safeColors == presetColors,
+                        onClick = { onChange(presetColors) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+        }
     }
     Row(
         modifier = Modifier
@@ -1830,7 +2785,7 @@ private fun ThemeColorEditor(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            "Live preview",
+            "Preview",
             color = Color(ThemeColorPolicy.readableForeground(safeColors.backgroundArgb)),
             fontWeight = FontWeight.Bold,
         )
@@ -1840,95 +2795,72 @@ private fun ThemeColorEditor(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
             Text(
-                "Accent",
+                "Selected color",
                 color = Color(ThemeColorPolicy.readableForeground(safeColors.accentArgb)),
                 fontWeight = FontWeight.Bold,
             )
         }
     }
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "Accent contrast ${String.format(Locale.ROOT, "%.1f:1", contrast)} • protected minimum 3.0:1",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Button(onClick = { onChange(CustomThemeColors()) }) { Text("Reset colors") }
-    }
 }
 
+private data class ThemePreset(
+    val label: String,
+    val colors: CustomThemeColors,
+)
+
+private val CUSTOM_THEME_PRESETS = listOf(
+    ThemePreset("Coral", CustomThemeColors(0xFFFF7048.toInt(), 0xFF07111F.toInt())),
+    ThemePreset("Ocean", CustomThemeColors(0xFF53B7FF.toInt(), 0xFF071522.toInt())),
+    ThemePreset("Forest", CustomThemeColors(0xFF65D68A.toInt(), 0xFF08170F.toInt())),
+    ThemePreset("Plum", CustomThemeColors(0xFFD29BFF.toInt(), 0xFF180D20.toInt())),
+    ThemePreset("Sunset", CustomThemeColors(0xFFFFB454.toInt(), 0xFF211108.toInt())),
+    ThemePreset("Slate", CustomThemeColors(0xFF7DD8D2.toInt(), 0xFF11171A.toInt())),
+)
+
 @Composable
-private fun ThemeColorControls(
-    label: String,
-    argb: Int,
-    onColorChange: (Int) -> Unit,
-    modifier: Modifier = Modifier,
+private fun ThemePresetCard(
+    preset: ThemePreset,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier,
 ) {
-    val hsl = ThemeColorPolicy.toHsl(argb)
-    Column(
-        modifier = modifier
-            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+    FocusCard(
+        focusKey = "settings:theme-preset:${preset.label.lowercase()}",
+        restoreFocusKey = null,
+        onFocusRestored = {},
+        onClick = onClick,
+        selected = selected,
+        accessibilityLabel = "${preset.label} colors",
+        modifier = modifier,
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(label, fontWeight = FontWeight.Bold)
             Box(
                 modifier = Modifier
-                    .size(28.dp)
-                    .background(Color(argb), CircleShape)
-                    .border(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f), CircleShape),
+                    .size(30.dp)
+                    .background(Color(preset.colors.backgroundArgb), CircleShape)
+                    .border(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.40f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(14.dp)
+                        .background(Color(preset.colors.accentArgb), CircleShape),
+                )
+            }
+            Text(
+                preset.label,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
             )
         }
-        ThemeColorAdjustment(
-            label = "Hue",
-            value = "${hsl.hue}°",
-            onDecrease = { onColorChange(ThemeColorPolicy.adjustHue(argb, -15)) },
-            onIncrease = { onColorChange(ThemeColorPolicy.adjustHue(argb, 15)) },
-        )
-        ThemeColorAdjustment(
-            label = "Color",
-            value = "${hsl.saturation}%",
-            onDecrease = { onColorChange(ThemeColorPolicy.adjustSaturation(argb, -5)) },
-            onIncrease = { onColorChange(ThemeColorPolicy.adjustSaturation(argb, 5)) },
-        )
-        ThemeColorAdjustment(
-            label = "Brightness",
-            value = "${hsl.lightness}%",
-            onDecrease = { onColorChange(ThemeColorPolicy.adjustLightness(argb, -5)) },
-            onIncrease = { onColorChange(ThemeColorPolicy.adjustLightness(argb, 5)) },
-        )
     }
 }
 
 @Composable
-private fun ThemeColorAdjustment(
-    label: String,
-    value: String,
-    onDecrease: () -> Unit,
-    onIncrease: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-        Button(onClick = onDecrease) { Text("−") }
-        Text(value, modifier = Modifier.width(46.dp), maxLines = 1)
-        Button(onClick = onIncrease) { Text("+") }
-    }
-}
-
-@Composable
-private fun SettingToggle(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
+internal fun SettingToggle(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
     FocusCard(
         focusKey = "settings:toggle:$label",
         restoreFocusKey = null,
@@ -1951,7 +2883,7 @@ private fun SettingToggle(label: String, value: Boolean, onChange: (Boolean) -> 
 }
 
 @Composable
-private fun ReadOnlyValue(label: String, value: String) {
+internal fun ReadOnlyValue(label: String, value: String) {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
         Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(140.dp))
         Text(value, modifier = Modifier.weight(1f), maxLines = 3, overflow = TextOverflow.Ellipsis)

@@ -10,6 +10,8 @@ import app.opah.tv.data.model.AppearanceMode
 import app.opah.tv.data.model.AudioCodec
 import app.opah.tv.data.model.BirdseyeStatus
 import app.opah.tv.data.model.Camera
+import app.opah.tv.data.model.CameraGroup
+import app.opah.tv.data.model.CameraPtzInfo
 import app.opah.tv.data.model.CameraPerformance
 import app.opah.tv.data.model.CameraStorageUsage
 import app.opah.tv.data.model.CodecCapability
@@ -21,16 +23,29 @@ import app.opah.tv.data.model.DeviceDiagnostics
 import app.opah.tv.data.model.DiscoverySnapshot
 import app.opah.tv.data.model.FrigateInformationSummary
 import app.opah.tv.data.model.FrigatePerformanceSummary
+import app.opah.tv.data.model.FrigateCapabilities
+import app.opah.tv.data.model.FrigateCapability
+import app.opah.tv.data.model.FrigateCapabilityAvailability
+import app.opah.tv.data.model.FrigateCapabilityEvidence
+import app.opah.tv.data.model.FrigateFeature
 import app.opah.tv.data.model.FrigateUserProfile
 import app.opah.tv.data.model.LiveStreamOption
 import app.opah.tv.data.model.RecordingStorageSummary
 import app.opah.tv.data.model.RecordingStorageVolume
+import app.opah.tv.data.model.RecordingSegment
+import app.opah.tv.data.model.RecordingExport
 import app.opah.tv.data.model.ReviewItem
+import app.opah.tv.data.model.ReviewCounts
 import app.opah.tv.data.model.ReviewSeverity
+import app.opah.tv.data.model.ReviewSummaryMetadata
+import app.opah.tv.data.model.SearchEvent
+import app.opah.tv.data.model.SavedCameraView
 import app.opah.tv.data.model.ServerVersionCompatibility
 import app.opah.tv.data.model.StreamMetadata
 import app.opah.tv.data.model.TemperatureReading
 import app.opah.tv.data.model.VideoCodec
+import app.opah.tv.data.network.PtzConnectionState
+import app.opah.tv.data.network.PtzConnectionStatus
 import app.opah.tv.playback.PlaybackKind
 import app.opah.tv.playback.PlaybackRequest
 
@@ -66,6 +81,7 @@ internal object DocumentationFixtures {
         Triple("entry", "Front Entry", VideoCodec.AVC),
         Triple("garden", "Garden", VideoCodec.AVC),
         Triple("driveway", "Driveway", VideoCodec.HEVC),
+        Triple("side", "Side Door", VideoCodec.AVC),
     )
 
     private val cameras = cameraDefinitions.mapIndexed { index, (name, displayName, codec) ->
@@ -113,6 +129,27 @@ internal object DocumentationFixtures {
         reviewItem("review-garden-2", "garden", 1_787_121_800.0, ReviewSeverity.ALERT, listOf("cat"), listOf("yard")),
     )
 
+    private val savedRecordings = listOf(
+        RecordingExport(
+            id = "saved-entry",
+            camera = "entry",
+            name = "Front Entry package",
+            createdAt = 1_787_157_420.0,
+            videoPath = "/exports/saved-entry.mp4",
+            thumbnailPath = "/media/frigate/clips/export/saved-entry.webp",
+            inProgress = false,
+        ),
+        RecordingExport(
+            id = "saved-driveway",
+            camera = "driveway",
+            name = "Driveway visitor",
+            createdAt = 1_787_153_980.0,
+            videoPath = "/exports/saved-driveway.mp4",
+            thumbnailPath = "/media/frigate/clips/export/saved-driveway.webp",
+            inProgress = false,
+        ),
+    )
+
     private val streamMetadata = cameras
         .flatMap(Camera::streams)
         .mapNotNull(LiveStreamOption::metadata)
@@ -132,7 +169,7 @@ internal object DocumentationFixtures {
         frigateVersion = "0.18.0",
         user = FrigateUserProfile(
             username = profile.username,
-            role = "viewer",
+            role = "admin",
             allowedCameras = cameras.map(Camera::name).toSet(),
         ),
         cameras = cameras,
@@ -145,6 +182,29 @@ internal object DocumentationFixtures {
             streamName = "birdseye",
         ),
         versionCompatibility = ServerVersionCompatibility.SUPPORTED,
+        capabilities = FrigateCapabilities(
+            FrigateFeature.entries.associateWith {
+                FrigateCapability(
+                    FrigateCapabilityAvailability.AVAILABLE,
+                    FrigateCapabilityEvidence.VALIDATED_API,
+                )
+            },
+        ),
+        ptzCameras = mapOf(
+            "driveway" to CameraPtzInfo(
+                cameraName = "driveway",
+                features = setOf("pt", "zoom"),
+                presets = listOf("home", "street"),
+            ),
+        ),
+        cameraGroups = listOf(
+            CameraGroup(
+                name = "outside",
+                displayName = "Outside",
+                cameraNames = listOf("entry", "garden", "driveway", "side"),
+                order = 0,
+            ),
+        ),
     )
 
     private val device = DeviceDiagnostics(
@@ -225,11 +285,35 @@ internal object DocumentationFixtures {
                     recordingState = ReviewRecordingState.AVAILABLE,
                 ),
             )
+            "SAVED_DETAIL" -> base.copy(
+                exports = base.exports.copy(selectedItemId = savedRecordings.first().id),
+            )
+            "PTZ_CONTROLS" -> base.copy(
+                ptz = PtzUiState(
+                    cameraName = "driveway",
+                    connection = PtzConnectionState(PtzConnectionStatus.CONNECTED),
+                ),
+            )
+            "ACTIVITY_SEARCH" -> base.copy(
+                activitySearch = ActivitySearchState(
+                    query = "red car",
+                    results = searchEvents("red car", cameras.map(Camera::name).toSet()),
+                    searchedOnce = true,
+                ),
+            )
             "LIVE_PLAYBACK" -> base.copy(
                 playback = livePlayback(cameras.first()),
                 activeCameraName = cameras.first().name,
             )
             "RECORDED_PLAYBACK" -> base.copy(playback = recordedPlayback(reviewItems.first()))
+            "DUAL_VIEW", "CAMERA_GROUP" -> base.copy(
+                cameraGroupView = CameraGroupViewUiState(
+                    title = "Outside",
+                    streams = cameras.map { camera ->
+                        CameraGroupStream(camera, "$DOCUMENTATION_URI_PREFIX${camera.name}")
+                    },
+                ),
+            )
             "CUSTOM_THEME" -> base.copy(
                 settings = base.settings.copy(
                     appearanceMode = AppearanceMode.CUSTOM,
@@ -251,6 +335,7 @@ internal object DocumentationFixtures {
         title = camera.displayName,
         uri = "$DOCUMENTATION_URI_PREFIX${camera.name}",
         kind = PlaybackKind.LIVE,
+        cameraName = camera.name,
         detail = "Main • Automatic stream selection",
     )
 
@@ -265,7 +350,62 @@ internal object DocumentationFixtures {
         title = "Alert — ${cameraDisplayName(item.camera)}",
         uri = "$DOCUMENTATION_URI_PREFIX${item.camera}",
         kind = PlaybackKind.RECORDED,
-        detail = "Frigate retained recording",
+        cameraName = item.camera,
+        detail = "Recording",
+        activityItemId = item.id,
+    )
+
+    fun recordingHistory(hourStartSeconds: Double, endSeconds: Double): List<RecordingSegment> = listOf(
+        RecordingSegment(hourStartSeconds + 60.0, (hourStartSeconds + 14 * 60.0).coerceAtMost(endSeconds)),
+        RecordingSegment(hourStartSeconds + 17 * 60.0, (hourStartSeconds + 44 * 60.0).coerceAtMost(endSeconds)),
+        RecordingSegment(hourStartSeconds + 46 * 60.0, endSeconds),
+    ).filter { it.endTime > it.startTime }
+
+    fun searchEvents(query: String, cameras: Set<String>): List<SearchEvent> {
+        val words = query.lowercase().split(Regex("\\s+")).filter(String::isNotBlank)
+        return reviewItems.map { item ->
+            val description = when (item.id) {
+                "review-driveway" -> "Red car arriving in the driveway"
+                "review-entry" -> "Person walking to the front door"
+                "review-garden" -> "Dog running through the yard"
+                else -> item.objects.joinToString(" ")
+            }
+            SearchEvent(
+                id = item.id,
+                camera = item.camera,
+                label = item.objects.firstOrNull() ?: "activity",
+                subLabel = item.subLabels.firstOrNull(),
+                zones = item.zones,
+                startTime = item.startTime,
+                endTime = item.endTime,
+                description = description,
+                recognizedLicensePlate = item.linkedEvents.firstOrNull()?.recognizedLicensePlate,
+            )
+        }.filter { event ->
+            event.camera in cameras && words.all { word ->
+                listOfNotNull(event.label, event.subLabel, event.description)
+                    .plus(event.zones)
+                    .any { it.contains(word, ignoreCase = true) }
+            }
+        }
+    }
+
+    fun reviewItemForEvent(event: SearchEvent): ReviewItem? = reviewItems.firstOrNull { it.id == event.id }
+
+    fun historyPlayback(camera: Camera, startTime: Double, endTime: Double): PlaybackRequest = PlaybackRequest(
+        title = camera.displayName,
+        uri = "$DOCUMENTATION_URI_PREFIX${camera.name}?start=$startTime&end=$endTime",
+        kind = PlaybackKind.RECORDED,
+        cameraName = camera.name,
+        detail = "Earlier recording",
+    )
+
+    fun searchPlayback(camera: Camera, event: SearchEvent): PlaybackRequest = PlaybackRequest(
+        title = "${event.label.replace('_', ' ').replaceFirstChar(Char::uppercase)} at ${camera.displayName}",
+        uri = "$DOCUMENTATION_URI_PREFIX${camera.name}?event=${event.id}",
+        kind = PlaybackKind.RECORDED,
+        cameraName = camera.name,
+        detail = "Search result",
     )
 
     private fun connectedState(): Phase0UiState = Phase0UiState(
@@ -274,20 +414,45 @@ internal object DocumentationFixtures {
         savedProfile = profile,
         activeProfile = profile,
         snapshot = snapshot,
+        recentActivityLoaded = true,
         device = device,
         settings = AppSettings(
             appearanceMode = AppearanceMode.DARK,
             diagnosticsEnabled = true,
+            savedCameraViews = listOf(
+                SavedCameraView(
+                    id = "front-and-driveway",
+                    name = "Front and driveway",
+                    firstCameraName = "entry",
+                    secondCameraName = "driveway",
+                ),
+            ),
         ),
         review = ReviewBrowserState(
             items = reviewItems.filter { it.severity == ReviewSeverity.ALERT },
             knownLabels = reviewItems.flatMap(ReviewItem::objects).toSet(),
             knownZones = reviewItems.flatMap(ReviewItem::zones).toSet(),
+            counts = ReviewCounts(
+                reviewedAlerts = reviewItems.count { it.severity == ReviewSeverity.ALERT && it.hasBeenReviewed },
+                reviewedDetections = reviewItems.count {
+                    it.severity == ReviewSeverity.DETECTION && it.hasBeenReviewed
+                },
+                totalAlerts = reviewItems.count { it.severity == ReviewSeverity.ALERT },
+                totalDetections = reviewItems.count { it.severity == ReviewSeverity.DETECTION },
+            ),
             loadedOnce = true,
         ),
         information = InformationUiState(
             loadedOnce = true,
             summary = information,
+        ),
+        exports = ExportsUiState(loadedOnce = true, items = savedRecordings),
+        appUpdate = AppUpdateUiState(
+            checkedOnce = true,
+            updateAvailable = true,
+            latestVersion = "0.3.1",
+            releasePageUrl = OPAH_REPOSITORY_URL + "/releases/tag/v0.3.1",
+            releaseNotes = "Better playback controls\nFaster navigation\nSaved recording previews",
         ),
     )
 
@@ -298,18 +463,44 @@ internal object DocumentationFixtures {
         severity: ReviewSeverity,
         objects: List<String>,
         zones: List<String>,
-    ) = ReviewItem(
-        id = id,
-        camera = camera,
-        startTime = startTime,
-        endTime = startTime + 28.0,
-        severity = severity,
-        thumbnailPath = null,
-        objects = objects,
-        zones = zones,
-        hasBeenReviewed = id.endsWith("2"),
-        recordingAvailable = true,
-    )
+    ): ReviewItem {
+        val recognizedName = "Alex".takeIf { id == "review-entry" }
+        val event = SearchEvent(
+            id = id,
+            camera = camera,
+            label = objects.firstOrNull() ?: "activity",
+            subLabel = recognizedName,
+            zones = zones,
+            startTime = startTime,
+            endTime = startTime + 28.0,
+            description = "${objects.firstOrNull().orEmpty()} near ${zones.firstOrNull().orEmpty()}",
+            recognizedLicensePlate = "OPAH 300".takeIf { id == "review-driveway" },
+        )
+        return ReviewItem(
+            id = id,
+            camera = camera,
+            startTime = startTime,
+            endTime = startTime + 28.0,
+            severity = severity,
+            thumbnailPath = null,
+            objects = objects,
+            zones = zones,
+            hasBeenReviewed = id.endsWith("2"),
+            recordingAvailable = true,
+            detectionIds = listOf(id),
+            subLabels = listOfNotNull(recognizedName),
+            summary = ReviewSummaryMetadata(
+                title = when (id) {
+                    "review-entry" -> "Visitor at the front door"
+                    "review-driveway" -> "Car arrived in the driveway"
+                    else -> null
+                },
+                shortSummary = "Activity was recorded near ${zones.firstOrNull().orEmpty()}",
+                potentialThreatLevel = 0,
+            ),
+            linkedEvents = listOf(event),
+        )
+    }
 
     private fun codecCapability(label: String, mimeType: String, decoderName: String) = CodecCapability(
         label = label,
@@ -350,6 +541,10 @@ internal class DocumentationImageStore(context: Context) {
     }
 
     fun review(item: ReviewItem): ReviewImage? = camera(item.camera)?.let {
+        ReviewImage(bitmap = it.bitmap, loadedAtMillis = it.loadedAtMillis)
+    }
+
+    fun export(item: RecordingExport): ReviewImage? = camera(item.camera)?.let {
         ReviewImage(bitmap = it.bitmap, loadedAtMillis = it.loadedAtMillis)
     }
 }

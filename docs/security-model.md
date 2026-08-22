@@ -9,6 +9,9 @@ you can do to keep the connection safe.
   device.
 - Opah connects directly from the TV to the Frigate addresses you provide. It
   does not send your camera data through an Opah cloud service.
+- Opah contacts the official GitHub release service to check for updates. It
+  does not send camera images, recordings, or Frigate sign-in information to
+  GitHub.
 - Opah does not create its own camera recording archive.
 - The Diagnostics page is designed to leave out passwords, private addresses,
   camera images, and detailed server responses.
@@ -21,12 +24,18 @@ Opah keeps only the information needed to remember your preferences and connect
 to Frigate:
 
 - the server connection settings;
-- display and playback preferences;
+- display and playback preferences, including saved camera groups;
 - the current signed-in session; and
 - your username and password if automatic sign-in is enabled.
 
 Camera previews are held temporarily while they are displayed. Opah does not
-keep a separate long-term copy of Frigate recordings.
+keep a separate long-term copy of Frigate recordings. Recordings saved through
+Opah remain on the Frigate server.
+
+Opah remembers the latest official release information so it does not need to
+check GitHub every time it opens. An update APK is downloaded only after you
+choose to download it. Opah verifies the file before asking Android to open the
+installer.
 
 ## Keeping the connection safe
 

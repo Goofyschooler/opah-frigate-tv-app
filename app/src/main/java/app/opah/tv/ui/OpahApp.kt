@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -26,10 +28,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusDirection
-import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -40,6 +43,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
@@ -48,20 +52,49 @@ import app.opah.tv.PictureInPictureRequest
 import app.opah.tv.R
 import app.opah.tv.data.model.Camera
 import app.opah.tv.data.model.ReviewItem
+import app.opah.tv.playback.PlaybackKind
 
 internal enum class AppDestination(val label: String, val iconRes: Int) {
     HOME("Home", R.drawable.ic_home),
     CAMERAS("Cameras", R.drawable.ic_videocam),
     BIRDSEYE("Birdseye", R.drawable.ic_birdseye),
-    REVIEW("Review", R.drawable.ic_review),
-    INFORMATION("Information", R.drawable.ic_info),
+    ACTIVITY("Activity", R.drawable.ic_review),
+    SAVED("Saved", R.drawable.ic_saved),
     SETTINGS("Settings", R.drawable.ic_settings),
-    ABOUT("About", R.drawable.ic_about),
 }
 
-private enum class SettingsPage { MAIN, DIAGNOSTICS }
+internal fun navigationAccessibilityLabel(
+    destination: AppDestination,
+    updateAvailable: Boolean,
+    unreviewedActivityCount: Int = 0,
+): String = when {
+    destination == AppDestination.SETTINGS && updateAvailable -> "Settings, update available"
+    destination == AppDestination.ACTIVITY && unreviewedActivityCount > 0 ->
+        "Activity, $unreviewedActivityCount not reviewed"
+    else -> destination.label
+}
 
-internal enum class RootSurface { PLAYBACK, CONNECTED, LOADING, RECOVERY, SETUP }
+internal fun compactActivityCount(count: Int): String? = when {
+    count <= 0 -> null
+    count > 99 -> "99+"
+    else -> count.toString()
+}
+
+internal enum class RootSurface { PLAYBACK, CAMERA_GROUP, CONNECTED, LOADING, RECOVERY, SETUP }
+
+internal data class CameraNeighbors(
+    val previous: Camera?,
+    val next: Camera?,
+)
+
+internal fun cameraNeighbors(cameras: List<Camera>, currentCameraName: String?): CameraNeighbors {
+    val currentIndex = cameras.indexOfFirst { it.name == currentCameraName }
+    if (currentIndex < 0 || cameras.size < 2) return CameraNeighbors(null, null)
+    return CameraNeighbors(
+        previous = cameras.wrappedAt(currentIndex - 1),
+        next = cameras.wrappedAt(currentIndex + 1),
+    )
+}
 
 internal fun rootSurface(
     hasPlayback: Boolean,
@@ -69,8 +102,10 @@ internal fun rootSurface(
     loading: Boolean,
     connectionWorkInProgress: Boolean = false,
     savedSessionRecoveryAvailable: Boolean = false,
+    hasCameraGroupView: Boolean = false,
 ): RootSurface = when {
     hasPlayback -> RootSurface.PLAYBACK
+    hasCameraGroupView -> RootSurface.CAMERA_GROUP
     hasConnectedContent -> RootSurface.CONNECTED
     connectionWorkInProgress -> RootSurface.SETUP
     loading -> RootSurface.LOADING
@@ -86,30 +121,54 @@ fun OpahApp(
     onEnterPictureInPicture: (PictureInPictureRequest) -> Boolean = { false },
     onFullyDrawn: () -> Unit = {},
     onExitRequested: () -> Unit = {},
+    onInstallUpdate: (String) -> Unit = {},
     initialDestinationName: String? = null,
     initialSettingsPageName: String? = null,
     initialInformationTabName: String? = null,
+    initialActivityPageName: String? = null,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     OpahTheme(state.settings.appearanceMode, state.settings.customThemeColors) {
-        var destinationName by rememberSaveable(initialDestinationName) {
-            mutableStateOf(initialDestinationName ?: AppDestination.HOME.name)
+        val normalizedInitialDestination = when (initialDestinationName) {
+            "REVIEW" -> AppDestination.ACTIVITY.name
+            "INFORMATION", "ABOUT" -> AppDestination.SETTINGS.name
+            else -> initialDestinationName ?: AppDestination.HOME.name
+        }
+        val normalizedInitialSettingsPage = when {
+            initialDestinationName == "INFORMATION" -> SettingsPage.SYSTEM.name
+            initialDestinationName == "ABOUT" -> SettingsPage.ABOUT.name
+            initialSettingsPageName == "DIAGNOSTICS" -> SettingsPage.ADVANCED.name
+            else -> initialSettingsPageName ?: SettingsPage.MAIN.name
+        }
+        var destinationName by rememberSaveable(normalizedInitialDestination) {
+            mutableStateOf(normalizedInitialDestination)
         }
         var returnDestinationName by rememberSaveable { mutableStateOf(AppDestination.HOME.name) }
         var restoreFocusKey by rememberSaveable { mutableStateOf<String?>(null) }
         var playbackReturnFocusKey by rememberSaveable { mutableStateOf<String?>(null) }
-        var settingsPageName by rememberSaveable(initialSettingsPageName) {
-            mutableStateOf(initialSettingsPageName ?: SettingsPage.MAIN.name)
+        var cameraGroupOriginFocusKey by rememberSaveable { mutableStateOf<String?>(null) }
+        val normalizedInitialActivityPage = initialActivityPageName
+            ?.let { runCatching { ActivityPage.valueOf(it).name }.getOrNull() }
+            ?: ActivityPage.RECENT.name
+        var activityPageName by rememberSaveable(normalizedInitialActivityPage) {
+            mutableStateOf(normalizedInitialActivityPage)
         }
-        var restoreSettingsDiagnosticsFocus by rememberSaveable { mutableStateOf(false) }
+        var activityBackDestinationName by rememberSaveable { mutableStateOf(AppDestination.HOME.name) }
+        var activityBackFocusKey by rememberSaveable { mutableStateOf<String?>(null) }
+        var settingsPageName by rememberSaveable(normalizedInitialSettingsPage) {
+            mutableStateOf(normalizedInitialSettingsPage)
+        }
+        var settingsReturnPageName by rememberSaveable { mutableStateOf<String?>(null) }
+        var lastHomeFocusKey by rememberSaveable { mutableStateOf<String?>(null) }
         val homeCameraFocusRequester = remember { FocusRequester() }
-        val birdseyeFocusRequester = remember { FocusRequester() }
-        val settingsDiagnosticsFocusRequester = remember { FocusRequester() }
-        val diagnosticsBackFocusRequester = remember { FocusRequester() }
+        val settingsMainFocusRequester = remember { FocusRequester() }
+        val settingsDetailFocusRequester = remember { FocusRequester() }
         val destination = runCatching { AppDestination.valueOf(destinationName) }
             .getOrDefault(AppDestination.HOME)
         val settingsPage = runCatching { SettingsPage.valueOf(settingsPageName) }
             .getOrDefault(SettingsPage.MAIN)
+        val activityPage = runCatching { ActivityPage.valueOf(activityPageName) }
+            .getOrDefault(ActivityPage.RECENT)
         val playback = state.playback
         val surface = rootSurface(
             hasPlayback = playback != null,
@@ -117,10 +176,15 @@ fun OpahApp(
             loading = state.loading,
             connectionWorkInProgress = state.connectionWorkInProgress,
             savedSessionRecoveryAvailable = state.savedSessionRecoveryAvailable,
+            hasCameraGroupView = state.cameraGroupView != null,
         )
 
         LaunchedEffect(surface) {
-            if (surface == RootSurface.CONNECTED || surface == RootSurface.SETUP) {
+            if (
+                surface == RootSurface.CONNECTED ||
+                surface == RootSurface.CAMERA_GROUP ||
+                surface == RootSurface.SETUP
+            ) {
                 withFrameNanos { }
                 onFullyDrawn()
             }
@@ -135,8 +199,8 @@ fun OpahApp(
             }
             if (surface != RootSurface.CONNECTED || destination != AppDestination.SETTINGS) return@LaunchedEffect
             withFrameNanos { }
-            if (settingsPage == SettingsPage.DIAGNOSTICS) {
-                diagnosticsBackFocusRequester.requestFocus()
+            if (settingsPage != SettingsPage.MAIN) {
+                settingsDetailFocusRequester.requestFocus()
             }
         }
 
@@ -144,9 +208,12 @@ fun OpahApp(
             RootSurface.PLAYBACK -> {
                 val playbackRequest = requireNotNull(playback)
                 val cameras = state.snapshot?.cameras.orEmpty()
-                val currentIndex = cameras.indexOfFirst { it.name == state.activeCameraName }
-                val previous = cameras.wrappedAt(currentIndex - 1).takeIf { currentIndex >= 0 }
-                val next = cameras.wrappedAt(currentIndex + 1).takeIf { currentIndex >= 0 }
+                val (previous, next) = cameraNeighbors(cameras, state.activeCameraName)
+                val activityItem = playbackRequest.activityItemId?.let { activityId ->
+                    state.review.items.firstOrNull { it.id == activityId }
+                        ?: state.snapshot?.recentReviewItems?.firstOrNull { it.id == activityId }
+                }
+                val historySaveKey = playbackRequest.recordingSaveKey
                 PlaybackScreen(
                     request = playbackRequest,
                     onBack = {
@@ -162,42 +229,147 @@ fun OpahApp(
                     pictureInPictureAvailable = pictureInPictureAvailable,
                     pictureInPictureActive = pictureInPictureActive,
                     onEnterPictureInPicture = onEnterPictureInPicture,
+                    previousCameraName = previous?.displayName,
                     onPrevious = previous?.let { camera -> { viewModel.playAutomatic(camera) } },
+                    nextCameraName = next?.displayName,
                     onNext = next?.let { camera -> { viewModel.playAutomatic(camera) } },
+                    onOpenEarlier = playbackRequest.cameraName
+                        ?.takeIf { cameraName ->
+                            playbackRequest.kind == PlaybackKind.LIVE &&
+                                cameras.any { it.name == cameraName }
+                        }
+                        ?.let { cameraName ->
+                            {
+                                activityPageName = ActivityPage.HISTORY.name
+                                activityBackDestinationName = AppDestination.CAMERAS.name
+                                activityBackFocusKey = "cameras:auto:$cameraName"
+                                restoreFocusKey = "activity:page:${ActivityPage.HISTORY.name}"
+                                playbackReturnFocusKey = null
+                                viewModel.loadHistory(cameraName, null)
+                                destinationName = AppDestination.ACTIVITY.name
+                                viewModel.closePlayback()
+                            }
+                        },
+                    activityReviewed = activityItem?.hasBeenReviewed,
+                    markingActivityReviewed = activityItem != null &&
+                        state.review.markingReviewedItemId == activityItem.id,
+                    onMarkActivityReviewed = activityItem?.let { item ->
+                        { viewModel.setReviewReviewed(item, !item.hasBeenReviewed) }
+                    },
+                    stretchVideo = playbackRequest.cameraName
+                        ?.let { it in state.settings.stretchedCameraNames }
+                        ?: false,
+                    onToggleStretchVideo = playbackRequest.cameraName?.let { cameraName ->
+                        {
+                            viewModel.updateCameraStretch(
+                                cameraName,
+                                cameraName !in state.settings.stretchedCameraNames,
+                            )
+                        }
+                    },
+                    savingActivityRecording = when {
+                        activityItem != null -> state.review.savingClipItemId == activityItem.id
+                        historySaveKey != null -> state.history.savingSlotStartTime ==
+                            playbackRequest.recordingStartTime
+                        else -> false
+                    },
+                    activityRecordingSaved = when {
+                        activityItem != null -> activityItem.id in state.review.savedClipItemIds
+                        historySaveKey != null -> historySaveKey in state.history.savedSlotKeys
+                        else -> false
+                    },
+                    activityRecordingMessage = when {
+                        activityItem != null -> state.review.savedClipMessage
+                            .takeIf { state.review.savedClipItemId == activityItem.id }
+                        historySaveKey != null -> state.history.savedMessage
+                        else -> null
+                    },
+                    onSaveActivityRecording = when {
+                        activityItem != null -> { { viewModel.saveReviewClip(activityItem) } }
+                        historySaveKey != null -> { { viewModel.saveHistoryClip(playbackRequest) } }
+                        else -> null
+                    },
+                )
+            }
+
+            RootSurface.CAMERA_GROUP -> {
+                val cameraGroupView = requireNotNull(state.cameraGroupView)
+                CameraGroupViewScreen(
+                    state = cameraGroupView,
+                    preferRtpTcp = state.settings.preferRtpTcp,
+                    pictureInPictureAvailable = pictureInPictureAvailable,
+                    pictureInPictureActive = pictureInPictureActive,
+                    onEnterPictureInPicture = onEnterPictureInPicture,
+                    onBack = {
+                        destinationName = AppDestination.CAMERAS.name
+                        restoreFocusKey = cameraGroupOriginFocusKey
+                        cameraGroupOriginFocusKey = null
+                        viewModel.closeCameraGroup()
+                    },
+                    cachedBitmap = { camera -> viewModel.cachedCameraImage(camera)?.bitmap },
+                    refreshBitmap = { camera, height ->
+                        viewModel.refreshCameraImage(camera, height).getOrNull()?.bitmap
+                    },
                 )
             }
 
             RootSurface.CONNECTED -> {
                 BackHandler(
-                    enabled = destination != AppDestination.HOME ||
+                    enabled = state.ptz.cameraName != null ||
+                        destination != AppDestination.HOME ||
                         state.review.selectedItemId != null ||
+                        state.exports.selectedItemId != null ||
                         settingsPage != SettingsPage.MAIN,
                 ) {
-                    if (destination == AppDestination.REVIEW && state.review.selectedItemId != null) {
+                    if (state.ptz.cameraName != null) {
+                        viewModel.closePtzControls()
+                    } else if (destination == AppDestination.ACTIVITY && state.review.selectedItemId != null) {
                         viewModel.closeReviewItem()
+                    } else if (destination == AppDestination.SAVED && state.exports.selectedItemId != null) {
+                        viewModel.closeExport()
+                    } else if (destination == AppDestination.ACTIVITY && activityPage != ActivityPage.RECENT) {
+                        if (activityBackDestinationName == AppDestination.CAMERAS.name) {
+                            destinationName = AppDestination.CAMERAS.name
+                            restoreFocusKey = activityBackFocusKey
+                            activityPageName = ActivityPage.RECENT.name
+                        } else {
+                            activityPageName = ActivityPage.RECENT.name
+                            restoreFocusKey = null
+                        }
                     } else if (destination == AppDestination.SETTINGS && settingsPage != SettingsPage.MAIN) {
-                        restoreSettingsDiagnosticsFocus = true
+                        settingsReturnPageName = settingsPage.name
                         settingsPageName = SettingsPage.MAIN.name
                     } else {
                         destinationName = AppDestination.HOME.name
                         settingsPageName = SettingsPage.MAIN.name
+                        restoreFocusKey = lastHomeFocusKey
                     }
                 }
                 ConnectedShell(
                     destination = destination,
-                    birdseyeAvailable = state.snapshot?.birdseye?.playable == true,
+                    updateAvailable = state.appUpdate.updateAvailable,
+                    unreviewedActivityCount = state.review.counts.unreviewedTotal,
                     onDestination = {
                         destinationName = it.name
+                        if (it == AppDestination.ACTIVITY) {
+                            activityPageName = ActivityPage.RECENT.name
+                            activityBackDestinationName = AppDestination.HOME.name
+                            activityBackFocusKey = lastHomeFocusKey
+                        }
                         settingsPageName = SettingsPage.MAIN.name
-                        restoreSettingsDiagnosticsFocus = false
-                        restoreFocusKey = null
+                        settingsReturnPageName = null
+                        restoreFocusKey = if (it == AppDestination.HOME) lastHomeFocusKey else null
                         playbackReturnFocusKey = null
                     },
-                    contentClaimsInitialFocus = restoreFocusKey != null,
+                    contentClaimsInitialFocus = restoreFocusKey != null ||
+                        (destination == AppDestination.SETTINGS && settingsPage != SettingsPage.MAIN) ||
+                        (destination == AppDestination.ACTIVITY && state.review.selectedItemId != null) ||
+                        (destination == AppDestination.SAVED && state.exports.selectedItemId != null),
                     contentEntryFocusRequester = when {
                         destination == AppDestination.HOME && state.snapshot?.cameras?.isNotEmpty() == true ->
                             homeCameraFocusRequester
-                        destination == AppDestination.BIRDSEYE -> birdseyeFocusRequester
+                        destination == AppDestination.SETTINGS && settingsPage == SettingsPage.MAIN ->
+                            settingsMainFocusRequester
                         else -> null
                     },
                 ) {
@@ -219,9 +391,15 @@ fun OpahApp(
                                 state = state,
                                 restoreFocusKey = restoreFocusKey,
                                 onFocusRestored = { restoreFocusKey = null },
+                                onFocusKeyChanged = { lastHomeFocusKey = it },
                                 initialCameraFocusRequester = homeCameraFocusRequester,
                                 onOpenCameras = { destinationName = AppDestination.CAMERAS.name },
-                                onOpenReview = { destinationName = AppDestination.REVIEW.name },
+                                onOpenReview = {
+                                    destinationName = AppDestination.ACTIVITY.name
+                                    activityPageName = ActivityPage.RECENT.name
+                                    activityBackDestinationName = AppDestination.HOME.name
+                                    activityBackFocusKey = lastHomeFocusKey
+                                },
                                 onPlayCamera = { camera, key ->
                                     playbackReturnFocusKey = key
                                     returnDestinationName = AppDestination.HOME.name
@@ -253,11 +431,16 @@ fun OpahApp(
                                     returnDestinationName = AppDestination.CAMERAS.name
                                     viewModel.playAutomatic(camera)
                                 },
-                                onPlayStream = { camera, option, key ->
-                                    playbackReturnFocusKey = key
-                                    returnDestinationName = AppDestination.CAMERAS.name
-                                    viewModel.playStream(camera, option)
+                                onOpenControls = viewModel::openPtzControls,
+                                onRetryControls = viewModel::retryPtzControls,
+                                onCloseControls = viewModel::closePtzControls,
+                                onPtzCommand = viewModel::sendPtzCommand,
+                                onOpenCameraGroup = { title, cameraNames, focusKey ->
+                                    cameraGroupOriginFocusKey = focusKey
+                                    viewModel.openCameraGroup(title, cameraNames)
                                 },
+                                onSaveCameraView = viewModel::saveCameraView,
+                                onDeleteCameraView = viewModel::deleteCameraView,
                                 cachedBitmap = { camera ->
                                     viewModel.cachedCameraImage(camera)?.bitmap
                                 },
@@ -270,87 +453,209 @@ fun OpahApp(
                                 state = state,
                                 restoreFocusKey = restoreFocusKey,
                                 onFocusRestored = { restoreFocusKey = null },
-                                initialFocusRequester = birdseyeFocusRequester,
-                                onPlay = {
-                                    playbackReturnFocusKey = "birdseye:watch"
+                                onPlay = { key ->
+                                    playbackReturnFocusKey = key
                                     returnDestinationName = AppDestination.BIRDSEYE.name
                                     viewModel.playBirdseye()
                                 },
-                                cachedBitmap = { camera -> viewModel.cachedCameraImage(camera)?.bitmap },
+                                cachedBitmap = { camera ->
+                                    viewModel.cachedCameraImage(camera)?.bitmap
+                                },
                                 refreshBitmap = { camera, height ->
                                     viewModel.refreshCameraImage(camera, height).getOrNull()?.bitmap
                                 },
                             )
 
-                            AppDestination.REVIEW -> ReviewScreen(
-                                state = state,
-                                restoreFocusKey = restoreFocusKey,
-                                onFocusRestored = { restoreFocusKey = null },
-                                onLoad = viewModel::loadReview,
-                                onSeverity = viewModel::updateReviewSeverity,
-                                onCamera = viewModel::updateReviewCamera,
-                                onLabel = viewModel::updateReviewLabel,
-                                onZone = viewModel::updateReviewZone,
-                                onTimeRange = viewModel::updateReviewTimeRange,
-                                onResetFilters = viewModel::resetReviewFilters,
-                                onSelectItem = { item, key ->
-                                    restoreFocusKey = key
-                                    viewModel.selectReviewItem(item)
-                                },
-                                onCloseItem = viewModel::closeReviewItem,
-                                onPlayItem = { item ->
-                                    returnDestinationName = AppDestination.REVIEW.name
-                                    viewModel.playReview(item)
-                                },
-                                onMarkReviewed = viewModel::markReviewReviewed,
-                                cachedBitmap = { item -> viewModel.cachedReviewImage(item)?.bitmap },
-                                refreshBitmap = { item, height ->
-                                    viewModel.refreshReviewImage(item, height).getOrNull()?.bitmap
-                                },
-                            )
-
-                            AppDestination.INFORMATION -> InformationScreen(
-                                state = state,
-                                onLoad = { viewModel.loadInformation() },
-                                onRefresh = { viewModel.loadInformation(force = true) },
-                                initialTabName = initialInformationTabName,
-                            )
-
-                            AppDestination.SETTINGS -> when (settingsPage) {
-                                SettingsPage.MAIN -> SettingsScreen(
+                            AppDestination.ACTIVITY -> when (activityPage) {
+                                ActivityPage.RECENT -> ReviewScreen(
                                     state = state,
-                                    onAppearance = viewModel::updateAppearance,
-                                    onCustomTheme = viewModel::updateCustomTheme,
-                                    onStreamPreference = viewModel::updateStreamPreference,
-                                    onPreferRtpTcp = viewModel::updatePreferRtpTcp,
-                                    onStartMuted = viewModel::updateStartLiveMuted,
-                                    onDiagnostics = viewModel::updateDiagnosticsEnabled,
-                                    onUpdateRtspRoute = viewModel::updateRtspRoute,
-                                    onOpenDiagnostics = {
-                                        restoreSettingsDiagnosticsFocus = false
-                                        settingsPageName = SettingsPage.DIAGNOSTICS.name
+                                    restoreFocusKey = restoreFocusKey,
+                                    onFocusRestored = { restoreFocusKey = null },
+                                    onLoad = viewModel::loadReview,
+                                    onLoadMore = viewModel::loadMoreReview,
+                                    onMarkAllShownReviewed = viewModel::markAllShownReviewed,
+                                    onPage = { page ->
+                                        activityPageName = page.name
+                                        restoreFocusKey = "activity:page:${page.name}"
                                     },
-                                    diagnosticsFocusRequester = settingsDiagnosticsFocusRequester,
-                                    restoreDiagnosticsFocus = restoreSettingsDiagnosticsFocus,
-                                    onDiagnosticsFocusRestored = {
-                                        restoreSettingsDiagnosticsFocus = false
+                                    onSeverity = viewModel::updateReviewSeverity,
+                                    onApplyFilters = viewModel::applyReviewFilters,
+                                    onResetFilters = viewModel::resetReviewFilters,
+                                    onSelectItem = { item, key ->
+                                        restoreFocusKey = key
+                                        viewModel.selectReviewItem(item)
                                     },
-                                    onSignOut = { viewModel.logout(false) },
-                                    onForgetServer = { viewModel.logout(true) },
+                                    onCloseItem = viewModel::closeReviewItem,
+                                    onPlayItem = { item ->
+                                        returnDestinationName = AppDestination.ACTIVITY.name
+                                        viewModel.playReview(item)
+                                    },
+                                    onSetReviewed = viewModel::setReviewReviewed,
+                                    onSaveClip = viewModel::saveReviewClip,
+                                    onFindSimilar = { item ->
+                                        activityPageName = ActivityPage.SEARCH.name
+                                        restoreFocusKey = "activity:page:${ActivityPage.SEARCH.name}"
+                                        viewModel.findSimilarActivity(item)
+                                    },
+                                    cachedBitmap = { item -> viewModel.cachedReviewImage(item)?.bitmap },
+                                    refreshBitmap = { item, height ->
+                                        viewModel.refreshReviewImage(item, height).getOrNull()?.bitmap
+                                    },
                                 )
 
-                                SettingsPage.DIAGNOSTICS -> DiagnosticsScreen(
+                                ActivityPage.HISTORY -> ActivityHistoryScreen(
                                     state = state,
-                                    onRefresh = viewModel::refresh,
-                                    onBack = {
-                                        restoreSettingsDiagnosticsFocus = true
-                                        settingsPageName = SettingsPage.MAIN.name
+                                    restoreFocusKey = restoreFocusKey,
+                                    onFocusRestored = { restoreFocusKey = null },
+                                    onPage = { page ->
+                                        activityPageName = page.name
+                                        restoreFocusKey = "activity:page:${page.name}"
                                     },
-                                    initialFocusRequester = diagnosticsBackFocusRequester,
+                                    onLoad = viewModel::loadHistory,
+                                    onMoveHour = viewModel::moveHistoryHour,
+                                    onPlay = { slot, key ->
+                                        playbackReturnFocusKey = key
+                                        returnDestinationName = AppDestination.ACTIVITY.name
+                                        viewModel.playHistorySlot(slot)
+                                    },
+                                )
+
+                                ActivityPage.SEARCH -> ActivitySearchScreen(
+                                    state = state,
+                                    restoreFocusKey = restoreFocusKey,
+                                    onFocusRestored = { restoreFocusKey = null },
+                                    onPage = { page ->
+                                        activityPageName = page.name
+                                        restoreFocusKey = "activity:page:${page.name}"
+                                    },
+                                    onSearch = viewModel::searchActivity,
+                                    onLoadMore = viewModel::loadMoreActivitySearch,
+                                    onPlay = { event, key ->
+                                        playbackReturnFocusKey = key
+                                        returnDestinationName = AppDestination.ACTIVITY.name
+                                        viewModel.playSearchEvent(event)
+                                    },
+                                    cachedBitmap = { event -> viewModel.cachedSearchImage(event)?.bitmap },
+                                    refreshBitmap = { event, height ->
+                                        viewModel.refreshSearchImage(event, height).getOrNull()?.bitmap
+                                    },
                                 )
                             }
 
-                            AppDestination.ABOUT -> AboutScreen()
+                            AppDestination.SAVED -> SavedRecordingsScreen(
+                                state = state,
+                                restoreFocusKey = restoreFocusKey,
+                                onFocusRestored = { restoreFocusKey = null },
+                                onLoad = viewModel::loadExports,
+                                onSelect = { export, key ->
+                                    restoreFocusKey = key
+                                    viewModel.selectExport(export)
+                                },
+                                onClose = viewModel::closeExport,
+                                onPlay = { export ->
+                                    playbackReturnFocusKey = "saved:recording:${export.id}"
+                                    returnDestinationName = AppDestination.SAVED.name
+                                    viewModel.playExport(export)
+                                },
+                                onDelete = viewModel::deleteExport,
+                                cachedBitmap = { export -> viewModel.cachedExportImage(export)?.bitmap },
+                                refreshBitmap = { export, height ->
+                                    viewModel.refreshExportImage(export, height).getOrNull()?.bitmap
+                                },
+                            )
+
+                            AppDestination.SETTINGS -> when (settingsPage) {
+                                SettingsPage.MAIN -> SettingsHubScreen(
+                                    update = state.appUpdate,
+                                    restorePage = settingsReturnPageName?.let { name ->
+                                        runCatching { SettingsPage.valueOf(name) }.getOrNull()
+                                    },
+                                    initialFocusRequester = settingsMainFocusRequester,
+                                    onFocusRestored = { settingsReturnPageName = null },
+                                    onOpen = { page ->
+                                        settingsReturnPageName = page.name
+                                        settingsPageName = page.name
+                                    },
+                                )
+
+                                SettingsPage.UPDATE -> UpdateSettingsScreen(
+                                    update = state.appUpdate,
+                                    onBack = {
+                                        settingsReturnPageName = SettingsPage.UPDATE.name
+                                        settingsPageName = SettingsPage.MAIN.name
+                                    },
+                                    onCheckAgain = { viewModel.checkForUpdates(forceRefresh = true) },
+                                    onDownload = viewModel::downloadUpdate,
+                                    onInstall = onInstallUpdate,
+                                    initialFocusRequester = settingsDetailFocusRequester,
+                                )
+
+                                SettingsPage.APPEARANCE -> AppearanceSettingsScreen(
+                                    state = state,
+                                    onAppearance = viewModel::updateAppearance,
+                                    onCustomTheme = viewModel::updateCustomTheme,
+                                    onBack = {
+                                        settingsReturnPageName = SettingsPage.APPEARANCE.name
+                                        settingsPageName = SettingsPage.MAIN.name
+                                    },
+                                    initialFocusRequester = settingsDetailFocusRequester,
+                                )
+
+                                SettingsPage.PLAYBACK -> PlaybackSettingsScreen(
+                                    state = state,
+                                    onStreamPreference = viewModel::updateStreamPreference,
+                                    onCompatibilityMode = viewModel::updatePreferRtpTcp,
+                                    onStartMuted = viewModel::updateStartLiveMuted,
+                                    onPlaybackDetails = viewModel::updateDiagnosticsEnabled,
+                                    onBack = {
+                                        settingsReturnPageName = SettingsPage.PLAYBACK.name
+                                        settingsPageName = SettingsPage.MAIN.name
+                                    },
+                                    initialFocusRequester = settingsDetailFocusRequester,
+                                )
+
+                                SettingsPage.CONNECTION -> ConnectionSettingsScreen(
+                                    state = state,
+                                    onUpdateLiveRoute = viewModel::updateRtspRoute,
+                                    onSignOut = { viewModel.logout(false) },
+                                    onForgetServer = { viewModel.logout(true) },
+                                    onBack = {
+                                        settingsReturnPageName = SettingsPage.CONNECTION.name
+                                        settingsPageName = SettingsPage.MAIN.name
+                                    },
+                                    initialFocusRequester = settingsDetailFocusRequester,
+                                )
+
+                                SettingsPage.SYSTEM -> InformationScreen(
+                                    state = state,
+                                    onLoad = { viewModel.loadInformation() },
+                                    onRefresh = { viewModel.loadInformation(force = true) },
+                                    onBack = {
+                                        settingsReturnPageName = SettingsPage.SYSTEM.name
+                                        settingsPageName = SettingsPage.MAIN.name
+                                    },
+                                    initialFocusRequester = settingsDetailFocusRequester,
+                                    initialTabName = initialInformationTabName,
+                                )
+
+                                SettingsPage.ADVANCED -> DiagnosticsScreen(
+                                    state = state,
+                                    onRefresh = viewModel::refresh,
+                                    onBack = {
+                                        settingsReturnPageName = SettingsPage.ADVANCED.name
+                                        settingsPageName = SettingsPage.MAIN.name
+                                    },
+                                    initialFocusRequester = settingsDetailFocusRequester,
+                                )
+
+                                SettingsPage.ABOUT -> AboutScreen(
+                                    onBack = {
+                                        settingsReturnPageName = SettingsPage.ABOUT.name
+                                        settingsPageName = SettingsPage.MAIN.name
+                                    },
+                                    initialFocusRequester = settingsDetailFocusRequester,
+                                )
+                            }
                         }
                     }
                 }
@@ -379,34 +684,21 @@ fun OpahApp(
 @Composable
 private fun ConnectedShell(
     destination: AppDestination,
-    birdseyeAvailable: Boolean,
+    updateAvailable: Boolean,
+    unreviewedActivityCount: Int,
     onDestination: (AppDestination) -> Unit,
     contentClaimsInitialFocus: Boolean,
     contentEntryFocusRequester: FocusRequester?,
     content: @Composable () -> Unit,
 ) {
-    var railHasFocus by rememberSaveable { mutableStateOf(false) }
-    var railActivated by rememberSaveable { mutableStateOf(false) }
-    var railEntryRequest by remember { mutableIntStateOf(0) }
     var contentFocusRequest by remember { mutableIntStateOf(0) }
+    var shellRenderPass by remember { mutableIntStateOf(0) }
     val focusManager = LocalFocusManager.current
-    val visibleDestinations = remember(birdseyeAvailable) {
-        AppDestination.entries.filter { it != AppDestination.BIRDSEYE || birdseyeAvailable }
-    }
     val navRequesters = remember { AppDestination.entries.associateWith { FocusRequester() } }
     val railClaimsInitialFocus = remember { !contentClaimsInitialFocus }
-    val railExpanded = railHasFocus && railActivated
-    // Width animation forces every image-heavy destination to remeasure on every
-    // animation frame. An immediate rail transition is substantially faster on TV SoCs.
-    val collapsedRailWidth = 54.dp
-    val railWidth = if (railExpanded) 190.dp else collapsedRailWidth
+    val railExpansionState = remember { NavigationRailExpansionState() }
     LaunchedEffect(Unit) {
         if (!railClaimsInitialFocus) return@LaunchedEffect
-        withFrameNanos { }
-        navRequesters.getValue(destination).requestFocus()
-    }
-    LaunchedEffect(railEntryRequest, destination) {
-        if (railEntryRequest == 0 || !railHasFocus) return@LaunchedEffect
         withFrameNanos { }
         navRequesters.getValue(destination).requestFocus()
     }
@@ -416,151 +708,260 @@ private fun ConnectedShell(
         focusManager.moveFocus(FocusDirection.Right)
         contentFocusRequest = 0
     }
+    LaunchedEffect(destination, contentClaimsInitialFocus) {
+        withFrameNanos { }
+        shellRenderPass += 1
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+            .background(MaterialTheme.colorScheme.background)
+            .drawWithContent {
+                shellRenderPass
+                drawContent()
+            },
     ) {
-        // The destination always receives the collapsed-rail inset. Expanding the
-        // rail now overlays it instead of changing its constraints and forcing an
-        // image-heavy screen to be measured again.
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(start = collapsedRailWidth)
-                .onFocusEvent { if (it.hasFocus) railActivated = true },
-        ) {
-            content()
-        }
-        Column(
-            modifier = Modifier
-                .align(Alignment.CenterStart)
-                .width(railWidth)
-                .fillMaxHeight()
-                .background(MaterialTheme.colorScheme.surface)
-                .padding(horizontal = 6.dp, vertical = 12.dp)
-                .onFocusEvent { focusState ->
-                    if (focusState.hasFocus && !railHasFocus) railEntryRequest += 1
-                    railHasFocus = focusState.hasFocus
-                }
+                .padding(start = 60.dp)
                 .onPreviewKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyDown) {
-                        when (event.key) {
-                            Key.DirectionUp,
-                            Key.DirectionDown,
-                            Key.DirectionLeft,
-                            Key.DirectionRight -> railActivated = true
+                    if (event.key == Key.DirectionLeft) {
+                        when (event.type) {
+                            KeyEventType.KeyDown -> railExpansionState.armForNavigationFocus()
+                            KeyEventType.KeyUp -> railExpansionState.cancelPendingExpansion()
                             else -> Unit
                         }
                     }
                     false
                 }
-                .focusGroup(),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .onFocusChanged {
+                    if (it.hasFocus) railExpansionState.contentFocused()
+                },
         ) {
-            Box(
+            content()
+        }
+        ConnectedNavigationRail(
+            destination = destination,
+            updateAvailable = updateAvailable,
+            unreviewedActivityCount = unreviewedActivityCount,
+            navRequesters = navRequesters,
+            expansionState = railExpansionState,
+            contentEntryFocusRequester = contentEntryFocusRequester,
+            onSelect = { item ->
+                railExpansionState.destinationSelected()
+                onDestination(item)
+                contentFocusRequest += 1
+            },
+            modifier = Modifier.align(Alignment.CenterStart),
+        )
+    }
+}
+
+@Stable
+internal class NavigationRailExpansionState {
+    var expanded by mutableStateOf(false)
+        private set
+    private var expandOnNextNavigationFocus = false
+
+    fun armForNavigationFocus() {
+        expandOnNextNavigationFocus = true
+    }
+
+    fun cancelPendingExpansion() {
+        expandOnNextNavigationFocus = false
+    }
+
+    fun navigationFocused() {
+        if (expandOnNextNavigationFocus) expanded = true
+        expandOnNextNavigationFocus = false
+    }
+
+    fun navigationInput() {
+        expanded = true
+        expandOnNextNavigationFocus = false
+    }
+
+    fun contentFocused() {
+        expanded = false
+        expandOnNextNavigationFocus = false
+    }
+
+    fun destinationSelected() {
+        expanded = false
+        expandOnNextNavigationFocus = false
+    }
+}
+
+@Composable
+private fun ConnectedNavigationRail(
+    destination: AppDestination,
+    updateAvailable: Boolean,
+    unreviewedActivityCount: Int,
+    navRequesters: Map<AppDestination, FocusRequester>,
+    expansionState: NavigationRailExpansionState,
+    contentEntryFocusRequester: FocusRequester?,
+    onSelect: (AppDestination) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val expanded = expansionState.expanded
+    val visibleDestinations = AppDestination.entries
+    Column(
+        modifier = modifier
+            .width(if (expanded) 148.dp else 60.dp)
+            .fillMaxHeight()
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 6.dp, vertical = 12.dp)
+            .onPreviewKeyEvent { event ->
+                if (
+                    event.type == KeyEventType.KeyDown &&
+                    (event.key == Key.DirectionUp || event.key == Key.DirectionDown)
+                ) {
+                    expansionState.navigationInput()
+                }
+                false
+            }
+            .focusProperties {
+                onEnter = { navRequesters.getValue(destination).requestFocus() }
+            }
+            .focusGroup(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Image(
+                    painter = painterResource(R.drawable.opah_brand_mark),
+                    contentDescription = null,
+                    modifier = Modifier.size(34.dp),
+                )
+                if (expanded) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Opah",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+            }
+        }
+        visibleDestinations.forEachIndexed { index, item ->
+            FocusCard(
+                focusKey = "nav:${item.name.lowercase()}",
+                restoreFocusKey = null,
+                onFocusRestored = {},
+                onClick = { onSelect(item) },
+                selected = item == destination,
+                accessibilityLabel = navigationAccessibilityLabel(
+                    item,
+                    updateAvailable,
+                    unreviewedActivityCount,
+                ),
+                externalFocusRequester = navRequesters.getValue(item),
+                onFocused = { expansionState.navigationFocused() },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 5.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    Image(
-                        painter = painterResource(R.drawable.opah_brand_mark),
-                        contentDescription = null,
-                        modifier = Modifier.size(if (railExpanded) 34.dp else 32.dp),
-                    )
-                    if (railExpanded) {
-                        Spacer(Modifier.width(8.dp))
-                        Column {
-                            Text(
-                                text = "Opah",
-                                color = MaterialTheme.colorScheme.onSurface,
-                                fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.titleMedium,
-                            )
-                        }
-                    }
-                }
-            }
-            visibleDestinations.forEachIndexed { index, item ->
-                FocusCard(
-                    focusKey = "nav:${item.name.lowercase()}",
-                    restoreFocusKey = null,
-                    onFocusRestored = {},
-                    onClick = {
-                        onDestination(item)
-                        contentFocusRequest += 1
-                    },
-                    selected = item == destination,
-                    accessibilityLabel = item.label,
-                    externalFocusRequester = navRequesters.getValue(item),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .focusProperties {
-                            up = if (index == 0) {
-                                FocusRequester.Cancel
-                            } else {
-                                navRequesters.getValue(visibleDestinations[index - 1])
-                            }
-                            down = if (index == visibleDestinations.lastIndex) {
-                                FocusRequester.Cancel
-                            } else {
-                                navRequesters.getValue(visibleDestinations[index + 1])
-                            }
-                            left = FocusRequester.Cancel
-                            right = if (item == destination && contentEntryFocusRequester != null) {
-                                contentEntryFocusRequester
-                            } else {
-                                FocusRequester.Default
-                            }
-                        },
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(
-                                horizontal = if (railExpanded) 12.dp else 6.dp,
-                                vertical = 11.dp,
-                            ),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = if (railExpanded) {
-                            Arrangement.spacedBy(12.dp)
+                    .focusProperties {
+                        up = if (index == 0) {
+                            FocusRequester.Cancel
                         } else {
-                            Arrangement.Center
-                        },
-                    ) {
-                        Image(
-                            painter = painterResource(item.iconRes),
-                            contentDescription = null,
-                            colorFilter = ColorFilter.tint(
-                                if (item == destination) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                            ),
-                            modifier = Modifier.size(24.dp),
-                        )
-                        if (railExpanded) {
-                            Text(
-                                text = item.label,
-                                maxLines = 1,
-                                color = if (item == destination) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
-                                },
-                                fontWeight = if (item == destination) FontWeight.Bold else FontWeight.Normal,
-                            )
+                            navRequesters.getValue(visibleDestinations[index - 1])
                         }
-                    }
+                        down = if (index == visibleDestinations.lastIndex) {
+                            FocusRequester.Cancel
+                        } else {
+                            navRequesters.getValue(visibleDestinations[index + 1])
+                        }
+                        left = FocusRequester.Cancel
+                        right = if (item == destination && contentEntryFocusRequester != null) {
+                            contentEntryFocusRequester
+                        } else {
+                            FocusRequester.Default
+                        }
+                    },
+            ) {
+                NavigationRailItemContent(
+                    item,
+                    destination,
+                    updateAvailable,
+                    unreviewedActivityCount,
+                    expanded,
+                )
+            }
+        }
+        Spacer(Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun NavigationRailItemContent(
+    item: AppDestination,
+    destination: AppDestination,
+    updateAvailable: Boolean,
+    unreviewedActivityCount: Int,
+    expanded: Boolean,
+) {
+    val iconTint = if (item == destination) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = if (expanded) 12.dp else 0.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = if (expanded) Arrangement.spacedBy(12.dp) else Arrangement.Center,
+    ) {
+        Box(
+            modifier = Modifier.size(32.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                painter = painterResource(item.iconRes),
+                contentDescription = null,
+                colorFilter = ColorFilter.tint(
+                    if (item == AppDestination.ACTIVITY && unreviewedActivityCount > 0) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        iconTint
+                    },
+                ),
+                modifier = Modifier.size(28.dp),
+            )
+            if (item == AppDestination.SETTINGS && updateAvailable) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .background(MaterialTheme.colorScheme.primary, CircleShape),
+                )
+            }
+            if (item == AppDestination.ACTIVITY) {
+                compactActivityCount(unreviewedActivityCount)?.let { count ->
+                    Text(
+                        text = count,
+                        maxLines = 1,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontSize = if (count.length > 2) 8.sp else 10.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
                 }
             }
-            Spacer(Modifier.weight(1f))
+        }
+        if (expanded) {
+            Text(
+                text = item.label,
+                maxLines = 1,
+                color = if (item == destination) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+                fontWeight = if (item == destination) FontWeight.Bold else FontWeight.Normal,
+            )
         }
     }
 }

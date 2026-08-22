@@ -20,6 +20,36 @@ data class Camera(
     val streams: List<LiveStreamOption>,
 )
 
+data class CameraGroup(
+    val name: String,
+    val displayName: String,
+    val cameraNames: List<String>,
+    val order: Int,
+)
+
+data class SavedCameraView(
+    val id: String,
+    val name: String,
+    val firstCameraName: String,
+    val secondCameraName: String,
+    val thirdCameraName: String? = null,
+    val fourthCameraName: String? = null,
+) {
+    val cameraNames: List<String>
+        get() = listOfNotNull(firstCameraName, secondCameraName, thirdCameraName, fourthCameraName)
+}
+
+data class CameraPtzInfo(
+    val cameraName: String,
+    val features: Set<String>,
+    val presets: List<String>,
+) {
+    val canMove: Boolean get() = "pt" in features
+    val canZoom: Boolean get() = "zoom" in features
+    val canFocus: Boolean get() = "focus" in features
+    val hasControls: Boolean get() = canMove || canZoom || canFocus || presets.isNotEmpty()
+}
+
 data class LiveStreamOption(
     val label: String,
     val streamName: String,
@@ -62,7 +92,31 @@ data class ReviewItem(
     val zones: List<String>,
     val hasBeenReviewed: Boolean,
     val recordingAvailable: Boolean? = null,
+    val audio: List<String> = emptyList(),
+    val detectionIds: List<String> = emptyList(),
+    val subLabels: List<String> = emptyList(),
+    val summary: ReviewSummaryMetadata? = null,
+    val linkedEvents: List<SearchEvent> = emptyList(),
 )
+
+data class ReviewSummaryMetadata(
+    val title: String? = null,
+    val shortSummary: String? = null,
+    val scene: String? = null,
+    val potentialThreatLevel: Int? = null,
+    val otherConcerns: List<String> = emptyList(),
+)
+
+data class ReviewCounts(
+    val reviewedAlerts: Int = 0,
+    val reviewedDetections: Int = 0,
+    val totalAlerts: Int = 0,
+    val totalDetections: Int = 0,
+) {
+    val unreviewedAlerts: Int get() = (totalAlerts - reviewedAlerts).coerceAtLeast(0)
+    val unreviewedDetections: Int get() = (totalDetections - reviewedDetections).coerceAtLeast(0)
+    val unreviewedTotal: Int get() = unreviewedAlerts + unreviewedDetections
+}
 
 data class ReviewSearchQuery(
     val cameras: Set<String>,
@@ -75,9 +129,83 @@ data class ReviewSearchQuery(
     val limit: Int = 100,
 )
 
+data class EventSearchQuery(
+    val text: String?,
+    val cameras: Set<String>,
+    val after: Double? = null,
+    val before: Double? = null,
+    val label: String? = null,
+    val subLabel: String? = null,
+    val zone: String? = null,
+    val recognizedLicensePlate: String? = null,
+    val eventId: String? = null,
+    val limit: Int = 50,
+)
+
+private const val MAX_LITERAL_LICENSE_PLATE_FILTER_LENGTH = 32
+
+/**
+ * Keeps license-plate lookups on Frigate's literal-match path. Older supported
+ * Frigate versions interpret several punctuation characters as raw regular
+ * expressions, so every caller must use this policy before sending a filter.
+ */
+internal fun isSafeLiteralLicensePlateFilter(value: String): Boolean {
+    val trimmed = value.trim()
+    return trimmed.length in 1..MAX_LITERAL_LICENSE_PLATE_FILTER_LENGTH &&
+        trimmed.all { character ->
+            character.isLetterOrDigit() || character == ' ' || character == '-' || character == '_'
+        }
+}
+
+data class SearchEvent(
+    val id: String,
+    val camera: String,
+    val label: String,
+    val subLabel: String? = null,
+    val zones: List<String> = emptyList(),
+    val startTime: Double,
+    val endTime: Double?,
+    val description: String? = null,
+    val recognizedLicensePlate: String? = null,
+    val recognizedLicensePlateScore: Double? = null,
+    val averageEstimatedSpeed: Double? = null,
+    val attributes: List<String> = emptyList(),
+    val hasClip: Boolean = true,
+)
+
 data class RecordingSegment(
     val startTime: Double,
     val endTime: Double,
+)
+
+data class RecordingHourSummary(
+    val day: String,
+    val hour: Int,
+    val durationSeconds: Int,
+    val motionSeconds: Double,
+    val objectSeconds: Double,
+    val eventCount: Int,
+)
+
+data class MotionActivity(
+    val startTime: Double,
+    val motion: Double,
+    val camera: String,
+)
+
+data class RecordingExport(
+    val id: String,
+    val camera: String,
+    val name: String,
+    val createdAt: Double,
+    val videoPath: String,
+    val thumbnailPath: String?,
+    val inProgress: Boolean,
+)
+
+data class RecordingExportStart(
+    val exportId: String,
+    val message: String,
 )
 
 enum class ReviewSeverity {
@@ -103,6 +231,7 @@ data class DecoderCapability(
     val softwareOnly: Boolean?,
     val vendor: Boolean?,
     val adaptivePlayback: Boolean,
+    val maxSupportedInstances: Int? = null,
 )
 
 data class CodecCapability(
@@ -133,6 +262,9 @@ data class DiscoverySnapshot(
     val warnings: List<String> = emptyList(),
     val versionCompatibility: ServerVersionCompatibility = ServerVersionCompatibility.UNKNOWN,
     val authorizedCameraNames: Map<String, String> = cameras.associate { it.name to it.displayName },
+    val capabilities: FrigateCapabilities = FrigateCapabilities.unknown(),
+    val ptzCameras: Map<String, CameraPtzInfo> = emptyMap(),
+    val cameraGroups: List<CameraGroup> = emptyList(),
 )
 
 data class RecordingStorageVolume(
@@ -239,6 +371,8 @@ data class AppSettings(
     val diagnosticsEnabled: Boolean = true,
     val appearanceMode: AppearanceMode = AppearanceMode.SYSTEM,
     val customThemeColors: CustomThemeColors = CustomThemeColors(),
+    val stretchedCameraNames: Set<String> = emptySet(),
+    val savedCameraViews: List<SavedCameraView> = emptyList(),
 )
 
 data class CustomThemeColors(

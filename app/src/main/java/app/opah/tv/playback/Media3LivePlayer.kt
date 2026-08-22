@@ -4,12 +4,24 @@ import android.content.Context
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 
 @UnstableApi
-class Media3LivePlayer(context: Context) : LivePlayer {
-    private val exoPlayer = ExoPlayer.Builder(context.applicationContext).build()
+class Media3LivePlayer(
+    context: Context,
+    preferSoftwareVideoDecoder: Boolean,
+) : LivePlayer {
+    private val applicationContext = context.applicationContext
+    private val renderersFactory = DefaultRenderersFactory(applicationContext).apply {
+        if (preferSoftwareVideoDecoder) {
+            setEnableDecoderFallback(true)
+            forceDisableMediaCodecAsynchronousQueueing()
+            setMediaCodecSelector(softwareFirstMediaCodecSelector)
+        }
+    }
+    private val exoPlayer = ExoPlayer.Builder(applicationContext, renderersFactory).build()
 
     override val player: ExoPlayer get() = exoPlayer
 
@@ -37,5 +49,6 @@ class Media3LivePlayer(context: Context) : LivePlayer {
 }
 
 class Media3LivePlayerFactory : LivePlayerFactory {
-    override fun create(context: Context): LivePlayer = Media3LivePlayer(context)
+    override fun create(context: Context, preferSoftwareVideoDecoder: Boolean): LivePlayer =
+        Media3LivePlayer(context, preferSoftwareVideoDecoder)
 }

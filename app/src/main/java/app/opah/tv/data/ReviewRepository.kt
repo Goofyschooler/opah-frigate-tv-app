@@ -3,14 +3,17 @@ package app.opah.tv.data
 import app.opah.tv.data.model.ConnectionProfile
 import app.opah.tv.data.model.RecordingSegment
 import app.opah.tv.data.model.ReviewItem
+import app.opah.tv.data.model.ReviewCounts
 import app.opah.tv.data.model.ReviewSearchQuery
 import app.opah.tv.data.network.FrigateGateway
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import java.util.TimeZone
 
 data class ReviewDiscovery(
     val items: List<ReviewItem>,
     val warnings: List<String> = emptyList(),
+    val nextBeforeBySeverity: Map<app.opah.tv.data.model.ReviewSeverity, Double> = emptyMap(),
 )
 
 /** Loads Frigate Review data and resolves whether its recording windows still exist. */
@@ -79,9 +82,64 @@ class ReviewRepository(
         profile: ConnectionProfile,
         allowedCameras: Set<String>,
         query: ReviewSearchQuery,
-    ): ReviewDiscovery {
-        if (allowedCameras.isEmpty()) return ReviewDiscovery(emptyList())
-        return ReviewDiscovery(load(profile, allowedCameras, query))
+        beforeBySeverity: Map<app.opah.tv.data.model.ReviewSeverity, Double> = emptyMap(),
+    ): ReviewDiscovery = coroutineScope {
+        if (allowedCameras.isEmpty()) return@coroutineScope ReviewDiscovery(emptyList())
+        val severities = query.severity?.let(::listOf)
+            ?: listOf(
+                app.opah.tv.data.model.ReviewSeverity.ALERT,
+                app.opah.tv.data.model.ReviewSeverity.DETECTION,
+            )
+        val perSeverityLimit = if (query.severity == null) {
+            (query.limit / severities.size).coerceAtLeast(1)
+        } else {
+            query.limit
+        }
+        val batches = severities.map { severity ->
+            async {
+                severity to load(
+                    profile,
+                    allowedCameras,
+                    query.copy(
+                        severity = severity,
+                        before = beforeBySeverity[severity] ?: query.before,
+                        limit = perSeverityLimit,
+                    ),
+                )
+            }
+        }.map { it.await() }
+        val next = batches.mapNotNull { (severity, items) ->
+            items.minOfOrNull(ReviewItem::startTime)
+                ?.takeIf { items.size >= perSeverityLimit }
+                ?.let { severity to (it - 0.001) }
+        }.toMap()
+        ReviewDiscovery(
+            items = batches.flatMap { it.second }.distinctBy(ReviewItem::id)
+                .sortedByDescending(ReviewItem::startTime),
+            nextBeforeBySeverity = next,
+        )
+    }
+
+    suspend fun counts(
+        profile: ConnectionProfile,
+        allowedCameras: Set<String>,
+    ): ReviewCounts {
+        if (allowedCameras.isEmpty()) return ReviewCounts()
+        return parsers.parseReviewCounts(
+            gateway.getReviewSummary(profile, allowedCameras, TimeZone.getDefault().id),
+        )
+    }
+
+    suspend fun enrich(
+        profile: ConnectionProfile,
+        allowedCameras: Set<String>,
+        item: ReviewItem,
+    ): ReviewItem {
+        if (item.camera !in allowedCameras || item.detectionIds.isEmpty()) return item
+        val linked = item.detectionIds.chunked(MAX_LINKED_EVENT_IDS).flatMap { ids ->
+            parsers.parseSearchEvents(gateway.getEventsByIds(profile, ids.toSet()))
+        }.filter { it.camera in allowedCameras }
+        return item.copy(linkedEvents = linked)
     }
 
     suspend fun recordingAvailable(
@@ -99,8 +157,17 @@ class ReviewRepository(
     fun playbackUrl(profile: ConnectionProfile, item: ReviewItem): String =
         gateway.reviewPlaybackUrl(profile, item)
 
-    suspend fun markReviewed(profile: ConnectionProfile, item: ReviewItem) {
-        gateway.setReviewsViewed(profile, setOf(item.id), reviewed = true)
+    suspend fun setReviewed(profile: ConnectionProfile, item: ReviewItem, reviewed: Boolean) {
+        gateway.setReviewsViewed(profile, setOf(item.id), reviewed = reviewed)
+    }
+
+    suspend fun setReviewed(
+        profile: ConnectionProfile,
+        items: Collection<ReviewItem>,
+        reviewed: Boolean,
+    ) {
+        val ids = items.map(ReviewItem::id).filter(String::isNotBlank).toSet()
+        if (ids.isNotEmpty()) gateway.setReviewsViewed(profile, ids, reviewed = reviewed)
     }
 
     private suspend fun load(
@@ -119,5 +186,6 @@ class ReviewRepository(
         const val DEFAULT_FETCH_LIMIT = 50
         const val RECORDING_PADDING_SECONDS = 8.0
         const val RECENT_WINDOW_SECONDS = 24 * 60 * 60.0
+        const val MAX_LINKED_EVENT_IDS = 50
     }
 }

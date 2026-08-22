@@ -100,6 +100,10 @@ internal fun FocusCard(
     selected: Boolean = false,
     accessibilityLabel: String = focusKey,
     externalFocusRequester: FocusRequester? = null,
+    onFocused: (String) -> Unit = {},
+    onFocusStateChanged: (Boolean) -> Unit = {},
+    focusIndicatorVisible: Boolean = true,
+    containerColor: Color? = null,
     content: @Composable () -> Unit,
 ) {
     val focused = remember { mutableStateOf(false) }
@@ -119,10 +123,15 @@ internal fun FocusCard(
     val focusedBorderColor = MaterialTheme.colorScheme.primary
     val selectedBorderColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.8f)
     val restingBorderColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.22f)
+    val restingContainerColor = containerColor ?: MaterialTheme.colorScheme.surface
     Box(
         modifier = modifier
             .focusRequester(requester)
-            .onFocusChanged { focused.value = it.isFocused }
+            .onFocusChanged {
+                focused.value = it.isFocused
+                onFocusStateChanged(it.isFocused)
+                if (it.isFocused) onFocused(focusKey)
+            }
             .onPreviewKeyEvent { event ->
                 if (
                     enabled &&
@@ -152,9 +161,9 @@ internal fun FocusCard(
             .clip(shape)
             .background(
                 color = when {
-                    !enabled -> MaterialTheme.colorScheme.surface.copy(alpha = 0.45f)
+                    !enabled -> restingContainerColor.copy(alpha = 0.45f)
                     selected -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.18f)
-                    else -> MaterialTheme.colorScheme.surface
+                    else -> restingContainerColor
                 },
                 shape = shape,
             )
@@ -162,11 +171,12 @@ internal fun FocusCard(
             // the border without recomposing the card's image and text subtree.
             .drawWithContent {
                 drawContent()
-                val strokeWidth = if (focused.value) 3.dp.toPx() else 1.dp.toPx()
+                val visiblyFocused = focused.value && focusIndicatorVisible
+                val strokeWidth = if (visiblyFocused) 3.dp.toPx() else 1.dp.toPx()
                 val inset = strokeWidth / 2f
                 drawRoundRect(
                     color = when {
-                        focused.value -> focusedBorderColor
+                        visiblyFocused -> focusedBorderColor
                         selected -> selectedBorderColor
                         else -> restingBorderColor
                     },
