@@ -1,33 +1,19 @@
 # Opah
 
-Opah lets you view cameras and recordings from your
-[Frigate security-camera system](https://frigate.video/) on an Android TV or
-Google TV using a normal television remote.
+Opah is an Android TV and Google TV app for viewing cameras and recordings from
+an existing [Frigate security-camera system](https://frigate.video/). Designed
+for a television remote, it lets you watch live cameras, use multi-camera views,
+review recent activity, search saved video, browse history, and keep or share
+important clips.
 
-Opah is an independent community project and is not affiliated with, sponsored
-by, endorsed by, or supported by Frigate, Inc.
+The vision for Opah is to provide Frigate users with an intuitive, simple,
+NVR-like television experience. Instead of presenting Frigate as a technical
+web interface on a TV, Opah organizes its most useful everyday features into
+clear, approachable screens that are comfortable to navigate from the sofa.
 
-## What you can do
-
-- See live views from your cameras
-- Watch up to four live cameras together and save favorite groups
-- Open Frigate Birdseye in a dedicated full-screen view
-- Browse alerts and detections from Frigate Review
-- Mark activity as reviewed and see what still needs attention
-- Search saved activity and find similar items when Frigate search is enabled
-- Browse saved video by camera, day, and time
-- Save important recordings and open them from the Saved page
-- Play recordings with a timeline and familiar video controls
-- Open a chosen camera directly from a compatible shortcut or automation
-- Keep a live camera visible in picture-in-picture while using another app
-- Hear camera audio and mute it when needed
-- View Frigate storage and performance information
-- Find project, privacy, and support information on the in-app About page
-- Choose a light, dark, system, or custom color theme
-- Sign in automatically after the first successful connection
-
-Opah is designed for a television remote. You do not need a mouse or touch
-screen.
+Opah connects directly from your TV to your Frigate server and does not operate
+a separate camera cloud or recording service. It is an independent community
+project and is not affiliated with, endorsed by, or supported by Frigate, Inc.
 
 ## Screenshots
 
@@ -49,16 +35,17 @@ names, addresses, and data shown in the gallery are fictional examples.
 - A Frigate username and password
 - Network access from the TV to the Frigate server
 
-Opah has been tested with Frigate 0.17.2 and the exact Frigate 0.18.0 beta 3
-build `344efb6`. See the [compatibility guide](docs/compatibility.md) for camera
-video formats, tested devices, and troubleshooting tips.
+Opah supports Frigate 0.17.2. Features that need Frigate 0.18 target the exact
+Frigate 0.18.0 beta 3 build `344efb6`; live testing with that beta remains
+limited. See the [compatibility guide](docs/compatibility.md) for camera video
+formats, tested devices, and troubleshooting tips.
 
 ## Install Opah
 
 Opah is currently downloaded from GitHub rather than Google Play.
 
-1. Open the [Opah releases page](https://github.com/VibeCodingAntagonist/opah-frigate-tv-app/releases)
-   and download the APK from the newest release.
+1. Download [`opah-latest.apk`](https://github.com/VibeCodingAntagonist/opah-frigate-tv-app/releases/latest/download/opah-latest.apk)
+   from the newest Opah release.
 2. Send that file to the TV.
 3. Follow the [step-by-step installation guide](docs/installation.md).
 
@@ -81,10 +68,16 @@ local address.
 After a successful sign-in, Opah can securely remember the connection and sign
 in automatically. Choose **Sign out** to remove the saved sign-in information.
 
-## Watch cameras together
+## Make Home yours and watch cameras together
 
-Open **Cameras**, then choose **Watch cameras together**. Pick two to four
-cameras and choose **Watch**. Opah fills the screen with every camera picture.
+Moving focus on Home previews that camera in the large picture. Press and hold
+the remote's center button on a camera or view to pin it as a favorite, move a
+favorite earlier or later, or hide a camera from Home. Choose **Restore
+cameras** to bring hidden cameras back.
+
+Open a camera or view from **Home**. To make a new multi-camera view, open the
+camera catalog from Home, choose two to four cameras, and choose **Watch**.
+Opah fills the screen with every camera picture.
 On supported TVs, a two-camera group can also pop out over another app. Camera
 names hide automatically while you watch.
 
@@ -97,40 +90,56 @@ more than four cameras, Opah asks you which cameras to watch.
 Open **Activity** to see alerts and other recorded activity:
 
 - **Recent** shows new items and which ones still need review.
-- **History** lets you choose a camera, day, and time to browse saved video.
+- **History** lets you move continuously through saved video with recording,
+  motion, detection, and alert markers.
 - **Search** finds saved activity from a short description when search is set
   up in Frigate.
+- **Motion** appears on supported Frigate 0.18 servers and finds movement in a
+  selected part of the picture.
 
 Open an item to watch it, mark it reviewed or not reviewed, save its recording,
-or find activity that looks similar. Frigate may also provide a short summary,
-a recognized name, or a license plate.
+or find activity that looks similar. **Recent** > **Alerts** can also mark all
+alerts currently shown as reviewed after a warning. Frigate may provide a short
+summary, a recognized name, or a license plate.
+
+While a saved Activity video is playing, choose **Next activity** to continue
+through the same list without returning to the grid. At the end, the control
+shows **Caught up** for a review queue or **No next activity** for another list.
+Pressing Back returns to the original item, filters, and position in the
+Activity list.
 
 ## Save important recordings
 
-Choose **Save recording** while watching recorded activity or from its details.
-You can also save a selected part of **History**. Open **Saved** to see preview
-pictures, play a recording, or open its details. Frigate administrators can
-permanently delete a saved recording after a confirmation warning.
+Choose **Keep clip** while reviewing recorded activity. You can also keep a
+selected part of **History**. Open **Clips** to see preview pictures, play a
+clip, or share a local copy. Frigate administrators can also rename a clip or
+delete it after a confirmation warning.
 
-Saved recordings remain on the Frigate server. They are not copied into a
+With a supported Frigate 0.18 server, **Save all angles** keeps the same moment
+from several authorized cameras. Frigate administrators can group clips into
+simple **Incidents**.
+
+Clips remain on the Frigate server. They are not copied into a
 separate Opah cloud service or stored as a second recording archive on the TV.
 
 ## Control and size cameras
 
 If Frigate reports compatible camera controls, a **Controls** choice appears
-under that camera on the **Cameras** page. It can show movement, zoom, focus,
-and saved-position controls supported by that camera.
+for that camera. In control mode, the D-pad moves the camera, center stops it,
+and a compact shelf contains supported zoom, focus, and saved positions.
 
-While watching one camera, use the screen-size control to choose whether the
-whole picture fits on the television or fills the screen. Opah remembers that
-choice for each camera on the device.
+While watching a camera or Birdseye, use the screen-size control to choose
+whether the whole picture fits on the television or fills the screen. Opah
+remembers that choice for each camera and for Birdseye on the device. Choose
+**Video only** if an audio track prevents a camera from playing.
 
 ## Get updates
 
-Opah checks the official GitHub release page for a newer version. A small dot
-inside the Settings gear means an update is available. Open **Settings** >
-**Update** to read the release notes, download the verified APK, and open
-Android's installer. Opah never installs an update without your action.
+Opah normally checks the official GitHub release page shortly after it starts.
+A small dot inside the Settings gear means an update is available. Open
+**Settings** > **Update** to read the release notes, download the verified APK,
+and open Android's installer. You can turn automatic checks off on the same
+page. Opah never downloads or installs an update without your action.
 
 ## Optional camera shortcuts
 
@@ -159,17 +168,14 @@ am start -n app.opah.tv/.MainActivity --es camera "front_door"
 ## Important limitations
 
 - Opah needs an existing Frigate server; it does not record cameras by itself.
-- Pausing a live camera freezes the picture. It does not let you rewind live
-  video.
 - Camera audio plays from the TV, but speaking through a camera or doorbell is
   not supported.
 - Picture-in-picture depends on support from the TV and Android version.
 - Camera groups are muted and use lower-bandwidth streams when available. Some
   TVs may not be able to play four cameras at once.
-- Camera controls depend on support from Frigate and the camera. They have not
-  yet been tested with a physical PTZ camera.
-- Updates are manual. Download and open the newer APK when a new release is
-  available.
+- PTZ camera controls depend on support from Frigate and the camera.
+- Update downloads and installation are manual. Automatic availability checks
+  can be turned off in Settings.
 
 ## Privacy and safety
 
@@ -187,7 +193,7 @@ Report a security concern through GitHub's
 
 ## Help and feedback
 
-When reporting a problem, include the Opah version, Frigate version, TV model,
+When reporting a problem, include the Opah version, Frigate version, Android or Google TV device model,
 and a short description of what happened. Do not post your password, server
 address, camera names or images, or unedited logs.
 

@@ -201,6 +201,7 @@ data class RecordingExport(
     val videoPath: String,
     val thumbnailPath: String?,
     val inProgress: Boolean,
+    val incidentId: String? = null,
 )
 
 data class RecordingExportStart(
@@ -344,6 +345,12 @@ enum class ServerVersionCompatibility {
     UNKNOWN,
 }
 
+enum class FrigateApiGeneration {
+    V0_17,
+    V0_18,
+    UNKNOWN,
+}
+
 data class ServerVersionInfo(
     val rawVersion: String,
     val major: Int?,
@@ -351,6 +358,10 @@ data class ServerVersionInfo(
     val patch: Int?,
     val compatibility: ServerVersionCompatibility,
     val warning: String? = null,
+    val normalizedVersion: String = rawVersion.trim().removePrefix("v").lowercase(),
+    val prerelease: String? = null,
+    val apiGeneration: FrigateApiGeneration = FrigateApiGeneration.UNKNOWN,
+    val validatedContract: Boolean = compatibility == ServerVersionCompatibility.SUPPORTED,
 )
 
 enum class StreamPreference {
@@ -369,11 +380,35 @@ data class AppSettings(
     val preferRtpTcp: Boolean = true,
     val startLiveMuted: Boolean = false,
     val diagnosticsEnabled: Boolean = true,
+    val automaticUpdateChecksEnabled: Boolean = true,
     val appearanceMode: AppearanceMode = AppearanceMode.SYSTEM,
     val customThemeColors: CustomThemeColors = CustomThemeColors(),
     val stretchedCameraNames: Set<String> = emptySet(),
     val savedCameraViews: List<SavedCameraView> = emptyList(),
+    val reducedMotion: Boolean = false,
+    val highContrast: Boolean = false,
+    val favoriteCameraNames: List<String> = emptyList(),
+    val hiddenHomeCameraNames: Set<String> = emptySet(),
+    val favoriteViewIds: List<String> = emptyList(),
+    val startupTarget: StartupTarget = StartupTarget(),
+    val lastViewedTarget: StartupTarget? = null,
+    val autoMarkReviewedAfterPlayback: Boolean = false,
+    val recentActivitySearches: List<String> = emptyList(),
 )
+
+data class StartupTarget(
+    val kind: StartupTargetKind = StartupTargetKind.HOME,
+    val value: String? = null,
+)
+
+enum class StartupTargetKind {
+    HOME,
+    LAST_VIEWED,
+    CAMERA,
+    SAVED_VIEW,
+    CAMERA_GROUP,
+    BIRDSEYE,
+}
 
 data class CustomThemeColors(
     val accentArgb: Int = 0xFFFF7048.toInt(),

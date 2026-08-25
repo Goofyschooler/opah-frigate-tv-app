@@ -5,6 +5,7 @@ import app.opah.tv.data.FrigateJsonParsers
 import app.opah.tv.data.FrigateRepository
 import app.opah.tv.data.CameraImageRepository
 import app.opah.tv.data.FrigateSessionManager
+import app.opah.tv.data.FrigateOperationsRepository
 import app.opah.tv.data.ProfileRepository
 import app.opah.tv.data.ReviewImageRepository
 import app.opah.tv.data.SettingsRepository
@@ -39,6 +40,11 @@ class AppContainer(context: Context) {
         profileStore = profileRepository,
     )
     val frigateRepository = FrigateRepository(apiClient, FrigateJsonParsers())
+    val frigateOperationsRepository = FrigateOperationsRepository(
+        api = apiClient,
+        baseParsers = FrigateJsonParsers(),
+        invalidateCapabilities = frigateRepository::invalidateCapabilities,
+    )
     val settingsRepository = SettingsRepository(appContext)
     private val updateApiClient = GitHubReleaseApiClient(
         httpClient = GitHubReleaseApiClient.defaultClient(),

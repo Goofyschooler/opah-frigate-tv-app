@@ -2,7 +2,64 @@
 
 This page lists the user-visible changes in each Opah release.
 
-## Unreleased — Opah 0.3.0
+## 0.4.0 - 2026-08-25
+
+### A new living-room design
+
+- Use a simpler Home, Activity, Clips, and Settings layout designed for a TV
+  remote.
+- Preview a camera in a large Home image before opening it.
+- Pin favorites, reorder them, or hide cameras you do not need on Home.
+- Choose whether Opah starts on Home, the last view, a camera, or a saved view.
+
+### Live camera actions
+
+- Go back 30 seconds and return to live video automatically.
+- Take a snapshot of the current camera picture and share it from the TV.
+- Start and stop an on-demand recording as a Frigate administrator on supported
+  Frigate 0.18 servers.
+- View the current Frigate 0.18 Mode and, as an administrator, switch it with
+  confirmation and Undo.
+
+### Faster activity review
+
+- Review new activity as a continuous queue.
+- Choose **Next activity** while a saved Activity video is playing to keep
+  moving through the same list without leaving the player.
+- Return from playback to the same Activity item, filters, and list position.
+- Optionally mark an item reviewed when its video finishes and see when the
+  review queue is caught up.
+- Mark every new alert currently shown as reviewed after a warning.
+- Move through saved video on a continuous timeline with recording, motion,
+  detection, and alert markers.
+- Switch cameras without losing the selected time and choose how much time the
+  timeline shows.
+- Find motion in a selected part of the picture on supported Frigate 0.18
+  servers.
+- Use recent searches, television voice input when available, and one-press
+  suggestions such as Person, Package, Today, and Overnight.
+
+### Clips and Incidents
+
+- Browse kept video in the redesigned Clips page.
+- Share clips from the TV. Frigate administrators can also rename or delete
+  them.
+- Organize clips into simple Incidents on supported Frigate 0.18 servers.
+- Save the same moment from several authorized cameras with Save all angles.
+
+### Personalization and updates
+
+- Create a custom color style with simple television-remote controls.
+- Turn on high contrast or reduce interface motion.
+- Let Opah check quietly for releases after it starts, or turn automatic checks
+  off.
+- Read longer release notes directly on the Update page with a television
+  remote.
+
+Opah remains compatible with Frigate 0.17.2. Features that require Frigate
+0.18 stay hidden on older servers.
+
+## 0.3.0 - 2026-08-22
 
 ### Camera groups
 
@@ -106,8 +163,6 @@ This page lists the user-visible changes in each Opah release.
   Frigate account.
 - Diagnostics leave out passwords, private addresses, camera images, and other
   sensitive details.
-- Automated release checks help prevent private test data or signing files from
-  being published.
 
 ### Tested with
 
@@ -123,8 +178,3 @@ This page lists the user-visible changes in each Opah release.
 - Audio travels from the camera to the TV only; two-way talk is not available.
 - Video support depends on the formats supported by the TV and camera.
 - Later Frigate 0.18 builds are not automatically covered by the beta 3 test.
-
-[Unreleased]: https://github.com/VibeCodingAntagonist/opah-frigate-tv-app/compare/v0.2.2...HEAD
-[0.2.2]: https://github.com/VibeCodingAntagonist/opah-frigate-tv-app/releases/tag/v0.2.2
-[0.2.1]: https://github.com/VibeCodingAntagonist/opah-frigate-tv-app/releases/tag/v0.2.1
-[0.2.0]: https://github.com/VibeCodingAntagonist/opah-frigate-tv-app/tree/v0.2.0

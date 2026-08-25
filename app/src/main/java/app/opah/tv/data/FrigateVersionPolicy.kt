@@ -2,6 +2,7 @@ package app.opah.tv.data
 
 import app.opah.tv.data.model.ServerVersionCompatibility
 import app.opah.tv.data.model.ServerVersionInfo
+import app.opah.tv.data.model.FrigateApiGeneration
 
 /** Central compatibility policy for the Frigate API contract Opah consumes. */
 class FrigateVersionPolicy(
@@ -9,16 +10,22 @@ class FrigateVersionPolicy(
     private val supportedExactBuilds: Map<String, SemanticVersion> = DEFAULT_SUPPORTED_EXACT_BUILDS,
 ) {
     fun evaluate(rawVersion: String): ServerVersionInfo {
-        val normalizedVersion = rawVersion.trim().removePrefix("v").lowercase()
-        val match = VERSION_PATTERN.find(normalizedVersion)
-        val parsed = match?.destructured?.let { (major, minor, patch) ->
+        val normalizedVersion = normalize(rawVersion)
+        val match = VERSION_PATTERN.matchEntire(normalizedVersion)
+        val parsed = match?.groupValues?.let { groups ->
+            val major = groups[1]
+            val minor = groups[2]
+            val patch = groups[3]
             SemanticVersion(major.toInt(), minor.toInt(), patch.toInt())
         }
+        val prerelease = match?.groupValues?.get(4)?.takeIf(String::isNotBlank)
         val supportedLines = supportedStableVersions + supportedExactBuilds.values
         val compatibility = when {
             parsed == null -> ServerVersionCompatibility.UNKNOWN
             parsed in supportedStableVersions -> ServerVersionCompatibility.SUPPORTED
-            supportedExactBuilds[normalizedVersion] == parsed -> ServerVersionCompatibility.SUPPORTED
+            supportedExactBuilds.any { (identity, version) ->
+                version == parsed && normalizedVersion.matchesValidatedIdentity(identity)
+            } -> ServerVersionCompatibility.SUPPORTED
             supportedLines.any { parsed.major == it.major && parsed.minor == it.minor } ->
                 ServerVersionCompatibility.COMPATIBLE_UNVERIFIED
             else -> ServerVersionCompatibility.UNSUPPORTED
@@ -42,6 +49,10 @@ class FrigateVersionPolicy(
             patch = parsed?.patch,
             compatibility = compatibility,
             warning = warning,
+            normalizedVersion = normalizedVersion,
+            prerelease = prerelease,
+            apiGeneration = parsed.apiGeneration(),
+            validatedContract = compatibility == ServerVersionCompatibility.SUPPORTED,
         )
     }
 
@@ -53,7 +64,28 @@ class FrigateVersionPolicy(
         val DEFAULT_SUPPORTED_STABLE_VERSIONS = setOf(SemanticVersion(0, 17, 2))
         val DEFAULT_SUPPORTED_EXACT_BUILDS = mapOf(
             "0.18.0-344efb6" to SemanticVersion(0, 18, 0),
+            "0.18.0-beta3" to SemanticVersion(0, 18, 0),
+            "0.18.0-beta.3" to SemanticVersion(0, 18, 0),
+            "0.18.0-beta3-344efb6" to SemanticVersion(0, 18, 0),
+            "0.18.0-344efb6bc1e8db164bb5d3ec9bbfc6dbaf44deb7" to SemanticVersion(0, 18, 0),
         )
-        val VERSION_PATTERN = Regex("""(?:^|[^0-9])(\d+)\.(\d+)\.(\d+)(?:$|[^0-9])""")
+        val VERSION_PATTERN = Regex("""(\d+)\.(\d+)\.(\d+)(?:[-+](.+))?""")
+
+        fun normalize(rawVersion: String): String = rawVersion
+            .trim()
+            .lowercase()
+            .removePrefix("frigate ")
+            .removePrefix("v")
+            .trim()
+
+        fun String.matchesValidatedIdentity(identity: String): Boolean =
+            this == identity || startsWith("$identity+")
+
+        fun SemanticVersion?.apiGeneration(): FrigateApiGeneration = when {
+            this == null || major != 0 -> FrigateApiGeneration.UNKNOWN
+            minor == 17 -> FrigateApiGeneration.V0_17
+            minor == 18 -> FrigateApiGeneration.V0_18
+            else -> FrigateApiGeneration.UNKNOWN
+        }
     }
 }

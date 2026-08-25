@@ -22,10 +22,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -48,6 +51,7 @@ import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import app.opah.tv.data.model.Camera
+import app.opah.tv.data.model.FrigateFeature
 import app.opah.tv.data.model.ReviewItem
 import app.opah.tv.data.model.ReviewSeverity
 import app.opah.tv.data.model.SearchEvent
@@ -70,16 +74,19 @@ internal fun ReviewScreen(
     onFocusRestored: () -> Unit,
     onLoad: () -> Unit,
     onLoadMore: () -> Unit,
-    onMarkAllShownReviewed: () -> Unit,
+    onStartQueue: () -> Unit,
+    onMoveQueue: (Int) -> Unit,
+    onEndQueue: () -> Unit,
     onPage: (ActivityPage) -> Unit,
     onSeverity: (ReviewSeverity?) -> Unit,
     onApplyFilters: (ReviewFilters) -> Unit,
     onResetFilters: () -> Unit,
     onSelectItem: (ReviewItem, String) -> Unit,
-    onCloseItem: () -> Unit,
     onPlayItem: (ReviewItem) -> Unit,
     onSetReviewed: (ReviewItem, Boolean) -> Unit,
+    onMarkAllReviewed: () -> Unit,
     onSaveClip: (ReviewItem) -> Unit,
+    onSaveAllAngles: (ReviewItem, Set<String>) -> Unit,
     onFindSimilar: (ReviewItem) -> Unit,
     cachedBitmap: (ReviewItem) -> Bitmap?,
     refreshBitmap: suspend (ReviewItem, Int) -> Bitmap?,
@@ -89,8 +96,23 @@ internal fun ReviewScreen(
         review.items.firstOrNull { it.id == selectedId }
     }
     var filtersVisible by rememberSaveable { mutableStateOf(false) }
+    var markAllConfirmationVisible by rememberSaveable { mutableStateOf(false) }
     var filtersFocusRestoreToken by rememberSaveable { mutableIntStateOf(0) }
     val filtersFocusRequester = remember { FocusRequester() }
+    val recentPageFocusRequester = remember { FocusRequester() }
+    val alertsFocusRequester = remember { FocusRequester() }
+    val allActivityFocusRequester = remember { FocusRequester() }
+    val reviewEntryFocusRequester = remember { FocusRequester() }
+    val reviewListState = rememberLazyListState()
+    val selectedCategoryFocusRequester = if (review.filters.severity == ReviewSeverity.ALERT) {
+        alertsFocusRequester
+    } else {
+        allActivityFocusRequester
+    }
+    val unreviewedShownAlerts = review.unreviewedShownAlerts()
+    val reviewEntryItemId by remember(review.items, reviewListState) {
+        derivedStateOf { review.items.getOrNull(reviewListState.firstVisibleItemIndex)?.id }
+    }
 
     LaunchedEffect(review.loadedOnce) {
         if (!review.loadedOnce && !review.loading) onLoad()
@@ -113,15 +135,34 @@ internal fun ReviewScreen(
             item = selected,
             recordingState = review.recordingState,
             errorMessage = review.detailErrorMessage,
-            onBack = onCloseItem,
             onPlay = { onPlayItem(selected) },
             onSetReviewed = { reviewed -> onSetReviewed(selected, reviewed) },
             markingReviewed = review.markingReviewedItemId == selected.id,
             onSaveClip = { onSaveClip(selected) },
+            onSaveAllAngles = { cameras -> onSaveAllAngles(selected, cameras) },
+            allAnglesAvailable = state.snapshot?.capabilities?.supports(
+                FrigateFeature.MULTI_CAMERA_EXPORT,
+            ) == true && state.snapshot.cameras.size > 1,
+            cameras = state.snapshot?.cameras.orEmpty(),
             savingClip = review.savingClipItemId == selected.id,
             savedClip = selected.id in review.savedClipItemIds,
             savedClipMessage = review.savedClipMessage.takeIf { review.savedClipItemId == selected.id },
             onFindSimilar = { onFindSimilar(selected) },
+            queuePosition = if (review.queueActive) {
+                "${review.queueIndex + 1} of ${review.queueItemIds.size}"
+            } else {
+                null
+            },
+            onPrevious = if (review.queueActive && review.queueIndex > 0) {
+                { onMoveQueue(-1) }
+            } else {
+                null
+            },
+            onNext = if (review.queueActive) {
+                { onMoveQueue(1) }
+            } else {
+                null
+            },
             cachedBitmap = { cachedBitmap(selected) },
             refreshBitmap = { refreshBitmap(selected, 720) },
         )
@@ -146,11 +187,16 @@ internal fun ReviewScreen(
                     )
                 }
                 Column(horizontalAlignment = Alignment.End) {
-                    if (review.counts.unreviewedTotal > 0) {
-                        Text(
-                            "${review.counts.unreviewedTotal} not reviewed",
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold,
+                    val unreviewedShown = review.items.count { !it.hasBeenReviewed }
+                    if (unreviewedShown > 0) {
+                        PrimaryAction(
+                            focusKey = "review:start-queue",
+                            label = if (review.filters.severity == ReviewSeverity.ALERT) {
+                                "Review new alerts"
+                            } else {
+                                "Review new activity"
+                            },
+                            onClick = onStartQueue,
                         )
                     }
                     if (review.loading || review.countsLoading) {
@@ -159,7 +205,15 @@ internal fun ReviewScreen(
                 }
             }
 
-            ActivityNavigation(ActivityPage.RECENT, restoreFocusKey, onFocusRestored, onPage)
+            ActivityNavigation(
+                ActivityPage.RECENT,
+                restoreFocusKey,
+                onFocusRestored,
+                onPage,
+                state.snapshot?.capabilities?.supports(app.opah.tv.data.model.FrigateFeature.MOTION_SEARCH) == true,
+                selectedPageFocusRequester = recentPageFocusRequester,
+                downFocusRequester = selectedCategoryFocusRequester,
+            )
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -169,26 +223,39 @@ internal fun ReviewScreen(
                     label = "Alerts",
                     selected = review.filters.severity == ReviewSeverity.ALERT,
                     onClick = { onSeverity(ReviewSeverity.ALERT) },
+                    externalFocusRequester = alertsFocusRequester,
+                    modifier = Modifier.focusProperties {
+                        up = recentPageFocusRequester
+                        down = reviewEntryFocusRequester
+                    },
                 )
                 ReviewCategoryButton(
                     label = "All activity",
                     selected = review.filters.severity == null,
                     onClick = { onSeverity(null) },
+                    externalFocusRequester = allActivityFocusRequester,
+                    modifier = Modifier.focusProperties {
+                        up = recentPageFocusRequester
+                        down = reviewEntryFocusRequester
+                    },
                 )
                 Spacer(Modifier.weight(1f))
-                if (review.items.any { !it.hasBeenReviewed }) {
-                    Button(
-                        onClick = onMarkAllShownReviewed,
-                        enabled = !review.markingAllReviewed,
-                    ) {
-                        Text(if (review.markingAllReviewed) "Saving…" else "Mark all shown reviewed")
-                    }
+                if (review.filters.severity == ReviewSeverity.ALERT) {
+                    SecondaryAction(
+                        focusKey = "review:mark-all-reviewed",
+                        label = if (review.markingAllReviewed) "Saving…" else "Mark all reviewed",
+                        onClick = { markAllConfirmationVisible = true },
+                        enabled = unreviewedShownAlerts.isNotEmpty() && !review.markingAllReviewed,
+                        modifier = Modifier.focusProperties { down = reviewEntryFocusRequester },
+                    )
                 }
                 Button(
                     onClick = {
                         filtersVisible = true
                     },
-                    modifier = Modifier.focusRequester(filtersFocusRequester),
+                    modifier = Modifier
+                        .focusRequester(filtersFocusRequester)
+                        .focusProperties { down = reviewEntryFocusRequester },
                 ) {
                     val count = review.filters.activeDetailCount()
                     Text(if (count == 0) "Filters" else "Filters ($count)")
@@ -199,11 +266,18 @@ internal fun ReviewScreen(
                             onResetFilters()
                             filtersFocusRestoreToken += 1
                         },
+                        modifier = Modifier.focusProperties { down = reviewEntryFocusRequester },
                     ) { Text("Clear") }
                 }
             }
             Text(
-                review.filters.summary(state.snapshot?.cameras.orEmpty()),
+                review.filters.summary(state.snapshot?.cameras.orEmpty()).let { summary ->
+                    if (review.filters.activeDetailCount() == 0 && !review.countsLoading) {
+                        "$summary • ${review.counts.unreviewedFor(review.filters.severity)} new"
+                    } else {
+                        summary
+                    }
+                },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
                 maxLines = 1,
@@ -231,6 +305,24 @@ internal fun ReviewScreen(
                 Text("Loading activity…", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
+            review.queueCompleted -> Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Text("You’re caught up", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                    Text("There are no more items in this review", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    PrimaryAction(
+                        focusKey = "review:queue-done",
+                        label = "Done",
+                        onClick = onEndQueue,
+                    )
+                }
+            }
+
             review.items.isEmpty() -> Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
@@ -251,6 +343,10 @@ internal fun ReviewScreen(
                 hasMore = review.hasMore,
                 loadingMore = review.loadingMore,
                 onLoadMore = onLoadMore,
+                listState = reviewListState,
+                entryFocusRequester = reviewEntryFocusRequester,
+                entryItemId = reviewEntryItemId,
+                headerFocusRequester = selectedCategoryFocusRequester,
             )
         }
     }
@@ -270,6 +366,58 @@ internal fun ReviewScreen(
             },
         )
     }
+    if (markAllConfirmationVisible) {
+        MarkAllAlertsReviewedDialog(
+            count = unreviewedShownAlerts.size,
+            onDismiss = { markAllConfirmationVisible = false },
+            onConfirm = {
+                markAllConfirmationVisible = false
+                onMarkAllReviewed()
+            },
+        )
+    }
+}
+
+@Composable
+private fun MarkAllAlertsReviewedDialog(
+    count: Int,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        DialogSurface(modifier = Modifier.width(520.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text(
+                    "Mark all shown alerts reviewed?",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    if (count == 1) {
+                        "The new alert currently shown will be marked reviewed\nYou can only undo this one alert at a time"
+                    } else {
+                        "All $count new alerts currently shown will be marked reviewed\nYou can only undo this one alert at a time"
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                ) {
+                    SecondaryAction(
+                        focusKey = "review:mark-all-cancel",
+                        label = "Cancel",
+                        onClick = onDismiss,
+                    )
+                    PrimaryAction(
+                        focusKey = "review:mark-all-confirm",
+                        label = "Mark reviewed",
+                        onClick = onConfirm,
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -277,22 +425,17 @@ private fun ReviewCategoryButton(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    externalFocusRequester: FocusRequester? = null,
 ) {
-    FocusCard(
+    SegmentedTab(
         focusKey = "review:category:${label.lowercase()}",
-        restoreFocusKey = null,
-        onFocusRestored = {},
+        label = label,
         onClick = onClick,
         selected = selected,
-        accessibilityLabel = "$label category",
-    ) {
-        Text(
-            text = label,
-            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
-        )
-    }
+        modifier = modifier,
+        externalFocusRequester = externalFocusRequester,
+    )
 }
 
 @Composable
@@ -306,27 +449,35 @@ private fun ReviewGrid(
     hasMore: Boolean,
     loadingMore: Boolean,
     onLoadMore: () -> Unit,
+    listState: LazyListState,
+    entryFocusRequester: FocusRequester,
+    entryItemId: String?,
+    headerFocusRequester: FocusRequester,
 ) {
     val effectiveRestoreFocusKey = restoreFocusKey?.let { requested ->
-        requested.takeIf { key -> items.any { "review:item:${it.id}" == key } }
-            ?: items.firstOrNull()?.let { "review:item:${it.id}" }
+        requested.takeIf { key -> items.any { reviewItemFocusKey(it.id) == key } }
+            ?: items.firstOrNull()?.let { reviewItemFocusKey(it.id) }
     }
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val cardWidth = ((maxWidth - 76.dp) / 3).coerceIn(280.dp, 360.dp)
         LazyRow(
             modifier = Modifier.fillMaxSize(),
+            state = listState,
             contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 18.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
         items(items, key = ReviewItem::id) { item ->
-            val focusKey = "review:item:${item.id}"
-            FocusCard(
+            val focusKey = reviewItemFocusKey(item.id)
+            MediaTile(
                 focusKey = focusKey,
                 restoreFocusKey = effectiveRestoreFocusKey,
                 onFocusRestored = onFocusRestored,
                 onClick = { onSelectItem(item, focusKey) },
                 accessibilityLabel = reviewAccessibilityLabel(item),
-                modifier = Modifier.width(cardWidth),
+                externalFocusRequester = entryFocusRequester.takeIf { item.id == entryItemId },
+                modifier = Modifier
+                    .width(cardWidth)
+                    .focusProperties { up = headerFocusRequester },
             ) {
                 Column {
                     Box(
@@ -340,18 +491,15 @@ private fun ReviewGrid(
                             refreshBitmap = { refreshBitmap(item, 300) },
                             modifier = Modifier.fillMaxSize(),
                         )
-                        if (item.hasBeenReviewed) {
-                            Text(
-                                text = "Reviewed",
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.labelMedium,
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(10.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(MaterialTheme.colorScheme.primary)
-                                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                        if (!item.hasBeenReviewed) {
+                            StatusBadge(
+                                label = "New",
+                                color = if (item.severity == ReviewSeverity.ALERT) {
+                                    LocalOpahSemanticColors.current.alert
+                                } else {
+                                    LocalOpahSemanticColors.current.detection
+                                },
+                                modifier = Modifier.align(Alignment.TopEnd).padding(10.dp),
                             )
                         }
                     }
@@ -422,21 +570,25 @@ private fun ReviewDetail(
     item: ReviewItem,
     recordingState: ReviewRecordingState,
     errorMessage: String?,
-    onBack: () -> Unit,
     onPlay: () -> Unit,
     onSetReviewed: (Boolean) -> Unit,
     markingReviewed: Boolean,
     onSaveClip: () -> Unit,
+    onSaveAllAngles: (Set<String>) -> Unit,
+    allAnglesAvailable: Boolean,
+    cameras: List<Camera>,
     savingClip: Boolean,
     savedClip: Boolean,
     savedClipMessage: String?,
     onFindSimilar: () -> Unit,
+    queuePosition: String?,
+    onPrevious: (() -> Unit)?,
+    onNext: (() -> Unit)?,
     cachedBitmap: () -> Bitmap?,
     refreshBitmap: suspend () -> Bitmap?,
 ) {
     val initialFocusRequester = remember(item.id) { FocusRequester() }
-    val playFocusRequester = remember(item.id) { FocusRequester() }
-    val markReviewedFocusRequester = remember(item.id) { FocusRequester() }
+    var allAnglesVisible by rememberSaveable(item.id) { mutableStateOf(false) }
     val facts = buildList {
         add("Camera" to friendlyName(item.camera).orEmpty())
         add("Duration" to reviewDuration(item))
@@ -485,19 +637,25 @@ private fun ReviewDetail(
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                 )
+                queuePosition?.let {
+                    Text("Review $it", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 Text(
                     "${item.severity.displayName()} • ${formatReviewDateTime(item.startTime)}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Text(
-                if (item.hasBeenReviewed) "Reviewed" else "Not reviewed",
-                color = MaterialTheme.colorScheme.secondary,
-                fontWeight = FontWeight.Bold,
+            StatusBadge(
+                label = if (item.hasBeenReviewed) "Reviewed" else "New",
+                color = if (item.hasBeenReviewed) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    LocalOpahSemanticColors.current.alert
+                },
             )
         }
         Row(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxWidth().weight(1f),
             horizontalArrangement = Arrangement.spacedBy(22.dp),
         ) {
             ReviewThumbnail(
@@ -517,63 +675,200 @@ private fun ReviewDetail(
                 ReviewDetailFacts(facts)
                 errorMessage?.let { ScreenMessage(it, isError = true) }
                 savedClipMessage?.let { ScreenMessage(it, isError = false) }
-                Spacer(Modifier.weight(1f))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = onBack,
-                        modifier = Modifier
-                            .focusRequester(initialFocusRequester)
-                            .focusProperties {
-                                right = playFocusRequester
-                                down = markReviewedFocusRequester
-                            },
-                    ) { Text("Back to Activity") }
-                    Button(
-                        onClick = onPlay,
-                        enabled = recordingState == ReviewRecordingState.AVAILABLE,
-                        modifier = Modifier
-                            .focusRequester(playFocusRequester)
-                            .focusProperties {
-                                left = initialFocusRequester
-                                down = markReviewedFocusRequester
-                            },
+            }
+        }
+        ReviewDetailActionBar(
+            reviewItem = item,
+            recordingState = recordingState,
+            initialFocusRequester = initialFocusRequester,
+            markingReviewed = markingReviewed,
+            savingClip = savingClip,
+            savedClip = savedClip,
+            allAnglesAvailable = allAnglesAvailable,
+            onPrevious = onPrevious,
+            onPlay = onPlay,
+            onNext = onNext,
+            onSetReviewed = onSetReviewed,
+            onFindSimilar = onFindSimilar,
+            onSaveClip = onSaveClip,
+            onSaveAllAngles = { allAnglesVisible = true },
+        )
+    }
+    if (allAnglesVisible) {
+        MultiCameraClipDialog(
+            currentCamera = item.camera,
+            cameras = cameras,
+            onDismiss = { allAnglesVisible = false },
+            onSave = { selected ->
+                allAnglesVisible = false
+                onSaveAllAngles(selected)
+            },
+        )
+    }
+}
+
+@Composable
+private fun ReviewDetailActionBar(
+    reviewItem: ReviewItem,
+    recordingState: ReviewRecordingState,
+    initialFocusRequester: FocusRequester,
+    markingReviewed: Boolean,
+    savingClip: Boolean,
+    savedClip: Boolean,
+    allAnglesAvailable: Boolean,
+    onPrevious: (() -> Unit)?,
+    onPlay: () -> Unit,
+    onNext: (() -> Unit)?,
+    onSetReviewed: (Boolean) -> Unit,
+    onFindSimilar: () -> Unit,
+    onSaveClip: () -> Unit,
+    onSaveAllAngles: () -> Unit,
+) {
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        onPrevious?.let { previous ->
+            item {
+                SecondaryAction(
+                    focusKey = "activity:detail:previous",
+                    label = "Previous",
+                    onClick = previous,
+                )
+            }
+        }
+        item {
+            PrimaryAction(
+                focusKey = "activity:detail:play",
+                label = if (recordingState == ReviewRecordingState.CHECKING) "Checking…" else "Play recording",
+                onClick = onPlay,
+                enabled = recordingState == ReviewRecordingState.AVAILABLE,
+                externalFocusRequester = initialFocusRequester.takeIf {
+                    recordingState == ReviewRecordingState.AVAILABLE
+                },
+            )
+        }
+        onNext?.let { next ->
+            item {
+                SecondaryAction(
+                    focusKey = "activity:detail:next",
+                    label = "Next",
+                    onClick = next,
+                )
+            }
+        }
+        item {
+            SecondaryAction(
+                focusKey = "activity:detail:reviewed",
+                label = when {
+                    markingReviewed -> "Saving…"
+                    reviewItem.hasBeenReviewed -> "Mark not reviewed"
+                    else -> "Mark reviewed"
+                },
+                onClick = { onSetReviewed(!reviewItem.hasBeenReviewed) },
+                enabled = !markingReviewed,
+                externalFocusRequester = initialFocusRequester.takeIf {
+                    recordingState != ReviewRecordingState.AVAILABLE
+                },
+            )
+        }
+        if (reviewItem.linkedEvents.isNotEmpty()) {
+            item {
+                SecondaryAction(
+                    focusKey = "activity:detail:similar",
+                    label = "Find similar",
+                    onClick = onFindSimilar,
+                )
+            }
+        }
+        item {
+            SecondaryAction(
+                focusKey = "activity:detail:save",
+                label = when {
+                    savingClip -> "Saving recording…"
+                    savedClip -> "Recording saved"
+                    else -> "Keep clip"
+                },
+                onClick = onSaveClip,
+                enabled = recordingState == ReviewRecordingState.AVAILABLE && !savingClip && !savedClip,
+            )
+        }
+        if (allAnglesAvailable) {
+            item {
+                SecondaryAction(
+                    focusKey = "activity:detail:save-all",
+                    label = "Save all angles",
+                    onClick = onSaveAllAngles,
+                    enabled = recordingState == ReviewRecordingState.AVAILABLE && !savingClip,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MultiCameraClipDialog(
+    currentCamera: String,
+    cameras: List<Camera>,
+    onDismiss: () -> Unit,
+    onSave: (Set<String>) -> Unit,
+) {
+    var selected by remember(currentCamera, cameras) { mutableStateOf(setOf(currentCamera)) }
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .widthIn(min = 540.dp, max = 760.dp)
+                .heightIn(max = 720.dp)
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(14.dp))
+                .border(
+                    1.dp,
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                    RoundedCornerShape(14.dp),
+                )
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("Save all angles", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Choose cameras covering the same moment", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(cameras, key = Camera::name) { camera ->
+                    val required = camera.name == currentCamera
+                    MediaTile(
+                        focusKey = "save-all:${camera.name}",
+                        accessibilityLabel = "${camera.displayName}, ${if (camera.name in selected) "selected" else "not selected"}",
+                        onClick = {
+                            if (!required) {
+                                selected = if (camera.name in selected) {
+                                    selected - camera.name
+                                } else {
+                                    selected + camera.name
+                                }
+                            }
+                        },
+                        selected = camera.name in selected,
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text(if (recordingState == ReviewRecordingState.CHECKING) "Checking…" else "Play recording")
+                        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(camera.displayName, modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
+                            Text(
+                                when {
+                                    required -> "Current camera"
+                                    camera.name in selected -> "Included"
+                                    else -> "Not included"
+                                },
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
-                Button(
-                    onClick = { onSetReviewed(!item.hasBeenReviewed) },
-                    enabled = !markingReviewed,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(markReviewedFocusRequester)
-                        .focusProperties { up = initialFocusRequester },
-                ) {
-                    Text(
-                        when {
-                            markingReviewed -> "Saving…"
-                            item.hasBeenReviewed -> "Mark not reviewed"
-                            else -> "Mark reviewed"
-                        },
-                    )
-                }
-                if (item.linkedEvents.isNotEmpty()) {
-                    Button(onClick = onFindSimilar, modifier = Modifier.fillMaxWidth()) {
-                        Text("Find similar activity")
-                    }
-                }
-                Button(
-                    onClick = onSaveClip,
-                    enabled = recordingState == ReviewRecordingState.AVAILABLE && !savingClip && !savedClip,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        when {
-                            savingClip -> "Saving recording…"
-                            savedClip -> "Recording saved"
-                            else -> "Save recording"
-                        },
-                    )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = onDismiss) { Text("Cancel") }
+                Button(onClick = { onSave(selected) }, enabled = selected.isNotEmpty()) {
+                    Text("Save ${selected.size} angles")
                 }
             }
         }

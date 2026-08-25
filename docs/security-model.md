@@ -60,8 +60,8 @@ This section is optional and is intended for developers and security reviewers.
 - Secure connections use Android's normal certificate and hostname checks.
 - Diagnostics use safe error categories rather than raw responses, cookies,
   addresses, or stack traces.
-- Release automation checks the Android package, version, publisher identity,
-  and download checksum before publishing an APK.
+- Before opening a downloaded update, Opah checks its Android package, version,
+  publisher identity, and checksum.
 
 No application can prevent someone from photographing the television, using an
 HDMI capture device, or taking an Android screenshot when the device allows it.

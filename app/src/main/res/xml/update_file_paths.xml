@@ -3,4 +3,10 @@
     <cache-path
         name="verified_updates"
         path="updates/" />
+    <cache-path
+        name="shared_snapshots"
+        path="snapshots/" />
+    <cache-path
+        name="shared_clips"
+        path="shared-clips/" />
 </paths>

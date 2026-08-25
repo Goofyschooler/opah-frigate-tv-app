@@ -5,6 +5,9 @@ enum class OpahErrorCode {
     INVALID_CREDENTIALS,
     PERMISSION_DENIED,
     RATE_LIMITED,
+    BAD_REQUEST,
+    OPERATION_CONFLICT,
+    UNPROCESSABLE_REQUEST,
     NOT_FOUND,
     SERVER_ERROR,
     REDIRECT_REJECTED,
@@ -15,6 +18,19 @@ enum class OpahErrorCode {
     INVALID_RESPONSE,
     UNSUPPORTED_SERVER,
     PLAYBACK_FAILURE,
+    UNKNOWN,
+}
+
+enum class OperationFailureKind {
+    AUTHENTICATION,
+    AUTHORIZATION,
+    INVALID_REQUEST,
+    CONFLICT,
+    RESOURCE_OR_ENDPOINT_MISSING,
+    RATE_LIMIT,
+    TRANSIENT_SERVER,
+    NETWORK,
+    INVALID_RESPONSE,
     UNKNOWN,
 }
 
@@ -33,6 +49,8 @@ data class OpahFailure(
     val recoveryAction: RecoveryAction,
     val retryable: Boolean,
     val diagnosticCode: String = code.name,
+    val httpStatus: Int? = null,
+    val kind: OperationFailureKind = code.defaultFailureKind(),
 )
 
 open class OpahException(
@@ -64,7 +82,7 @@ class AuthenticationExpiredException(
 )
 
 class InvalidCredentialsException(
-    message: String = "Frigate rejected the username or password.",
+    message: String = "Frigate rejected the username or password",
 ) : OpahException(
     OpahFailure(
         code = OpahErrorCode.INVALID_CREDENTIALS,
@@ -78,8 +96,36 @@ fun Throwable.toOpahFailure(): OpahFailure = when (this) {
     is OpahException -> failure
     else -> OpahFailure(
         code = OpahErrorCode.UNKNOWN,
-        userMessage = "An unexpected Opah error occurred.",
+        userMessage = "An unexpected Opah error occurred",
         recoveryAction = RecoveryAction.RETRY,
         retryable = true,
     )
+}
+
+private fun OpahErrorCode.defaultFailureKind(): OperationFailureKind = when (this) {
+    OpahErrorCode.AUTHENTICATION_EXPIRED,
+    OpahErrorCode.INVALID_CREDENTIALS,
+    -> OperationFailureKind.AUTHENTICATION
+    OpahErrorCode.PERMISSION_DENIED -> OperationFailureKind.AUTHORIZATION
+    OpahErrorCode.BAD_REQUEST,
+    OpahErrorCode.UNPROCESSABLE_REQUEST,
+    -> OperationFailureKind.INVALID_REQUEST
+    OpahErrorCode.OPERATION_CONFLICT -> OperationFailureKind.CONFLICT
+    OpahErrorCode.NOT_FOUND,
+    OpahErrorCode.UNSUPPORTED_SERVER,
+    -> OperationFailureKind.RESOURCE_OR_ENDPOINT_MISSING
+    OpahErrorCode.RATE_LIMITED -> OperationFailureKind.RATE_LIMIT
+    OpahErrorCode.SERVER_ERROR,
+    OpahErrorCode.TIMEOUT,
+    -> OperationFailureKind.TRANSIENT_SERVER
+    OpahErrorCode.TLS_FAILURE,
+    OpahErrorCode.DNS_FAILURE,
+    OpahErrorCode.CONNECTION_REFUSED,
+    -> OperationFailureKind.NETWORK
+    OpahErrorCode.REDIRECT_REJECTED,
+    OpahErrorCode.INVALID_RESPONSE,
+    -> OperationFailureKind.INVALID_RESPONSE
+    OpahErrorCode.PLAYBACK_FAILURE,
+    OpahErrorCode.UNKNOWN,
+    -> OperationFailureKind.UNKNOWN
 }

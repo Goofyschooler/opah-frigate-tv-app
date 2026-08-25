@@ -16,16 +16,20 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -35,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -48,8 +53,11 @@ import androidx.tv.material3.Text
 import app.opah.tv.data.model.Camera
 import app.opah.tv.data.model.FrigateCapabilityAvailability
 import app.opah.tv.data.model.FrigateFeature
+import app.opah.tv.data.model.MotionSearchJobState
+import app.opah.tv.data.model.MotionSearchResult
 import app.opah.tv.data.model.SearchEvent
 import app.opah.tv.data.model.RecordingHourSummary
+import app.opah.tv.playback.PlaybackRequest
 import app.opah.tv.data.model.isSafeLiteralLicensePlateFilter
 import java.text.DateFormat
 import java.text.SimpleDateFormat
@@ -60,6 +68,7 @@ internal enum class ActivityPage(val label: String) {
     RECENT("Recent"),
     HISTORY("History"),
     SEARCH("Search"),
+    MOTION("Motion"),
 }
 
 @Composable
@@ -68,28 +77,24 @@ internal fun ActivityNavigation(
     restoreFocusKey: String?,
     onFocusRestored: () -> Unit,
     onSelected: (ActivityPage) -> Unit,
+    motionAvailable: Boolean,
+    selectedPageFocusRequester: FocusRequester? = null,
+    downFocusRequester: FocusRequester? = null,
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        ActivityPage.entries.forEach { page ->
-            FocusCard(
+        ActivityPage.entries.filter { it != ActivityPage.MOTION || motionAvailable }.forEach { page ->
+            SegmentedTab(
                 focusKey = "activity:page:${page.name}",
-                restoreFocusKey = restoreFocusKey,
-                onFocusRestored = onFocusRestored,
+                label = page.label,
                 onClick = { onSelected(page) },
                 selected = page == selected,
-                accessibilityLabel = "${page.label} activity",
-            ) {
-                Text(
-                    page.label,
-                    color = if (page == selected) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    },
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
-                )
-            }
+                restoreFocusKey = restoreFocusKey,
+                onFocusRestored = onFocusRestored,
+                externalFocusRequester = selectedPageFocusRequester.takeIf { page == selected },
+                modifier = Modifier.focusProperties {
+                    downFocusRequester?.let { down = it }
+                },
+            )
         }
     }
 }
@@ -97,12 +102,17 @@ internal fun ActivityNavigation(
 @Composable
 internal fun ActivityHistoryScreen(
     state: Phase0UiState,
+    playbackRequest: PlaybackRequest?,
     restoreFocusKey: String?,
     onFocusRestored: () -> Unit,
     onPage: (ActivityPage) -> Unit,
     onLoad: (String?, Double?) -> Unit,
+    onOpenAt: (String, Double) -> Unit,
     onMoveHour: (Int) -> Unit,
     onPlay: (HistorySlot, String) -> Unit,
+    onFindMotionHere: ((String, Double) -> Unit)?,
+    cachedBitmap: (String) -> Bitmap?,
+    refreshBitmap: suspend (String, Int) -> Bitmap?,
 ) {
     val cameras = state.snapshot?.cameras.orEmpty()
     val history = state.history
@@ -110,15 +120,28 @@ internal fun ActivityHistoryScreen(
     var cameraDialogVisible by rememberSaveable { mutableStateOf(false) }
     var dayDialogVisible by rememberSaveable { mutableStateOf(false) }
     var hourDialogVisible by rememberSaveable { mutableStateOf(false) }
+    val historyPageFocusRequester = remember { FocusRequester() }
+    val historyControlsFocusRequester = remember { FocusRequester() }
+    val historyTimelineFocusRequester = remember { FocusRequester() }
+    val slots = history.hourStartSeconds?.let { historySlots(it, history.segments, now) }.orEmpty()
+    val timelineAvailable = slots.any(HistorySlot::available)
+    val historyControlFocusProperties = Modifier.focusProperties {
+        up = historyPageFocusRequester
+        if (timelineAvailable) down = historyTimelineFocusRequester
+    }
 
     LaunchedEffect(history.loadedOnce, cameras) {
         if (!history.loadedOnce && !history.loading && cameras.isNotEmpty()) onLoad(null, null)
     }
-
     Column(modifier = Modifier.fillMaxSize()) {
         Column(
-            modifier = Modifier.padding(start = 24.dp, top = 18.dp, end = 24.dp, bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(
+                start = OpahDesignTokens.ScreenHorizontalMargin,
+                top = OpahDesignTokens.ScreenVerticalMargin,
+                end = OpahDesignTokens.ScreenHorizontalMargin,
+                bottom = 12.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -127,45 +150,104 @@ internal fun ActivityHistoryScreen(
             ) {
                 Column {
                     Text("Activity", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                    Text("Choose a camera, day, and time", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Move through saved video", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (history.loading) Text("Loading…", color = MaterialTheme.colorScheme.secondary)
             }
-            ActivityNavigation(ActivityPage.HISTORY, restoreFocusKey, onFocusRestored, onPage)
+            ActivityNavigation(
+                ActivityPage.HISTORY,
+                restoreFocusKey,
+                onFocusRestored,
+                onPage,
+                state.snapshot?.capabilities?.supports(FrigateFeature.MOTION_SEARCH) == true,
+                selectedPageFocusRequester = historyPageFocusRequester,
+                downFocusRequester = historyControlsFocusRequester,
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Button(onClick = { cameraDialogVisible = true }) {
-                    Text(historyCameraLabel(history.cameraName, cameras), maxLines = 1)
-                }
-                Button(
+                SecondaryAction(
+                    focusKey = "history:camera",
+                    label = historyCameraLabel(history.cameraName, cameras),
+                    onClick = { cameraDialogVisible = true },
+                    externalFocusRequester = historyControlsFocusRequester,
+                    modifier = historyControlFocusProperties,
+                )
+                SecondaryAction(
+                    focusKey = "history:day",
+                    label = history.hourStartSeconds?.let(::formatHistoryDay) ?: "Choose day",
                     onClick = { dayDialogVisible = true },
                     enabled = history.hourSummaries.isNotEmpty() && !history.summaryLoading,
-                ) {
-                    Text(history.hourStartSeconds?.let(::formatHistoryDay) ?: "Choose day")
-                }
-                Button(
+                    modifier = historyControlFocusProperties,
+                )
+                SecondaryAction(
+                    focusKey = "history:hour",
+                    label = history.hourStartSeconds?.let(::formatHistoryTime) ?: "Choose time",
                     onClick = { hourDialogVisible = true },
                     enabled = history.hourSummaries.isNotEmpty() && !history.summaryLoading,
-                ) {
-                    Text(history.hourStartSeconds?.let(::formatHistoryTime) ?: "Choose time")
-                }
-                Button(onClick = { onMoveHour(-1) }) { Text("Earlier") }
-                Button(
+                    modifier = historyControlFocusProperties,
+                )
+                SecondaryAction(
+                    focusKey = "history:earlier",
+                    label = "Earlier",
+                    onClick = { onMoveHour(-1) },
+                    modifier = historyControlFocusProperties,
+                )
+                SecondaryAction(
+                    focusKey = "history:later",
+                    label = "Later",
                     onClick = { onMoveHour(1) },
                     enabled = history.hourStartSeconds?.let { canMoveHistoryForward(it, now) } == true,
-                ) { Text("Later") }
-                Button(onClick = { onLoad(history.cameraName, hourStart(now)) }) { Text("Now") }
+                    modifier = historyControlFocusProperties,
+                )
                 Spacer(Modifier.weight(1f))
-                history.hourStartSeconds?.let { start ->
-                    Text(
-                        formatHistoryHour(start),
-                        color = MaterialTheme.colorScheme.secondary,
-                        fontWeight = FontWeight.Bold,
-                    )
+                PrimaryAction(
+                    focusKey = "history:now",
+                    label = "Jump to now",
+                    onClick = { onLoad(history.cameraName, hourStart(now)) },
+                    modifier = historyControlFocusProperties,
+                )
+            }
+            when {
+                history.loading && !history.loadedOnce -> Box(
+                    Modifier.fillMaxWidth().height(520.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Loading saved video…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                slots.none(HistorySlot::available) -> Box(
+                    Modifier.fillMaxWidth().height(520.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("No saved video during this hour", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                else -> HistoryTimelineViewer(
+                    request = playbackRequest,
+                    history = history,
+                    cameras = cameras,
+                    reviewItems = (state.review.items + state.snapshot?.recentReviewItems.orEmpty())
+                        .distinctBy { it.id },
+                    motionResults = state.motionReview.results.takeIf {
+                        state.motionReview.cameraName == history.cameraName
+                    }.orEmpty(),
+                    cachedBitmap = cachedBitmap,
+                    refreshBitmap = refreshBitmap,
+                    onSelectCamera = onOpenAt,
+                    onOpenFullScreen = { timestamp, focusKey ->
+                        slots.firstOrNull { slot ->
+                            slot.available && timestamp >= slot.startTime && timestamp < slot.endTime
+                        }?.let { onPlay(it, focusKey) }
+                    },
+                    onFindMotion = history.cameraName?.let { camera ->
+                        onFindMotionHere?.let { action ->
+                            { timestamp -> action(camera, timestamp) }
+                        }
+                    },
+                    externalFocusRequester = historyTimelineFocusRequester,
+                    exitFocusRequester = historyControlsFocusRequester,
+                )
             }
         }
 
@@ -187,72 +269,6 @@ internal fun ActivityHistoryScreen(
             )
         }
 
-        val slots = history.hourStartSeconds?.let { historySlots(it, history.segments, now) }.orEmpty()
-        when {
-            history.loading && !history.loadedOnce -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Loading saved video…", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            slots.none(HistorySlot::available) -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No saved video during this hour", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            else -> Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                slots.forEach { slot ->
-                    val focusKey = "history:slot:${slot.startTime.toLong()}"
-                    FocusCard(
-                        focusKey = focusKey,
-                        restoreFocusKey = restoreFocusKey,
-                        onFocusRestored = onFocusRestored,
-                        onClick = { onPlay(slot, focusKey) },
-                        enabled = slot.available,
-                        accessibilityLabel = historySlotAccessibilityLabel(slot),
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Text(formatHistoryTime(slot.startTime), style = MaterialTheme.typography.titleMedium)
-                            Text(
-                                if (slot.available) "Watch" else "No video",
-                                color = if (slot.available) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                fontWeight = FontWeight.Bold,
-                            )
-                            if (slot.available) {
-                                val motionLevel = slot.motionLevel(history.motion)
-                                Text(
-                                    motionLevelLabel(motionLevel),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(5.dp)
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceVariant),
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth(motionLevelFraction(motionLevel))
-                                            .height(5.dp)
-                                            .background(MaterialTheme.colorScheme.primary),
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     if (cameraDialogVisible) {
@@ -341,6 +357,212 @@ private fun ActivityChoiceDialog(
 }
 
 @Composable
+internal fun MotionSearchScreen(
+    state: Phase0UiState,
+    restoreFocusKey: String?,
+    onFocusRestored: () -> Unit,
+    onPage: (ActivityPage) -> Unit,
+    onCamera: (String) -> Unit,
+    onRegion: (Int) -> Unit,
+    onStart: () -> Unit,
+    onCancel: () -> Unit,
+    onResult: (MotionSearchResult) -> Unit,
+) {
+    val snapshot = state.snapshot ?: return
+    if (!snapshot.capabilities.supports(FrigateFeature.MOTION_SEARCH)) return
+    val motion = state.motionReview
+    val selectedCamera = motion.cameraName
+        ?.takeIf { name -> snapshot.cameras.any { it.name == name } }
+        ?: snapshot.cameras.firstOrNull()?.name
+        ?: return
+    var cameraDialogVisible by rememberSaveable { mutableStateOf(false) }
+    val motionPageFocusRequester = remember { FocusRequester() }
+    val motionCameraFocusRequester = remember { FocusRequester() }
+    val motionRegionFocusRequester = remember { FocusRequester() }
+    val motionBottomRegionFocusRequester = remember { FocusRequester() }
+    val motionActionFocusRequester = remember { FocusRequester() }
+    val firstMotionResultFocusRequester = remember { FocusRequester() }
+    var focusedRegionIndex by rememberSaveable { mutableStateOf<Int?>(null) }
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(
+            start = OpahDesignTokens.ScreenHorizontalMargin,
+            top = OpahDesignTokens.ScreenVerticalMargin,
+            end = OpahDesignTokens.ScreenHorizontalMargin,
+            bottom = OpahDesignTokens.ScreenVerticalMargin,
+        ),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Column {
+                Text("Activity", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text("Find movement in part of the picture", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (motion.searching) {
+                Text(
+                    motion.progress?.let { "Searching ${(it * 100).toInt().coerceIn(0, 100)}%" } ?: "Searching…",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        ActivityNavigation(
+            ActivityPage.MOTION,
+            restoreFocusKey,
+            onFocusRestored,
+            onPage,
+            motionAvailable = true,
+            selectedPageFocusRequester = motionPageFocusRequester,
+            downFocusRequester = motionCameraFocusRequester,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            SecondaryAction(
+                focusKey = "motion:camera",
+                label = snapshot.cameras.firstOrNull { it.name == selectedCamera }?.displayName ?: selectedCamera,
+                onClick = { cameraDialogVisible = true },
+                enabled = !motion.searching,
+                externalFocusRequester = motionCameraFocusRequester,
+                modifier = Modifier.focusProperties {
+                    up = motionPageFocusRequester
+                    down = motionRegionFocusRequester
+                },
+            )
+            Text("Past hour", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(32.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Column(
+                modifier = Modifier.width(220.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Choose an area", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    motionRegionLabel(focusedRegionIndex ?: motion.regionIndex),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    modifier = Modifier.width(160.dp).height(160.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    userScrollEnabled = false,
+                ) {
+                    items(9) { index ->
+                        MediaTile(
+                            focusKey = "motion:region:$index",
+                            accessibilityLabel = motionRegionLabel(index),
+                            onClick = { onRegion(index) },
+                            selected = motion.regionIndex == index,
+                            enabled = !motion.searching,
+                            externalFocusRequester = when (index) {
+                                0 -> motionRegionFocusRequester
+                                7 -> motionBottomRegionFocusRequester
+                                else -> null
+                            },
+                            onFocusStateChanged = { focused ->
+                                if (focused) {
+                                    focusedRegionIndex = index
+                                } else if (focusedRegionIndex == index) {
+                                    focusedRegionIndex = null
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .focusProperties {
+                                    if (index < 3) up = motionCameraFocusRequester
+                                    if (index >= 6) down = motionActionFocusRequester
+                                },
+                        ) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text(motionRegionGlyph(index), style = MaterialTheme.typography.titleLarge)
+                            }
+                        }
+                    }
+                }
+                if (motion.searching) {
+                    SecondaryAction(
+                        focusKey = "motion:cancel",
+                        label = "Cancel",
+                        onClick = onCancel,
+                        externalFocusRequester = motionActionFocusRequester,
+                        modifier = Modifier.focusProperties {
+                            up = motionBottomRegionFocusRequester
+                            if (motion.results.isNotEmpty()) down = firstMotionResultFocusRequester
+                        },
+                    )
+                } else {
+                    PrimaryAction(
+                        focusKey = "motion:start",
+                        label = "Find motion here",
+                        onClick = onStart,
+                        externalFocusRequester = motionActionFocusRequester,
+                        modifier = Modifier.focusProperties {
+                            up = motionBottomRegionFocusRequester
+                            if (motion.results.isNotEmpty()) down = firstMotionResultFocusRequester
+                        },
+                    )
+                }
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                motion.errorMessage?.let { ScreenMessage(it, isError = true) }
+                if (motion.results.isNotEmpty()) {
+                    Text("Motion found", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        itemsIndexed(motion.results, key = { _, result -> result.timestamp }) { index, result ->
+                            MediaTile(
+                                focusKey = "motion:result:${result.timestamp.toLong()}",
+                                accessibilityLabel = "Motion at ${formatHistoryTime(result.timestamp)}",
+                                onClick = { onResult(result) },
+                                externalFocusRequester = firstMotionResultFocusRequester.takeIf { index == 0 },
+                                modifier = Modifier
+                                    .widthIn(min = 190.dp)
+                                    .focusProperties { up = motionActionFocusRequester },
+                            ) {
+                                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                                    Text(formatHistoryTime(result.timestamp), fontWeight = FontWeight.Bold)
+                                    Text(
+                                        "${result.changedAreaPercent.toInt()}% of the area changed",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else if (motion.searchedOnce && !motion.searching && motion.jobState == MotionSearchJobState.SUCCESS) {
+                    Text("No motion found in that area", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+
+    if (cameraDialogVisible) {
+        ActivityCameraDialog(
+            cameras = snapshot.cameras,
+            selectedCameraName = selectedCamera,
+            onSelected = { camera ->
+                cameraDialogVisible = false
+                camera?.name?.let(onCamera)
+            },
+            onDismiss = { cameraDialogVisible = false },
+        )
+    }
+}
+
+@Composable
 internal fun ActivitySearchScreen(
     state: Phase0UiState,
     restoreFocusKey: String?,
@@ -359,6 +581,16 @@ internal fun ActivitySearchScreen(
     var filters by remember(search.filters) { mutableStateOf(search.filters) }
     var filtersVisible by rememberSaveable { mutableStateOf(false) }
     val searchButtonFocusRequester = remember { FocusRequester() }
+    val searchPageFocusRequester = remember { FocusRequester() }
+    val searchInputFocusRequester = remember { FocusRequester() }
+    val suggestionEntryFocusRequester = remember { FocusRequester() }
+    val recentEntryFocusRequester = remember { FocusRequester() }
+    val resultEntryFocusRequester = remember { FocusRequester() }
+    val resultHeaderFocusRequester = if (state.settings.recentActivitySearches.isNotEmpty()) {
+        recentEntryFocusRequester
+    } else {
+        suggestionEntryFocusRequester
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -380,7 +612,15 @@ internal fun ActivitySearchScreen(
                 }
                 if (search.searching) Text("Searching…", color = MaterialTheme.colorScheme.secondary)
             }
-            ActivityNavigation(ActivityPage.SEARCH, restoreFocusKey, onFocusRestored, onPage)
+            ActivityNavigation(
+                ActivityPage.SEARCH,
+                restoreFocusKey,
+                onFocusRestored,
+                onPage,
+                state.snapshot?.capabilities?.supports(FrigateFeature.MOTION_SEARCH) == true,
+                selectedPageFocusRequester = searchPageFocusRequester,
+                downFocusRequester = searchInputFocusRequester,
+            )
         }
 
         if (capability?.available != true) {
@@ -417,16 +657,31 @@ internal fun ActivitySearchScreen(
                 enabled = !search.searching,
                 imeAction = ImeAction.Done,
                 nextFocusRequester = searchButtonFocusRequester,
+                externalNavigationFocusRequester = searchInputFocusRequester,
+                upFocusRequester = searchPageFocusRequester,
+                downFocusRequester = suggestionEntryFocusRequester,
                 modifier = Modifier.weight(1f),
             )
-            Button(onClick = { filtersVisible = true }, enabled = !search.searching) {
+            Button(
+                onClick = { filtersVisible = true },
+                enabled = !search.searching,
+                modifier = Modifier.focusProperties {
+                    up = searchPageFocusRequester
+                    down = suggestionEntryFocusRequester
+                },
+            ) {
                 val count = filters.activeCount()
                 Text(if (count == 0) "Filters" else "Filters ($count)")
             }
             Button(
                 onClick = { onSearch(query, filters) },
                 enabled = query.isNotBlank() && !search.searching,
-                modifier = Modifier.focusRequester(searchButtonFocusRequester),
+                modifier = Modifier
+                    .focusRequester(searchButtonFocusRequester)
+                    .focusProperties {
+                        up = searchPageFocusRequester
+                        down = suggestionEntryFocusRequester
+                    },
             ) { Text("Search") }
         }
         if (filters.activeCount() > 0) {
@@ -436,6 +691,61 @@ internal fun ActivitySearchScreen(
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 2.dp),
             )
+        }
+
+        Column(
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text("Suggestions", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                itemsIndexed(ACTIVITY_SEARCH_SUGGESTIONS, key = { _, suggestion -> suggestion.label }) { index, suggestion ->
+                    SecondaryAction(
+                        focusKey = "search:suggestion:${suggestion.label}",
+                        label = suggestion.label,
+                        onClick = {
+                            query = suggestion.query
+                            val suggestedFilters = filters.copy(timeRange = suggestion.timeRange)
+                            filters = suggestedFilters
+                            onSearch(suggestion.query, suggestedFilters)
+                        },
+                        enabled = !search.searching,
+                        externalFocusRequester = suggestionEntryFocusRequester.takeIf { index == 0 },
+                        modifier = Modifier.focusProperties {
+                            up = searchInputFocusRequester
+                            if (state.settings.recentActivitySearches.isNotEmpty()) {
+                                down = recentEntryFocusRequester
+                            } else if (search.results.isNotEmpty()) {
+                                down = resultEntryFocusRequester
+                            }
+                        },
+                    )
+                }
+            }
+            if (state.settings.recentActivitySearches.isNotEmpty()) {
+                Text("Recent", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    itemsIndexed(
+                        state.settings.recentActivitySearches,
+                        key = { _, recent -> "recent:$recent" },
+                    ) { index, recent ->
+                        SecondaryAction(
+                            focusKey = "search:recent:${recent.hashCode()}",
+                            label = recent,
+                            onClick = {
+                                query = recent
+                                onSearch(recent, filters)
+                            },
+                            enabled = !search.searching,
+                            externalFocusRequester = recentEntryFocusRequester.takeIf { index == 0 },
+                            modifier = Modifier.focusProperties {
+                                up = suggestionEntryFocusRequester
+                                if (search.results.isNotEmpty()) down = resultEntryFocusRequester
+                            },
+                        )
+                    }
+                }
+            }
         }
 
         search.errorMessage?.let { error ->
@@ -456,18 +766,23 @@ internal fun ActivitySearchScreen(
             !search.searchedOnce -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("Try a color, object, or short description", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            else -> SearchResultGrid(
-                results = search.results,
-                cameras = cameras,
-                restoreFocusKey = restoreFocusKey,
-                onFocusRestored = onFocusRestored,
-                onPlay = onPlay,
-                cachedBitmap = cachedBitmap,
-                refreshBitmap = refreshBitmap,
-                hasMore = search.hasMore,
-                loadingMore = search.loadingMore,
-                onLoadMore = onLoadMore,
-            )
+            else -> key(search.resultGeneration) {
+                SearchResultRow(
+                    results = search.results,
+                    resultGeneration = search.resultGeneration,
+                    cameras = cameras,
+                    restoreFocusKey = restoreFocusKey,
+                    onFocusRestored = onFocusRestored,
+                    onPlay = onPlay,
+                    cachedBitmap = cachedBitmap,
+                    refreshBitmap = refreshBitmap,
+                    hasMore = search.hasMore,
+                    loadingMore = search.loadingMore,
+                    onLoadMore = onLoadMore,
+                    entryFocusRequester = resultEntryFocusRequester,
+                    headerFocusRequester = resultHeaderFocusRequester,
+                )
+            }
         }
     }
 
@@ -485,8 +800,9 @@ internal fun ActivitySearchScreen(
 }
 
 @Composable
-private fun SearchResultGrid(
+private fun SearchResultRow(
     results: List<SearchEvent>,
+    resultGeneration: Long,
     cameras: List<Camera>,
     restoreFocusKey: String?,
     onFocusRestored: () -> Unit,
@@ -496,15 +812,16 @@ private fun SearchResultGrid(
     hasMore: Boolean,
     loadingMore: Boolean,
     onLoadMore: () -> Unit,
+    entryFocusRequester: FocusRequester,
+    headerFocusRequester: FocusRequester,
 ) {
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(3),
+    LazyRow(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 18.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.Top,
     ) {
-        items(results, key = SearchEvent::id) { event ->
+        items(results, key = { event -> "$resultGeneration:${event.id}" }) { event ->
             val focusKey = "search:event:${event.id}"
             FocusCard(
                 focusKey = focusKey,
@@ -512,13 +829,17 @@ private fun SearchResultGrid(
                 onFocusRestored = onFocusRestored,
                 onClick = { onPlay(event, focusKey) },
                 accessibilityLabel = searchEventAccessibilityLabel(event, cameras),
-                modifier = Modifier.fillMaxWidth(),
+                externalFocusRequester = entryFocusRequester.takeIf { event.id == results.firstOrNull()?.id },
+                modifier = Modifier
+                    .width(320.dp)
+                    .focusProperties { up = headerFocusRequester },
             ) {
                 Column {
                     SearchEventThumbnail(
                         event = event,
+                        resultGeneration = resultGeneration,
                         cachedBitmap = { cachedBitmap(event) },
-                        refreshBitmap = { refreshBitmap(event, 300) },
+                        refreshBitmap = { refreshBitmap(event, 240) },
                         modifier = Modifier
                             .fillMaxWidth()
                             .aspectRatio(16f / 9f),
@@ -550,9 +871,16 @@ private fun SearchResultGrid(
             }
         }
         if (hasMore || loadingMore) {
-            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
-                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Button(onClick = onLoadMore, enabled = !loadingMore) {
+            item(key = "search:more-results") {
+                Box(
+                    modifier = Modifier.width(220.dp).height(180.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Button(
+                        onClick = onLoadMore,
+                        enabled = !loadingMore,
+                        modifier = Modifier.focusProperties { up = headerFocusRequester },
+                    ) {
                         Text(if (loadingMore) "Loading…" else "More results")
                     }
                 }
@@ -638,13 +966,14 @@ private fun ActivityFilterButton(label: String, value: String, onClick: () -> Un
 @Composable
 private fun SearchEventThumbnail(
     event: SearchEvent,
+    resultGeneration: Long,
     cachedBitmap: () -> Bitmap?,
     refreshBitmap: suspend () -> Bitmap?,
     modifier: Modifier,
 ) {
-    var bitmap by remember(event.id) { mutableStateOf(cachedBitmap()) }
-    var unavailable by remember(event.id) { mutableStateOf(false) }
-    LaunchedEffect(event.id) {
+    var bitmap by remember(resultGeneration, event.id) { mutableStateOf(cachedBitmap()) }
+    var unavailable by remember(resultGeneration, event.id) { mutableStateOf(false) }
+    LaunchedEffect(resultGeneration, event.id) {
         val loaded = refreshBitmap()
         if (loaded == null) unavailable = true else bitmap = loaded
     }
@@ -747,7 +1076,7 @@ private fun historyCameraLabel(cameraName: String?, cameras: List<Camera>): Stri
     ?.let { selected -> cameras.firstOrNull { it.name == selected }?.displayName ?: friendlyActivityName(selected) }
     ?: "All cameras"
 
-private fun friendlyActivityName(value: String): String = value
+internal fun friendlyActivityName(value: String): String = value
     .replace('_', ' ')
     .trim()
     .replaceFirstChar(Char::uppercase)
@@ -775,7 +1104,7 @@ private fun recordingHourStart(summary: RecordingHourSummary): Double {
         ?: 0.0
 }
 
-private fun formatHistoryTime(epochSeconds: Double): String =
+internal fun formatHistoryTime(epochSeconds: Double): String =
     DateFormat.getTimeInstance(DateFormat.SHORT).format(Date((epochSeconds * 1000).toLong()))
 
 private fun historySlotAccessibilityLabel(slot: HistorySlot): String =

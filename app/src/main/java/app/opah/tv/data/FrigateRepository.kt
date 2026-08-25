@@ -17,8 +17,10 @@ import app.opah.tv.data.model.RecordingSegment
 import app.opah.tv.data.model.RecordingExport
 import app.opah.tv.data.model.RecordingExportStart
 import app.opah.tv.data.model.SearchEvent
-import app.opah.tv.data.model.ServerVersionInfo
 import app.opah.tv.data.network.FrigateGateway
+import app.opah.tv.data.network.ExportDeletionRoute
+import app.opah.tv.data.network.FrigateContractOperation
+import app.opah.tv.data.network.frigateApiContract
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 
@@ -27,15 +29,6 @@ data class DiscoveryBootstrap(
     internal val catalog: CameraCatalog,
     val snapshot: DiscoverySnapshot,
 )
-
-internal enum class ExportDeleteContract { SINGLE_017, BULK_018 }
-
-internal fun exportDeleteContract(version: ServerVersionInfo): ExportDeleteContract =
-    if (version.major == 0 && version.minor != null && version.minor >= 18) {
-        ExportDeleteContract.BULK_018
-    } else {
-        ExportDeleteContract.SINGLE_017
-    }
 
 /** Coordinates foundation repositories into the snapshot consumed by the prototype UI. */
 class FrigateRepository(
@@ -46,6 +39,7 @@ class FrigateRepository(
     private val reviewRepository: ReviewRepository = ReviewRepository(api, parsers),
     private val versionPolicy: FrigateVersionPolicy = FrigateVersionPolicy(),
     private val capabilityResolver: FrigateCapabilityResolver = FrigateCapabilityResolver(),
+    private val capabilityCache: FrigateCapabilityCache = FrigateCapabilityCache(),
 ) {
     suspend fun refresh(profile: ConnectionProfile, user: FrigateUserProfile): DiscoverySnapshot =
         discover(profile, user)
@@ -118,14 +112,26 @@ class FrigateRepository(
             birdseye = birdseye,
             warnings = warnings,
             versionCompatibility = version.compatibility,
-            capabilities = capabilityResolver.resolve(
-                version = version,
-                configJson = bootstrap.config,
-                allowedCameras = bootstrap.snapshot.user.allowedCameras,
-                birdseye = birdseye,
-                birdseyePermitted = bootstrap.catalog.fullCameraAccess,
-                ptzCameras = ptzCameras,
-            ),
+            capabilities = capabilityCache.getOrPut(
+                CapabilityCacheKey.from(
+                    version = version,
+                    role = bootstrap.snapshot.user.role,
+                    allowedCameras = bootstrap.snapshot.user.allowedCameras,
+                    configJson = bootstrap.config,
+                    birdseyeEvidence = birdseye,
+                    ptzEvidence = ptzCameras,
+                ),
+            ) {
+                capabilityResolver.resolve(
+                    version = version,
+                    configJson = bootstrap.config,
+                    allowedCameras = bootstrap.snapshot.user.allowedCameras,
+                    birdseye = birdseye,
+                    birdseyePermitted = bootstrap.catalog.fullCameraAccess,
+                    ptzCameras = ptzCameras,
+                    userRole = bootstrap.snapshot.user.role,
+                )
+            },
             ptzCameras = ptzCameras,
             cameraGroups = parsers.parseCameraGroups(
                 bootstrap.config,
@@ -293,10 +299,17 @@ class FrigateRepository(
     ) {
         require(export.camera in allowedCameras) { "Camera is not permitted." }
         val version = versionPolicy.evaluate(frigateVersion)
-        when (exportDeleteContract(version)) {
-            ExportDeleteContract.BULK_018 -> api.deleteExports(profile, setOf(export.id))
-            ExportDeleteContract.SINGLE_017 -> api.deleteExport(profile, export.id)
+        val contract = frigateApiContract(version)
+        contract.require(FrigateContractOperation.DELETE_EXPORT)
+        when (contract.exportDeletionRoute) {
+            ExportDeletionRoute.BULK -> api.deleteExports(profile, setOf(export.id))
+            ExportDeletionRoute.SINGLE -> api.deleteExport(profile, export.id)
+            ExportDeletionRoute.NONE -> error("Validated delete contract has no route")
         }
+    }
+
+    fun invalidateCapabilities(reason: CapabilityInvalidationReason) {
+        capabilityCache.invalidate(reason)
     }
 
     suspend fun loadRecordingStorage(
@@ -335,7 +348,7 @@ class FrigateRepository(
         snapshot: DiscoverySnapshot,
     ): RecordingStorageSummary {
         val volume = parsers.parseRecordingStorageVolume(statsJson)
-            ?: error("Frigate did not return recording storage totals.")
+            ?: error("Frigate did not return recording storage totals")
         val samples = parsers.parseCameraStorageSamples(storageJson)
         val samplesByLabel = samples.associateBy { normalizeStorageLabel(it.serverLabel) }
         val visible = snapshot.authorizedCameraNames.map { (cameraName, displayName) ->

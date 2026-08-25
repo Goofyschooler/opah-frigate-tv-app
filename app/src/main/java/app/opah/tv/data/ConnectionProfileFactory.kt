@@ -18,7 +18,7 @@ object ConnectionProfileFactory {
             if ("://" in input) input else "https://$input"
         }
         val parsed = withScheme.toHttpUrlOrNull()
-            ?: error("Enter a valid Frigate HTTP or HTTPS URL.")
+            ?: error("Enter a valid Frigate HTTP or HTTPS URL")
         require(parsed.scheme == "https" || parsed.scheme == "http") {
             "Frigate URL must use HTTPS or HTTP."
         }
@@ -52,4 +52,3 @@ object ConnectionProfileFactory {
         )
     }
 }
-

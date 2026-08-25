@@ -7,16 +7,18 @@ try when a camera does not play.
 
 | Item | Tested status |
 | --- | --- |
-| Frigate 0.17.2 | Fully tested stable version |
-| Frigate 0.18.0 beta 3 (`344efb6`) | This exact beta build was tested |
+| Frigate 0.17.2 | Supported stable version |
+| Frigate 0.18.0 beta 3 (`344efb6`) | Features for this exact beta have automated coverage; live beta-server testing remains limited |
 | Android TV / Google TV | Android 7.0 or newer |
 | Main test device | 2024 onn. 4K Pro with Android 14 |
-| Additional test device | NVIDIA Shield TV with Android 11 |
 | H.264 camera video | Tested |
 | H.265 camera video | Tested on a TV that supports H.265 |
 | Birdseye | Tested |
 | Activity recordings | Browsing, filtering, reviewed status, seeking, saving, and playback tested |
-| Saved recordings | Preview pictures, details, playback, and administrator deletion tested |
+| Clips | Preview pictures, playback, navigation, rename, share, and administrator deletion have automated local coverage |
+| Frigate 0.18 Modes | Display, confirmed administrator switch, verification, and Undo have automated local coverage |
+| Frigate 0.18 Motion Search | Start, progress, results, cancellation, no-result, failure, and timeout paths have automated local coverage |
+| Frigate 0.18 Incidents | Authorization filtering and exact create, edit, assignment, and deletion contracts have automated local coverage |
 | Activity search | Available on Frigate 0.17.2 and 0.18 when search is turned on in Frigate |
 | Activity summaries | Shown when Frigate has created a summary for that activity |
 | Camera groups | Two and four cameras tested on the main device; results depend on the TV's video hardware |
@@ -52,11 +54,19 @@ If a camera stays on **Preparing** or does not start:
 Opah can play audio from the camera through the TV. It cannot send microphone
 audio back to a camera or doorbell.
 
-Pausing a live camera freezes the current picture. Opah does not record a
-temporary copy of live video, so live rewind is not available.
+Choose **Go back 30 seconds** to open available Frigate recording for the
+current camera. Opah returns to live video when that short recording ends.
+This depends on Frigate having recording for that moment.
 
 The screen-size control can fit the whole camera picture inside the television
 or fill the screen. The fill choice is saved separately for each camera.
+
+## Activity playback
+
+Choose **Next activity** while a saved Activity video is playing to continue
+through the list that opened the player. Opah skips missing items and items
+without a recording, and it does not start over after the last item. Pressing
+Back returns to the original item, filters, and list position.
 
 ## Activity search
 
@@ -78,11 +88,17 @@ Camera movement, zoom, focus, and saved positions appear only when both Frigate
 and the camera report support. These controls have not yet been tested with a
 physical PTZ camera, so support may vary.
 
-## Saved recordings
+## Clips and Incidents
 
-Saved recordings stay on the Frigate server. If a saved recording does not
-play, first confirm that the same saved recording opens in Frigate. Deleting a
-saved recording requires a Frigate administrator account and cannot be undone.
+Clips stay on the Frigate server. If a clip does not play, first confirm that
+the same clip opens in Frigate. Renaming or deleting clips and changing an
+existing Incident require a Frigate administrator account. Switching Modes and
+starting an on-demand recording also require an administrator account. Deleting
+cannot be undone.
+
+Incidents, Save all angles, Modes, on-demand recording, and Find motion here
+require the exact supported Frigate 0.18 contract. Opah hides these choices on
+Frigate 0.17.2 instead of showing empty or nonworking controls.
 
 ## Network setup
 

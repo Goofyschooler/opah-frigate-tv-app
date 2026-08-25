@@ -363,18 +363,21 @@ class FrigateJsonParsers(
                 videoPath = videoPath,
                 thumbnailPath = item.string("thumb_path")?.takeIf(String::isNotBlank),
                 inProgress = item.bool("in_progress") ?: false,
+                incidentId = sequenceOf("export_case_id", "export_case")
+                    .mapNotNull { key -> item.string(key) }
+                    .firstOrNull(String::isNotBlank),
             )
         }.sortedByDescending(RecordingExport::createdAt)
     }
 
     fun parseRecordingExportStart(rawJson: String): RecordingExportStart {
         val root = json.parseToJsonElement(rawJson) as? JsonObject
-            ?: error("Frigate did not return a valid saved clip response.")
+            ?: error("Frigate did not return a valid saved clip response")
         if (root.bool("success") != true) {
             error(root.string("message") ?: "Frigate could not save this clip.")
         }
         val id = root.string("export_id")?.takeIf(String::isNotBlank)
-            ?: error("Frigate did not return a saved clip ID.")
+            ?: error("Frigate did not return a saved clip ID")
         return RecordingExportStart(
             exportId = id,
             message = root.string("message").orEmpty(),

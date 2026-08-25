@@ -47,6 +47,8 @@ private val OpahLightColors = lightColorScheme(
 fun OpahTheme(
     appearanceMode: AppearanceMode = AppearanceMode.SYSTEM,
     customThemeColors: CustomThemeColors = CustomThemeColors(),
+    reducedMotion: Boolean = false,
+    highContrast: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     val colors = when (appearanceMode) {
@@ -56,11 +58,26 @@ fun OpahTheme(
         AppearanceMode.CUSTOM -> customColorScheme(customThemeColors)
     }
     MaterialTheme(colorScheme = colors) {
-        CompositionLocalProvider(LocalContentColor provides colors.onBackground) {
+        CompositionLocalProvider(
+            LocalContentColor provides colors.onBackground,
+            LocalOpahUiPreferences provides OpahUiPreferences(reducedMotion, highContrast),
+            LocalOpahSemanticColors provides semanticColors(colors.primary, highContrast),
+        ) {
             content()
         }
     }
 }
+
+private fun semanticColors(selection: Color, highContrast: Boolean) = OpahSemanticColors(
+    alert = if (highContrast) Color(0xFFFF6B52) else Color(0xFFE85D45),
+    detection = if (highContrast) Color(0xFF67C5FF) else Color(0xFF4EA8DE),
+    warning = if (highContrast) Color(0xFFFFD166) else Color(0xFFF2B84B),
+    offline = if (highContrast) Color(0xFFD8DEE8) else Color(0xFF9AA4B2),
+    destructive = if (highContrast) Color(0xFFFF5C64) else Color(0xFFE5484D),
+    success = if (highContrast) Color(0xFF6EE7B7) else Color(0xFF55C59A),
+    selection = selection,
+    focus = Color.White,
+)
 
 private fun customColorScheme(colors: CustomThemeColors) = ThemeColorPolicy.sanitize(colors).let { safe ->
     val background = Color(safe.backgroundArgb)

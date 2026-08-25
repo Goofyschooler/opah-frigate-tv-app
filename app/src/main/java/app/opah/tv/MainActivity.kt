@@ -3,7 +3,9 @@ package app.opah.tv
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.content.Intent
+import android.content.ClipData
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -14,10 +16,14 @@ import androidx.activity.viewModels
 import androidx.annotation.RequiresApi
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.runtime.mutableStateOf
+import app.opah.tv.data.model.RecordingExport
 import app.opah.tv.ui.OpahApp
 import app.opah.tv.ui.Phase0ViewModel
 import java.io.File
+import java.io.FileOutputStream
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val pipModeActive = mutableStateOf(false)
@@ -33,6 +39,7 @@ class MainActivity : ComponentActivity() {
         val documentationSettingsPage = intent.documentationExtra(EXTRA_DOCUMENTATION_SETTINGS_PAGE)
         val documentationInformationTab = intent.documentationExtra(EXTRA_DOCUMENTATION_INFORMATION_TAB)
         val documentationActivityPage = intent.documentationExtra(EXTRA_DOCUMENTATION_ACTIVITY_PAGE)
+        val documentationClipsPage = intent.documentationExtra(EXTRA_DOCUMENTATION_CLIPS_PAGE)
         if (BuildConfig.DOCUMENTATION_MODE) viewModel.setDocumentationScenario(documentationScenario)
         handleCameraLaunch(intent)
         setContent {
@@ -44,10 +51,13 @@ class MainActivity : ComponentActivity() {
                 onFullyDrawn = ::reportFullyDrawnOnce,
                 onExitRequested = ::finish,
                 onInstallUpdate = ::openUpdateInstaller,
+                onShareSnapshot = ::shareSnapshot,
+                onShareClip = ::shareClip,
                 initialDestinationName = documentationDestination,
                 initialSettingsPageName = documentationSettingsPage,
                 initialInformationTabName = documentationInformationTab,
                 initialActivityPageName = documentationActivityPage,
+                initialClipsPageName = documentationClipsPage,
             )
         }
     }
@@ -56,11 +66,6 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleCameraLaunch(intent)
-    }
-
-    override fun onResume() {
-        super.onResume()
-        viewModel.checkForUpdates()
     }
 
     private fun handleCameraLaunch(intent: Intent) {
@@ -99,6 +104,47 @@ class MainActivity : ComponentActivity() {
         runCatching { startActivity(installIntent) }
             .onFailure { viewModel.reportUpdateInstallError() }
     }
+
+    private fun shareSnapshot(bitmap: Bitmap, cameraLabel: String): Boolean = runCatching {
+        val directory = File(cacheDir, "snapshots").apply { mkdirs() }.canonicalFile
+        check(directory.parentFile == cacheDir.canonicalFile)
+        val image = File(directory, "opah-snapshot-${System.currentTimeMillis()}.jpg").canonicalFile
+        check(image.parentFile == directory)
+        FileOutputStream(image).use { output ->
+            check(bitmap.compress(Bitmap.CompressFormat.JPEG, 92, output))
+        }
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", image)
+        val sendIntent = Intent(Intent.ACTION_SEND)
+            .setType("image/jpeg")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .putExtra(Intent.EXTRA_SUBJECT, "$cameraLabel snapshot")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        sendIntent.clipData = ClipData.newRawUri("Opah snapshot", uri)
+        startActivity(Intent.createChooser(sendIntent, "Share snapshot"))
+        true
+    }.getOrDefault(false)
+
+    private fun shareClip(export: RecordingExport) {
+        lifecycleScope.launch {
+            val clip = viewModel.prepareClipShare(export).getOrNull() ?: return@launch
+            sharePreparedClip(clip, export.name.replace('_', ' '))
+        }
+    }
+
+    private fun sharePreparedClip(clip: File, title: String): Boolean = runCatching {
+        val directory = File(cacheDir, "shared-clips").canonicalFile
+        val verified = clip.canonicalFile
+        check(verified.isFile && verified.parentFile == directory && verified.extension == "mp4")
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", verified)
+        val sendIntent = Intent(Intent.ACTION_SEND)
+            .setType("video/mp4")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .putExtra(Intent.EXTRA_SUBJECT, title)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        sendIntent.clipData = ClipData.newRawUri("Opah clip", uri)
+        startActivity(Intent.createChooser(sendIntent, "Share clip"))
+        true
+    }.getOrDefault(false)
 
     private fun reportFullyDrawnOnce() {
         if (fullyDrawnReported) return
@@ -169,6 +215,7 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_DOCUMENTATION_SETTINGS_PAGE = "documentationSettingsPage"
         const val EXTRA_DOCUMENTATION_INFORMATION_TAB = "documentationInformationTab"
         const val EXTRA_DOCUMENTATION_ACTIVITY_PAGE = "documentationActivityPage"
+        const val EXTRA_DOCUMENTATION_CLIPS_PAGE = "documentationClipsPage"
     }
 }
 

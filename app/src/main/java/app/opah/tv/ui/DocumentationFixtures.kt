@@ -29,7 +29,10 @@ import app.opah.tv.data.model.FrigateCapabilityAvailability
 import app.opah.tv.data.model.FrigateCapabilityEvidence
 import app.opah.tv.data.model.FrigateFeature
 import app.opah.tv.data.model.FrigateUserProfile
+import app.opah.tv.data.model.ExportIncident
 import app.opah.tv.data.model.LiveStreamOption
+import app.opah.tv.data.model.MotionSearchJobState
+import app.opah.tv.data.model.MotionSearchResult
 import app.opah.tv.data.model.RecordingStorageSummary
 import app.opah.tv.data.model.RecordingStorageVolume
 import app.opah.tv.data.model.RecordingSegment
@@ -48,6 +51,7 @@ import app.opah.tv.data.network.PtzConnectionState
 import app.opah.tv.data.network.PtzConnectionStatus
 import app.opah.tv.playback.PlaybackKind
 import app.opah.tv.playback.PlaybackRequest
+import app.opah.tv.playback.BIRDSEYE_STRETCH_PREFERENCE_KEY
 
 internal const val DOCUMENTATION_URI_PREFIX = "documentation://"
 
@@ -58,7 +62,7 @@ internal interface DocumentationResourceProvider {
 internal object DocumentationResources {
     private val provider: DocumentationResourceProvider by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         check(app.opah.tv.BuildConfig.DOCUMENTATION_MODE) {
-            "Documentation resources are unavailable in production builds."
+            "Documentation resources are unavailable in production builds"
         }
         val providerClass = Class.forName(
             "app.opah.tv.ui.DocumentationResourceProviderImpl",
@@ -129,6 +133,16 @@ internal object DocumentationFixtures {
         reviewItem("review-garden-2", "garden", 1_787_121_800.0, ReviewSeverity.ALERT, listOf("cat"), listOf("yard")),
     )
 
+    private val incidents = listOf(
+        ExportIncident(
+            id = "incident-arrival",
+            name = "Evening arrival",
+            description = "Front entry and driveway clips from the same moment",
+            createdAt = 1_787_157_420.0,
+            updatedAt = 1_787_157_480.0,
+        ),
+    )
+
     private val savedRecordings = listOf(
         RecordingExport(
             id = "saved-entry",
@@ -138,17 +152,32 @@ internal object DocumentationFixtures {
             videoPath = "/exports/saved-entry.mp4",
             thumbnailPath = "/media/frigate/clips/export/saved-entry.webp",
             inProgress = false,
+            incidentId = incidents.first().id,
         ),
         RecordingExport(
             id = "saved-driveway",
             camera = "driveway",
             name = "Driveway visitor",
-            createdAt = 1_787_153_980.0,
+            createdAt = 1_787_157_445.0,
             videoPath = "/exports/saved-driveway.mp4",
             thumbnailPath = "/media/frigate/clips/export/saved-driveway.webp",
             inProgress = false,
+            incidentId = incidents.first().id,
         ),
     )
+
+    private val stressSavedRecordings = savedRecordings + (1..8).map { index ->
+        val camera = cameras[index % cameras.size]
+        RecordingExport(
+            id = "saved-stress-$index",
+            camera = camera.name,
+            name = "Saved activity $index",
+            createdAt = 1_787_157_000.0 - index * 180.0,
+            videoPath = "/exports/saved-stress-$index.mp4",
+            thumbnailPath = "/media/frigate/clips/export/saved-stress-$index.webp",
+            inProgress = false,
+        )
+    }
 
     private val streamMetadata = cameras
         .flatMap(Camera::streams)
@@ -267,14 +296,14 @@ internal object DocumentationFixtures {
             )
             "SETUP" -> Phase0UiState(
                 loading = false,
-                statusMessage = "Sign in to Frigate.",
-                savedProfile = profile,
+                statusMessage = "Sign in to Frigate",
+                savedProfile = profile.copy(rtspHostOverride = null, rtspPort = 8554),
                 settings = base.settings,
             )
             "RECOVERY" -> Phase0UiState(
                 loading = false,
                 statusMessage = "Frigate is unavailable",
-                errorMessage = "The demonstration server could not be reached.",
+                errorMessage = "The demonstration server could not be reached",
                 savedProfile = profile,
                 settings = base.settings,
                 savedSessionRecoveryAvailable = true,
@@ -296,9 +325,40 @@ internal object DocumentationFixtures {
             )
             "ACTIVITY_SEARCH" -> base.copy(
                 activitySearch = ActivitySearchState(
-                    query = "red car",
-                    results = searchEvents("red car", cameras.map(Camera::name).toSet()),
+                    query = "car",
+                    results = searchEvents("car", cameras.map(Camera::name).toSet()),
                     searchedOnce = true,
+                ),
+            )
+            "ACTIVITY_SEARCH_LONG" -> base.copy(
+                activitySearch = ActivitySearchState(
+                    query = "a",
+                    results = searchEvents("a", cameras.map(Camera::name).toSet()),
+                    searchedOnce = true,
+                ),
+            )
+            "ACTIVITY_MOTION" -> base.copy(
+                motionReview = MotionReviewUiState(
+                    cameraName = cameras.first().name,
+                    regionIndex = 4,
+                    jobState = MotionSearchJobState.SUCCESS,
+                    results = listOf(
+                        MotionSearchResult(1_787_157_420.0, 12.0),
+                        MotionSearchResult(1_787_156_610.0, 8.0),
+                        MotionSearchResult(1_787_155_980.0, 5.0),
+                    ),
+                    searchedOnce = true,
+                ),
+            )
+            "CLIPS_LONG" -> base.copy(
+                exports = base.exports.copy(items = stressSavedRecordings),
+            )
+            "UPDATE_LONG" -> base.copy(
+                appUpdate = base.appUpdate.copy(
+                    latestVersion = "0.4.0",
+                    releaseNotes = (1..36).joinToString("\n") { index ->
+                        "Improvement $index makes everyday TV navigation clearer"
+                    },
                 ),
             )
             "LIVE_PLAYBACK" -> base.copy(
@@ -344,6 +404,7 @@ internal object DocumentationFixtures {
         uri = "${DOCUMENTATION_URI_PREFIX}birdseye",
         kind = PlaybackKind.LIVE,
         detail = "Frigate composite • Single RTSP stream",
+        stretchPreferenceKey = BIRDSEYE_STRETCH_PREFERENCE_KEY,
     )
 
     fun recordedPlayback(item: ReviewItem): PlaybackRequest = PlaybackRequest(
@@ -428,6 +489,7 @@ internal object DocumentationFixtures {
                 ),
             ),
         ),
+        settingsLoaded = true,
         review = ReviewBrowserState(
             items = reviewItems.filter { it.severity == ReviewSeverity.ALERT },
             knownLabels = reviewItems.flatMap(ReviewItem::objects).toSet(),
@@ -446,13 +508,17 @@ internal object DocumentationFixtures {
             loadedOnce = true,
             summary = information,
         ),
-        exports = ExportsUiState(loadedOnce = true, items = savedRecordings),
+        exports = ExportsUiState(
+            loadedOnce = true,
+            items = savedRecordings,
+            incidents = incidents,
+            incidentsLoaded = true,
+            selectedIncidentId = incidents.first().id,
+        ),
         appUpdate = AppUpdateUiState(
             checkedOnce = true,
-            updateAvailable = true,
-            latestVersion = "0.3.1",
-            releasePageUrl = OPAH_REPOSITORY_URL + "/releases/tag/v0.3.1",
-            releaseNotes = "Better playback controls\nFaster navigation\nSaved recording previews",
+            updateAvailable = false,
+            latestVersion = "0.4.0",
         ),
     )
 

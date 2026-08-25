@@ -55,7 +55,7 @@ class ReviewImageRepository(
         height: Int = DEFAULT_HEIGHT,
     ): Result<ReviewImage> {
         val url = reviewThumbnailUrl(profile, item.thumbnailPath)
-            ?: return Result.failure(IllegalArgumentException("This Review item has no safe thumbnail."))
+            ?: return Result.failure(IllegalArgumentException("This Review item has no safe thumbnail"))
         return refresh(cacheKey(profile, item), url, height)
     }
 
@@ -75,7 +75,7 @@ class ReviewImageRepository(
         height: Int = DEFAULT_HEIGHT,
     ): Result<ReviewImage> {
         val url = exportThumbnailUrl(profile, export.thumbnailPath)
-            ?: return Result.failure(IllegalArgumentException("This saved recording has no safe preview."))
+            ?: return Result.failure(IllegalArgumentException("This saved recording has no safe preview"))
         return refresh(cacheKey(profile, export), url, height)
     }
 
@@ -110,7 +110,7 @@ class ReviewImageRepository(
                             output.toByteArray()
                         }
                         val bitmap = decodeReviewBitmap(bytes, height)
-                            ?: error("Frigate returned an invalid Review thumbnail.")
+                            ?: error("Frigate returned an invalid Review thumbnail")
                         ReviewImage(bitmap, System.currentTimeMillis()).also { image ->
                             synchronized(cache) {
                                 if (cacheGeneration == refreshGeneration) cache.put(key, image)

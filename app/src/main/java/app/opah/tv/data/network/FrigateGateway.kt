@@ -6,6 +6,9 @@ import app.opah.tv.data.model.FrigateUserProfile
 import app.opah.tv.data.model.ReviewItem
 import app.opah.tv.data.model.ReviewSearchQuery
 import app.opah.tv.data.model.RecordingExport
+import app.opah.tv.data.model.BatchExportRequest
+import app.opah.tv.data.model.IncidentDraft
+import app.opah.tv.data.model.MotionSearchRequest
 
 interface FrigateGateway {
     suspend fun login(profile: ConnectionProfile, password: String): FrigateUserProfile
@@ -64,6 +67,46 @@ interface FrigateGateway {
         throw UnsupportedOperationException("Deleting saved recordings is not implemented by this gateway.")
     suspend fun deleteExports(profile: ConnectionProfile, exportIds: Set<String>): Unit =
         throw UnsupportedOperationException("Deleting saved recordings is not implemented by this gateway.")
+    suspend fun getProfiles(profile: ConnectionProfile): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.PROFILE_MODES)
+    suspend fun getActiveProfile(profile: ConnectionProfile): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.PROFILE_MODES)
+    suspend fun setActiveProfile(profile: ConnectionProfile, profileName: String?): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.PROFILE_MODE_SWITCH)
+    suspend fun startMotionSearch(profile: ConnectionProfile, request: MotionSearchRequest): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.MOTION_SEARCH)
+    suspend fun getMotionSearch(profile: ConnectionProfile, camera: String, jobId: String): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.MOTION_SEARCH)
+    suspend fun cancelMotionSearch(profile: ConnectionProfile, camera: String, jobId: String): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.MOTION_SEARCH)
+    suspend fun startOnDemandRecording(
+        profile: ConnectionProfile,
+        camera: String,
+        durationSeconds: Int?,
+    ): String = throw UnsupportedFrigateOperationException(FrigateContractOperation.ON_DEMAND_RECORDING)
+    suspend fun stopOnDemandRecording(profile: ConnectionProfile, eventId: String): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.ON_DEMAND_RECORDING)
+    suspend fun startBatchExport(profile: ConnectionProfile, request: BatchExportRequest): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.BATCH_EXPORT)
+    suspend fun getActiveExportJobs(profile: ConnectionProfile): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.EXPORT_JOBS)
+    suspend fun getExportJob(profile: ConnectionProfile, exportId: String): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.EXPORT_JOBS)
+    suspend fun getIncidents(profile: ConnectionProfile): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.INCIDENTS)
+    suspend fun createIncident(profile: ConnectionProfile, draft: IncidentDraft): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.INCIDENT_MUTATION)
+    suspend fun updateIncident(profile: ConnectionProfile, incidentId: String, draft: IncidentDraft): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.INCIDENT_MUTATION)
+    suspend fun deleteIncident(profile: ConnectionProfile, incidentId: String, deleteClips: Boolean): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.INCIDENT_MUTATION)
+    suspend fun reassignExports(
+        profile: ConnectionProfile,
+        exportIds: Set<String>,
+        incidentId: String?,
+    ): String = throw UnsupportedFrigateOperationException(FrigateContractOperation.INCIDENT_MUTATION)
+    suspend fun renameExport(profile: ConnectionProfile, exportId: String, name: String): String =
+        throw UnsupportedFrigateOperationException(FrigateContractOperation.INCIDENT_MUTATION)
     fun reviewPlaybackUrl(profile: ConnectionProfile, item: ReviewItem): String
     fun recordingPlaybackUrl(
         profile: ConnectionProfile,

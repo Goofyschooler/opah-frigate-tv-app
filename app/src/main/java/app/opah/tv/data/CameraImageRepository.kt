@@ -21,6 +21,7 @@ import okhttp3.Request
 data class CameraImage(
     val bitmap: Bitmap,
     val loadedAtMillis: Long,
+    val requestedHeight: Int = bitmap.height,
 )
 
 class CameraImageRepository(
@@ -41,13 +42,16 @@ class CameraImageRepository(
         profile: ConnectionProfile,
         cameraName: String,
         height: Int = DEFAULT_HEIGHT,
+        force: Boolean = false,
     ): Result<CameraImage> = runCatching {
         require(height in 120..1080) { "Camera image height is out of range." }
         val key = cacheKey(profile, cameraName)
         requestLocks.computeIfAbsent(key) { Mutex() }.withLock {
             cached(profile, cameraName)?.takeIf { image ->
                 val age = System.currentTimeMillis() - image.loadedAtMillis
-                age in 0..MIN_REFRESH_INTERVAL_MS
+                !force &&
+                    age in 0..MIN_REFRESH_INTERVAL_MS &&
+                    cameraImageRequestCanReuse(image.requestedHeight, height)
             } ?: requestLimit.withPermit {
                 withContext(ioDispatcher) {
                     val url = profile.apiBaseUrl.toHttpUrl().newBuilder()
@@ -76,8 +80,8 @@ class CameraImageRepository(
                             output.toByteArray()
                         }
                         val bitmap = decodeCameraBitmap(bytes, height)
-                            ?: error("Frigate returned an invalid camera image.")
-                        CameraImage(bitmap, System.currentTimeMillis()).also { image ->
+                            ?: error("Frigate returned an invalid camera image")
+                        CameraImage(bitmap, System.currentTimeMillis(), requestedHeight = height).also { image ->
                             synchronized(cache) { cache.put(key, image) }
                         }
                     }
@@ -120,6 +124,9 @@ class CameraImageRepository(
         const val MIN_REFRESH_INTERVAL_MS = 5_000L
     }
 }
+
+internal fun cameraImageRequestCanReuse(cachedRequestHeight: Int, targetHeight: Int): Boolean =
+    cachedRequestHeight >= targetHeight
 
 internal fun cameraImageSampleSize(sourceHeight: Int, targetHeight: Int): Int {
     if (sourceHeight <= 0 || targetHeight <= 0) return 1

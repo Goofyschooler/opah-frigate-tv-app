@@ -7,6 +7,9 @@ import app.opah.tv.data.model.ReviewItem
 import app.opah.tv.data.model.ReviewSearchQuery
 import app.opah.tv.data.model.ReviewSeverity
 import app.opah.tv.data.model.RecordingExport
+import app.opah.tv.data.model.BatchExportRequest
+import app.opah.tv.data.model.IncidentDraft
+import app.opah.tv.data.model.MotionSearchRequest
 import app.opah.tv.data.model.isSafeLiteralLicensePlateFilter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -316,6 +319,154 @@ class FrigateApiClient(
         )
     }
 
+    override suspend fun getProfiles(profile: ConnectionProfile): String =
+        getJson(profile, "profiles")
+
+    override suspend fun getActiveProfile(profile: ConnectionProfile): String =
+        getJson(profile, "profile", "active")
+
+    override suspend fun setActiveProfile(profile: ConnectionProfile, profileName: String?): String {
+        val value = profileName?.trim()?.takeIf(String::isNotEmpty) ?: "none"
+        require(value.length <= 100) { "Mode name is too long." }
+        return putJson(profile, arrayOf("camera", "*", "set", "profile"), """{"value":${json.encodeToString(value)}}""")
+    }
+
+    override suspend fun startMotionSearch(
+        profile: ConnectionProfile,
+        request: MotionSearchRequest,
+    ): String {
+        val points = request.polygon.joinToString(separator = ",", prefix = "[", postfix = "]") { point ->
+            "[${point.x},${point.y}]"
+        }
+        val payload = """{"start_time":${request.startTime},"end_time":${request.endTime},"polygon_points":$points,"threshold":${request.threshold},"min_area":${request.minimumAreaPercent},"parallel":${request.parallel},"max_results":${request.maximumResults}}"""
+        return postJson(profile, arrayOf(request.camera, "search", "motion"), payload)
+    }
+
+    override suspend fun getMotionSearch(
+        profile: ConnectionProfile,
+        camera: String,
+        jobId: String,
+    ): String {
+        requireIdentifier(camera, "Camera")
+        requireIdentifier(jobId, "Motion Search job")
+        return getJson(profile, camera, "search", "motion", jobId)
+    }
+
+    override suspend fun cancelMotionSearch(
+        profile: ConnectionProfile,
+        camera: String,
+        jobId: String,
+    ): String {
+        requireIdentifier(camera, "Camera")
+        requireIdentifier(jobId, "Motion Search job")
+        return postJson(profile, arrayOf(camera, "search", "motion", jobId, "cancel"), "{}")
+    }
+
+    override suspend fun startOnDemandRecording(
+        profile: ConnectionProfile,
+        camera: String,
+        durationSeconds: Int?,
+    ): String {
+        requireIdentifier(camera, "Camera")
+        require(durationSeconds == null || durationSeconds in 1..86_400) { "Recording duration is invalid." }
+        val duration = durationSeconds?.toString() ?: "null"
+        return postJson(
+            profile,
+            arrayOf("events", camera, "on_demand", "create"),
+            """{"include_recording":true,"duration":$duration}""",
+        )
+    }
+
+    override suspend fun stopOnDemandRecording(profile: ConnectionProfile, eventId: String): String {
+        requireIdentifier(eventId, "Recording event")
+        return putJson(profile, arrayOf("events", eventId, "end"), "{}")
+    }
+
+    override suspend fun startBatchExport(
+        profile: ConnectionProfile,
+        request: BatchExportRequest,
+    ): String {
+        val items = request.items.joinToString(separator = ",", prefix = "[", postfix = "]") { item ->
+            buildString {
+                append("{\"camera\":")
+                append(json.encodeToString(item.camera))
+                append(",\"start_time\":${item.startTime},\"end_time\":${item.endTime}")
+                item.friendlyName?.let { append(",\"friendly_name\":${json.encodeToString(it)}") }
+                item.clientItemId?.let { append(",\"client_item_id\":${json.encodeToString(it)}") }
+                append('}')
+            }
+        }
+        val payload = buildString {
+            append("{\"items\":$items")
+            request.existingIncidentId?.let { append(",\"export_case_id\":${json.encodeToString(it)}") }
+            request.newIncidentName?.let { append(",\"new_case_name\":${json.encodeToString(it)}") }
+            request.newIncidentDescription?.let {
+                append(",\"new_case_description\":${json.encodeToString(it)}")
+            }
+            append('}')
+        }
+        return postJson(profile, arrayOf("exports", "batch"), payload)
+    }
+
+    override suspend fun getActiveExportJobs(profile: ConnectionProfile): String =
+        getJson(profile, "jobs", "export")
+
+    override suspend fun getExportJob(profile: ConnectionProfile, exportId: String): String {
+        requireIdentifier(exportId, "Clip job")
+        return getJson(profile, "jobs", "export", exportId)
+    }
+
+    override suspend fun getIncidents(profile: ConnectionProfile): String = getJson(profile, "cases")
+
+    override suspend fun createIncident(profile: ConnectionProfile, draft: IncidentDraft): String =
+        postJson(profile, arrayOf("cases"), incidentPayload(draft))
+
+    override suspend fun updateIncident(
+        profile: ConnectionProfile,
+        incidentId: String,
+        draft: IncidentDraft,
+    ): String {
+        requireIdentifier(incidentId, "Incident")
+        return patchJson(profile, arrayOf("cases", incidentId), incidentPayload(draft))
+    }
+
+    override suspend fun deleteIncident(
+        profile: ConnectionProfile,
+        incidentId: String,
+        deleteClips: Boolean,
+    ): String {
+        requireIdentifier(incidentId, "Incident")
+        val url = apiUrl(profile, "cases", incidentId).newBuilder()
+            .addQueryParameter("delete_exports", deleteClips.toString())
+            .build()
+        return executeText(Request.Builder().url(url).delete().build())
+    }
+
+    override suspend fun reassignExports(
+        profile: ConnectionProfile,
+        exportIds: Set<String>,
+        incidentId: String?,
+    ): String {
+        require(exportIds.isNotEmpty() && exportIds.none(String::isBlank)) { "At least one Clip is required." }
+        val ids = json.encodeToString(exportIds.sorted())
+        val target = incidentId?.let { json.encodeToString(it) } ?: "null"
+        return postJson(profile, arrayOf("exports", "reassign"), """{"ids":$ids,"export_case_id":$target}""")
+    }
+
+    override suspend fun renameExport(
+        profile: ConnectionProfile,
+        exportId: String,
+        name: String,
+    ): String {
+        requireIdentifier(exportId, "Clip")
+        require(name.isNotBlank() && name.length <= 256) { "Clip name is invalid." }
+        return patchJson(
+            profile,
+            arrayOf("export", exportId, "rename"),
+            """{"name":${json.encodeToString(name.trim())}}""",
+        )
+    }
+
     override fun reviewPlaybackUrl(profile: ConnectionProfile, item: ReviewItem): String {
         val start = (item.startTime - REVIEW_PADDING_SECONDS).coerceAtLeast(0.0)
         val end = (item.endTime ?: (System.currentTimeMillis() / 1000.0)) + REVIEW_PADDING_SECONDS
@@ -374,6 +525,54 @@ class FrigateApiClient(
         return FrigateUserProfile(username, role, allowed)
     }
 
+    private suspend fun getJson(profile: ConnectionProfile, vararg segments: String): String =
+        executeText(Request.Builder().url(apiUrl(profile, *segments)).get().build())
+
+    private suspend fun postJson(
+        profile: ConnectionProfile,
+        segments: Array<String>,
+        payload: String,
+    ): String = executeText(
+        Request.Builder()
+            .url(apiUrl(profile, *segments))
+            .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+            .build(),
+    )
+
+    private suspend fun putJson(
+        profile: ConnectionProfile,
+        segments: Array<String>,
+        payload: String,
+    ): String = executeText(
+        Request.Builder()
+            .url(apiUrl(profile, *segments))
+            .put(payload.toRequestBody(JSON_MEDIA_TYPE))
+            .build(),
+    )
+
+    private suspend fun patchJson(
+        profile: ConnectionProfile,
+        segments: Array<String>,
+        payload: String,
+    ): String = executeText(
+        Request.Builder()
+            .url(apiUrl(profile, *segments))
+            .patch(payload.toRequestBody(JSON_MEDIA_TYPE))
+            .build(),
+    )
+
+    private fun incidentPayload(draft: IncidentDraft): String = buildString {
+        append("{\"name\":${json.encodeToString(draft.name.trim())}")
+        draft.description?.let { append(",\"description\":${json.encodeToString(it)}") }
+        append('}')
+    }
+
+    private fun requireIdentifier(value: String, label: String) {
+        require(value.isNotBlank() && value.length <= 256 && '/' !in value && '\\' !in value) {
+            "$label is invalid"
+        }
+    }
+
     private suspend fun executeText(request: Request): String = withContext(Dispatchers.IO) {
         try {
             httpClient.newCall(request).execute().use { response ->
@@ -425,7 +624,7 @@ class FrigateApiClient(
         is UnknownHostException -> OpahException(
             OpahFailure(
                 OpahErrorCode.DNS_FAILURE,
-                "The Frigate hostname could not be resolved.",
+                "The Frigate hostname could not be resolved",
                 RecoveryAction.CHECK_CONNECTION,
                 retryable = true,
             ),
@@ -434,7 +633,7 @@ class FrigateApiClient(
         is SocketTimeoutException -> OpahException(
             OpahFailure(
                 OpahErrorCode.TIMEOUT,
-                "The Frigate connection timed out.",
+                "The Frigate connection timed out",
                 RecoveryAction.RETRY,
                 retryable = true,
             ),
@@ -443,7 +642,7 @@ class FrigateApiClient(
         is ConnectException -> OpahException(
             OpahFailure(
                 OpahErrorCode.CONNECTION_REFUSED,
-                "The Frigate server refused the connection.",
+                "The Frigate server refused the connection",
                 RecoveryAction.CHECK_CONNECTION,
                 retryable = true,
             ),
@@ -452,7 +651,7 @@ class FrigateApiClient(
         else -> OpahException(
             OpahFailure(
                 OpahErrorCode.UNKNOWN,
-                "The Frigate request failed.",
+                "The Frigate request failed",
                 RecoveryAction.RETRY,
                 retryable = true,
             ),
@@ -491,46 +690,74 @@ class FrigateApiClient(
 }
 
 internal fun apiFailureForStatus(code: Int): OpahFailure = when (code) {
+    400 -> OpahFailure(
+        OpahErrorCode.BAD_REQUEST,
+        "Frigate could not use that request",
+        RecoveryAction.NONE,
+        retryable = false,
+        httpStatus = code,
+    )
     408 -> OpahFailure(
         OpahErrorCode.TIMEOUT,
-        "Frigate timed out while processing the request.",
+        "Frigate timed out while processing the request",
         RecoveryAction.RETRY,
         retryable = true,
+        httpStatus = code,
     )
     403 -> OpahFailure(
         OpahErrorCode.PERMISSION_DENIED,
-        "This Frigate account does not have permission for that operation.",
+        "This Frigate account does not have permission for that operation",
         RecoveryAction.USE_DIFFERENT_ACCOUNT,
         retryable = false,
+        httpStatus = code,
     )
     404 -> OpahFailure(
         OpahErrorCode.NOT_FOUND,
-        "The requested Frigate endpoint was not found.",
+        "The requested Frigate endpoint was not found",
         RecoveryAction.CHECK_SERVER_URL,
         retryable = false,
+        httpStatus = code,
+    )
+    409 -> OpahFailure(
+        OpahErrorCode.OPERATION_CONFLICT,
+        "Frigate could not complete that action in its current state",
+        RecoveryAction.RETRY,
+        retryable = true,
+        httpStatus = code,
+    )
+    422 -> OpahFailure(
+        OpahErrorCode.UNPROCESSABLE_REQUEST,
+        "Frigate rejected part of that request",
+        RecoveryAction.NONE,
+        retryable = false,
+        httpStatus = code,
     )
     429 -> OpahFailure(
         OpahErrorCode.RATE_LIMITED,
         "Frigate received too many requests. Wait before trying again.",
         RecoveryAction.RETRY,
         retryable = true,
+        httpStatus = code,
     )
     in 300..399 -> OpahFailure(
         OpahErrorCode.REDIRECT_REJECTED,
         "Frigate redirected the API request. Enter the server's canonical base URL.",
         RecoveryAction.CHECK_SERVER_URL,
         retryable = false,
+        httpStatus = code,
     )
     in 500..599 -> OpahFailure(
         OpahErrorCode.SERVER_ERROR,
-        "Frigate returned a server error ($code).",
+        "Frigate returned a server error ($code)",
         RecoveryAction.RETRY,
         retryable = true,
+        httpStatus = code,
     )
     else -> OpahFailure(
         OpahErrorCode.INVALID_RESPONSE,
-        "Frigate returned HTTP $code.",
+        "Frigate returned HTTP $code",
         RecoveryAction.RETRY,
         retryable = code >= 500,
+        httpStatus = code,
     )
 }

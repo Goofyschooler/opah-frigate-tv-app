@@ -34,6 +34,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.CornerRadius
@@ -55,6 +56,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.disabled
@@ -90,6 +92,212 @@ internal class TvInputFocusCoordinator {
 }
 
 @Composable
+internal fun FocusableSurface(
+    focusKey: String,
+    restoreFocusKey: String?,
+    onFocusRestored: () -> Unit,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    onLongClick: (() -> Unit)? = null,
+    enabled: Boolean = true,
+    selected: Boolean = false,
+    accessibilityLabel: String = focusKey,
+    externalFocusRequester: FocusRequester? = null,
+    onFocused: (String) -> Unit = {},
+    onFocusStateChanged: (Boolean) -> Unit = {},
+    focusIndicatorVisible: Boolean = true,
+    activateOnKeyUp: Boolean = false,
+    containerColor: Color? = null,
+    style: FocusableSurfaceStyle = FocusableSurfaceStyle.LEGACY_CARD,
+    content: @Composable () -> Unit,
+) {
+    val focused = remember { mutableStateOf(false) }
+    var longPressTriggered by remember(focusKey) { mutableStateOf(false) }
+    val rememberedRequester = remember(focusKey) { FocusRequester() }
+    val requester = externalFocusRequester ?: rememberedRequester
+    LaunchedEffect(restoreFocusKey, enabled) {
+        if (restoreFocusKey != focusKey || !enabled) return@LaunchedEffect
+        for (attempt in 0 until 8) {
+            withFrameNanos { }
+            if (requester.requestFocus()) {
+                onFocusRestored()
+                break
+            }
+        }
+    }
+    val preferences = LocalOpahUiPreferences.current
+    val semanticColors = LocalOpahSemanticColors.current
+    val cornerRadius = when (style) {
+        FocusableSurfaceStyle.MEDIA -> OpahDesignTokens.MediaCornerRadius
+        FocusableSurfaceStyle.NAVIGATION -> 10.dp
+        FocusableSurfaceStyle.SETTINGS_ROW -> 8.dp
+        FocusableSurfaceStyle.SEGMENTED_TAB -> 9.dp
+        FocusableSurfaceStyle.PRIMARY_ACTION,
+        FocusableSurfaceStyle.SECONDARY_ACTION,
+        FocusableSurfaceStyle.PLAYBACK_ACTION,
+        -> 10.dp
+        FocusableSurfaceStyle.LEGACY_CARD -> 12.dp
+    }
+    val shape = RoundedCornerShape(cornerRadius)
+    val focusedBorderColor = if (style == FocusableSurfaceStyle.LEGACY_CARD) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        semanticColors.focus
+    }
+    val selectedBorderColor = semanticColors.selection.copy(alpha = 0.9f)
+    val restingBorderColor = if (style == FocusableSurfaceStyle.LEGACY_CARD) {
+        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.22f)
+    } else {
+        Color.Transparent
+    }
+    val defaultContainer = when (style) {
+        FocusableSurfaceStyle.NAVIGATION,
+        FocusableSurfaceStyle.SETTINGS_ROW,
+        -> Color.Transparent
+        FocusableSurfaceStyle.PRIMARY_ACTION -> MaterialTheme.colorScheme.primary
+        FocusableSurfaceStyle.SECONDARY_ACTION,
+        FocusableSurfaceStyle.PLAYBACK_ACTION,
+        FocusableSurfaceStyle.SEGMENTED_TAB,
+        -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        FocusableSurfaceStyle.MEDIA,
+        FocusableSurfaceStyle.LEGACY_CARD,
+        -> MaterialTheme.colorScheme.surface
+    }
+    val restingContainerColor = containerColor ?: defaultContainer
+    val focusedContainerColor = MaterialTheme.colorScheme.onSurface.copy(
+        alpha = if (preferences.highContrast) 0.22f else 0.11f,
+    )
+    Box(
+        modifier = modifier
+            .focusRequester(requester)
+            .onFocusChanged {
+                focused.value = it.isFocused
+                onFocusStateChanged(it.isFocused)
+                if (it.isFocused) onFocused(focusKey)
+            }
+            .onPreviewKeyEvent { event ->
+                if (!enabled || (event.key != Key.DirectionCenter && event.key != Key.Enter)) {
+                    return@onPreviewKeyEvent false
+                }
+                if (onLongClick == null) {
+                    when (event.type) {
+                        KeyEventType.KeyDown -> {
+                            if (shouldActivateSurface(
+                                    type = event.type,
+                                    repeatCount = event.nativeKeyEvent.repeatCount,
+                                    activateOnKeyUp = activateOnKeyUp,
+                                )
+                            ) {
+                                onClick()
+                            }
+                            true
+                        }
+                        KeyEventType.KeyUp -> {
+                            if (shouldActivateSurface(
+                                    type = event.type,
+                                    repeatCount = event.nativeKeyEvent.repeatCount,
+                                    activateOnKeyUp = activateOnKeyUp,
+                                )
+                            ) {
+                                onClick()
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        else -> false
+                    }
+                } else {
+                    when (event.type) {
+                        KeyEventType.KeyDown -> {
+                            if (!longPressTriggered && event.nativeKeyEvent.repeatCount > 0) {
+                                longPressTriggered = true
+                                onLongClick()
+                            }
+                            true
+                        }
+                        KeyEventType.KeyUp -> {
+                            if (!longPressTriggered) onClick()
+                            longPressTriggered = false
+                            true
+                        }
+                        else -> false
+                    }
+                }
+            }
+            // Expose each card as one useful accessibility node. Allowing all of
+            // its image/text descendants into the tree makes every D-pad focus
+            // move expensive whenever an accessibility service is enabled.
+            .clearAndSetSemantics {
+                role = Role.Button
+                contentDescription = accessibilityLabel
+                this.selected = selected
+                if (!enabled) disabled()
+                onClick {
+                    if (enabled) onClick()
+                    enabled
+                }
+                onLongClick?.let { action ->
+                    onLongClick(label = "More options") {
+                        if (enabled) action()
+                        enabled
+                    }
+                }
+            }
+            .focusable(enabled)
+            .clip(shape)
+            .drawWithContent {
+                // Focus changes stay in the draw phase so ordinary D-pad
+                // movement never recomposes the card's media or text subtree.
+                drawRoundRect(
+                    color = when {
+                        !enabled -> restingContainerColor.copy(alpha = 0.45f)
+                        focused.value && style != FocusableSurfaceStyle.LEGACY_CARD -> focusedContainerColor
+                        selected -> semanticColors.selection.copy(alpha = 0.16f)
+                        else -> restingContainerColor
+                    },
+                    cornerRadius = CornerRadius(cornerRadius.toPx()),
+                )
+                drawContent()
+                val visiblyFocused = focused.value && focusIndicatorVisible
+                val strokeWidth = when {
+                    visiblyFocused && preferences.highContrast -> 4.dp.toPx()
+                    visiblyFocused -> 2.dp.toPx()
+                    selected && style != FocusableSurfaceStyle.LEGACY_CARD -> 2.dp.toPx()
+                    else -> 1.dp.toPx()
+                }
+                val inset = strokeWidth / 2f
+                drawRoundRect(
+                    color = when {
+                        visiblyFocused -> focusedBorderColor
+                        selected -> selectedBorderColor
+                        else -> restingBorderColor
+                    },
+                    topLeft = Offset(inset, inset),
+                    size = Size(
+                        width = (size.width - strokeWidth).coerceAtLeast(0f),
+                        height = (size.height - strokeWidth).coerceAtLeast(0f),
+                    ),
+                    cornerRadius = CornerRadius((cornerRadius.toPx() - inset).coerceAtLeast(0f)),
+                    style = Stroke(strokeWidth),
+                )
+            },
+    ) {
+        content()
+    }
+}
+
+internal fun shouldActivateSurface(
+    type: KeyEventType,
+    repeatCount: Int,
+    activateOnKeyUp: Boolean,
+): Boolean = if (activateOnKeyUp) {
+    type == KeyEventType.KeyUp
+} else {
+    type == KeyEventType.KeyDown && repeatCount == 0
+}
+
+@Composable
 internal fun FocusCard(
     focusKey: String,
     restoreFocusKey: String?,
@@ -105,94 +313,23 @@ internal fun FocusCard(
     focusIndicatorVisible: Boolean = true,
     containerColor: Color? = null,
     content: @Composable () -> Unit,
-) {
-    val focused = remember { mutableStateOf(false) }
-    val rememberedRequester = remember(focusKey) { FocusRequester() }
-    val requester = externalFocusRequester ?: rememberedRequester
-    LaunchedEffect(restoreFocusKey, enabled) {
-        if (restoreFocusKey != focusKey || !enabled) return@LaunchedEffect
-        for (attempt in 0 until 8) {
-            withFrameNanos { }
-            if (requester.requestFocus()) {
-                onFocusRestored()
-                break
-            }
-        }
-    }
-    val shape = RoundedCornerShape(12.dp)
-    val focusedBorderColor = MaterialTheme.colorScheme.primary
-    val selectedBorderColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.8f)
-    val restingBorderColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.22f)
-    val restingContainerColor = containerColor ?: MaterialTheme.colorScheme.surface
-    Box(
-        modifier = modifier
-            .focusRequester(requester)
-            .onFocusChanged {
-                focused.value = it.isFocused
-                onFocusStateChanged(it.isFocused)
-                if (it.isFocused) onFocused(focusKey)
-            }
-            .onPreviewKeyEvent { event ->
-                if (
-                    enabled &&
-                    event.type == KeyEventType.KeyDown &&
-                    (event.key == Key.DirectionCenter || event.key == Key.Enter)
-                ) {
-                    onClick()
-                    true
-                } else {
-                    false
-                }
-            }
-            // Expose each card as one useful accessibility node. Allowing all of
-            // its image/text descendants into the tree makes every D-pad focus
-            // move expensive whenever an accessibility service is enabled.
-            .clearAndSetSemantics {
-                role = Role.Button
-                contentDescription = accessibilityLabel
-                this.selected = selected
-                if (!enabled) disabled()
-                onClick {
-                    if (enabled) onClick()
-                    enabled
-                }
-            }
-            .focusable(enabled)
-            .clip(shape)
-            .background(
-                color = when {
-                    !enabled -> restingContainerColor.copy(alpha = 0.45f)
-                    selected -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.18f)
-                    else -> restingContainerColor
-                },
-                shape = shape,
-            )
-            // Read focus in the draw phase so ordinary D-pad movement redraws
-            // the border without recomposing the card's image and text subtree.
-            .drawWithContent {
-                drawContent()
-                val visiblyFocused = focused.value && focusIndicatorVisible
-                val strokeWidth = if (visiblyFocused) 3.dp.toPx() else 1.dp.toPx()
-                val inset = strokeWidth / 2f
-                drawRoundRect(
-                    color = when {
-                        visiblyFocused -> focusedBorderColor
-                        selected -> selectedBorderColor
-                        else -> restingBorderColor
-                    },
-                    topLeft = Offset(inset, inset),
-                    size = Size(
-                        width = (size.width - strokeWidth).coerceAtLeast(0f),
-                        height = (size.height - strokeWidth).coerceAtLeast(0f),
-                    ),
-                    cornerRadius = CornerRadius((12.dp.toPx() - inset).coerceAtLeast(0f)),
-                    style = Stroke(strokeWidth),
-                )
-            },
-    ) {
-        content()
-    }
-}
+) = FocusableSurface(
+    focusKey = focusKey,
+    restoreFocusKey = restoreFocusKey,
+    onFocusRestored = onFocusRestored,
+    onClick = onClick,
+    modifier = modifier,
+    enabled = enabled,
+    selected = selected,
+    accessibilityLabel = accessibilityLabel,
+    externalFocusRequester = externalFocusRequester,
+    onFocused = onFocused,
+    onFocusStateChanged = onFocusStateChanged,
+    focusIndicatorVisible = focusIndicatorVisible,
+    containerColor = containerColor,
+    style = FocusableSurfaceStyle.LEGACY_CARD,
+    content = content,
+)
 
 @Composable
 internal fun CameraSnapshot(
@@ -202,8 +339,13 @@ internal fun CameraSnapshot(
     modifier: Modifier = Modifier,
     refreshMillis: Long = 10_000L,
     initialRefreshDelayMillis: Long = 0L,
+    minimumCachedHeight: Int = 0,
+    contentScale: ContentScale = ContentScale.Crop,
+    containerColor: Color? = null,
 ) {
-    var bitmap by remember(cameraName) { mutableStateOf(cachedBitmap()) }
+    var bitmap by remember(cameraName, minimumCachedHeight) {
+        mutableStateOf(cachedBitmap()?.takeIf { it.height >= minimumCachedHeight })
+    }
     LaunchedEffect(cameraName) {
         if (initialRefreshDelayMillis > 0L) delay(initialRefreshDelayMillis)
         while (currentCoroutineContext().isActive) {
@@ -212,7 +354,7 @@ internal fun CameraSnapshot(
         }
     }
     Box(
-        modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+        modifier = modifier.background(containerColor ?: MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center,
     ) {
         bitmap?.let { current ->
@@ -220,7 +362,7 @@ internal fun CameraSnapshot(
             Image(
                 bitmap = imageBitmap,
                 contentDescription = null,
-                contentScale = ContentScale.Crop,
+                contentScale = contentScale,
                 modifier = Modifier.fillMaxSize(),
             )
         } ?: Text(
@@ -248,6 +390,9 @@ internal fun ProductionTvInput(
     previousInputKey: String? = null,
     nextInputKey: String? = null,
     nextFocusRequester: FocusRequester? = null,
+    externalNavigationFocusRequester: FocusRequester? = null,
+    upFocusRequester: FocusRequester? = null,
+    downFocusRequester: FocusRequester? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
@@ -255,7 +400,8 @@ internal fun ProductionTvInput(
     var pendingMove by remember { mutableStateOf<FocusDirection?>(null) }
     var returnToNavigation by remember { mutableStateOf(false) }
     var initialFocusHandled by remember(requestInitialFocus) { mutableStateOf(!requestInitialFocus) }
-    val navigationFocusRequester = remember { FocusRequester() }
+    val rememberedNavigationFocusRequester = remember { FocusRequester() }
+    val navigationFocusRequester = externalNavigationFocusRequester ?: rememberedNavigationFocusRequester
     val editorFocusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -334,6 +480,10 @@ internal fun ProductionTvInput(
                 .fillMaxWidth()
                 .heightIn(min = 56.dp)
                 .focusRequester(navigationFocusRequester)
+                .focusProperties {
+                    upFocusRequester?.let { up = it }
+                    downFocusRequester?.let { down = it }
+                }
                 .pointerInput(enabled, editing) {
                     if (enabled && !editing) {
                         detectTapGestures {

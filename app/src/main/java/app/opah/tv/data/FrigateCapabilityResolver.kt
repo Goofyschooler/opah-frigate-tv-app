@@ -27,6 +27,8 @@ class FrigateCapabilityResolver(
         birdseye: BirdseyeStatus,
         birdseyePermitted: Boolean,
         ptzCameras: Map<String, CameraPtzInfo>? = null,
+        userRole: String = "admin",
+        runtimeOverrides: Map<FrigateFeature, FrigateCapabilityAvailability> = emptyMap(),
     ): FrigateCapabilities {
         val apiEvidence = apiEvidence(version)
         if (apiEvidence == null) {
@@ -54,6 +56,20 @@ class FrigateCapabilityResolver(
             )
             capabilities[FrigateFeature.EXPORT_CASES] = unavailable
             capabilities[FrigateFeature.CUSTOM_EXPORTS] = unavailable
+            capabilities[FrigateFeature.PROFILE_MODES] = unavailable
+            capabilities[FrigateFeature.PROFILE_MODE_SWITCH] = unavailable
+            capabilities[FrigateFeature.MOTION_SEARCH] = unavailable
+            capabilities[FrigateFeature.ON_DEMAND_RECORDING] = unavailable
+            capabilities[FrigateFeature.MULTI_CAMERA_EXPORT] = unavailable
+            capabilities[FrigateFeature.INCIDENT_MUTATION] = unavailable
+        } else if (!userRole.equals("admin", ignoreCase = true)) {
+            val notPermitted = FrigateCapability(
+                FrigateCapabilityAvailability.NOT_PERMITTED,
+                FrigateCapabilityEvidence.AUTHENTICATED_ROLE,
+            )
+            capabilities[FrigateFeature.PROFILE_MODE_SWITCH] = notPermitted
+            capabilities[FrigateFeature.ON_DEMAND_RECORDING] = notPermitted
+            capabilities[FrigateFeature.INCIDENT_MUTATION] = notPermitted
         }
 
         val root = runCatching { json.parseToJsonElement(configJson) as? JsonObject }
@@ -65,7 +81,7 @@ class FrigateCapabilityResolver(
                     FrigateCapabilityEvidence.CONFIGURATION_UNREADABLE,
                 )
             }
-            return FrigateCapabilities(capabilities)
+            return FrigateCapabilities(capabilities.applyRuntimeOverrides(runtimeOverrides))
         }
 
         val ptzConfigured = root.authorizedCameraHasOnvif(allowedCameras)
@@ -77,7 +93,7 @@ class FrigateCapabilityResolver(
                 FrigateCapabilityEvidence.RUNTIME_PTZ_PROBE,
             )
             else -> FrigateCapability(
-                FrigateCapabilityAvailability.UNAVAILABLE,
+                FrigateCapabilityAvailability.TEMPORARILY_UNAVAILABLE,
                 FrigateCapabilityEvidence.RUNTIME_PTZ_UNAVAILABLE,
             )
         }
@@ -89,7 +105,7 @@ class FrigateCapabilityResolver(
         )
         capabilities[FrigateFeature.BIRDSEYE] = when {
             !birdseyePermitted -> FrigateCapability(
-                FrigateCapabilityAvailability.UNAVAILABLE,
+                FrigateCapabilityAvailability.NOT_PERMITTED,
                 FrigateCapabilityEvidence.CAMERA_ACCESS_RESTRICTED,
             )
             birdseye.playable -> FrigateCapability(
@@ -97,7 +113,7 @@ class FrigateCapabilityResolver(
                 FrigateCapabilityEvidence.RUNTIME_STREAM_PROBE,
             )
             birdseye.enabled && birdseye.restreamConfigured -> FrigateCapability(
-                FrigateCapabilityAvailability.UNAVAILABLE,
+                FrigateCapabilityAvailability.TEMPORARILY_UNAVAILABLE,
                 FrigateCapabilityEvidence.RUNTIME_STREAM_UNAVAILABLE,
             )
             else -> FrigateCapability(
@@ -106,7 +122,7 @@ class FrigateCapabilityResolver(
             )
         }
 
-        return FrigateCapabilities(capabilities)
+        return FrigateCapabilities(capabilities.applyRuntimeOverrides(runtimeOverrides))
     }
 
     private fun apiEvidence(version: ServerVersionInfo): FrigateCapabilityEvidence? {
@@ -134,6 +150,20 @@ class FrigateCapabilityResolver(
             FrigateCapabilityEvidence.CONFIGURATION_DISABLED
         },
     )
+
+    private fun MutableMap<FrigateFeature, FrigateCapability>.applyRuntimeOverrides(
+        overrides: Map<FrigateFeature, FrigateCapabilityAvailability>,
+    ): MutableMap<FrigateFeature, FrigateCapability> = apply {
+        overrides.forEach { (feature, availability) ->
+            val contract = get(feature) ?: return@forEach
+            if (contract.availability == FrigateCapabilityAvailability.NOT_SUPPORTED) return@forEach
+            this[feature] = FrigateCapability(
+                availability = availability,
+                evidence = FrigateCapabilityEvidence.RUNTIME_OPERATION,
+                evidenceSet = contract.evidenceSet + FrigateCapabilityEvidence.RUNTIME_OPERATION,
+            )
+        }
+    }
 
     private fun JsonObject.authorizedCameraHasOnvif(allowedCameras: Set<String>): Boolean =
         obj("cameras").orEmpty().any { (cameraName, value) ->

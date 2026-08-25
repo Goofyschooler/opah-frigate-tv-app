@@ -50,6 +50,8 @@ enum class ReviewRecordingState {
     UNKNOWN,
 }
 
+internal fun reviewItemFocusKey(itemId: String): String = "review:item:$itemId"
+
 data class ReviewBrowserState(
     val filters: ReviewFilters = ReviewFilters(),
     val items: List<ReviewItem> = emptyList(),
@@ -73,12 +75,81 @@ data class ReviewBrowserState(
     val savedClipItemIds: Set<String> = emptySet(),
     val savedClipItemId: String? = null,
     val savedClipMessage: String? = null,
+    val queueItemIds: List<String> = emptyList(),
+    val queueIndex: Int = 0,
+    val queueActive: Boolean = false,
+    val queueCompleted: Boolean = false,
+    val playbackItem: ReviewItem? = null,
+    val advancingPlayback: Boolean = false,
+    val playbackNavigationMessage: String? = null,
 )
+
+data class NextActivityControlState(
+    val label: String,
+    val enabled: Boolean,
+)
+
+data class ReviewPlaybackContext(
+    val itemIds: List<String>,
+    val queue: Boolean,
+)
+
+internal fun reviewPlaybackContext(
+    itemId: String,
+    review: ReviewBrowserState,
+    homeItems: List<ReviewItem>,
+    useHomeActivityContext: Boolean,
+): ReviewPlaybackContext {
+    val queue = !useHomeActivityContext && review.queueActive && itemId in review.queueItemIds
+    val itemIds = when {
+        useHomeActivityContext -> homeItems.map(ReviewItem::id)
+        queue -> review.queueItemIds
+        review.items.any { it.id == itemId } -> review.items.map(ReviewItem::id)
+        else -> homeItems.map(ReviewItem::id)
+    }.takeIf { itemId in it } ?: listOf(itemId)
+    return ReviewPlaybackContext(itemIds = itemIds, queue = queue)
+}
+
+internal fun nextReviewPlaybackItem(
+    currentItemId: String?,
+    contextItemIds: List<String>,
+    availableItems: List<ReviewItem>,
+): ReviewItem? {
+    val currentIndex = contextItemIds.indexOf(currentItemId)
+    if (currentIndex < 0) return null
+    val itemsById = availableItems.associateBy(ReviewItem::id)
+    return contextItemIds.asSequence()
+        .drop(currentIndex + 1)
+        .mapNotNull(itemsById::get)
+        .firstOrNull { it.recordingAvailable != false }
+}
+
+internal fun nextActivityControlState(
+    hasContext: Boolean,
+    hasNextActivity: Boolean,
+    queueContext: Boolean,
+    loading: Boolean,
+): NextActivityControlState? {
+    if (!hasContext) return null
+    return when {
+        loading -> NextActivityControlState("Opening next activity", enabled = false)
+        hasNextActivity -> NextActivityControlState("Next activity", enabled = true)
+        queueContext -> NextActivityControlState("Caught up", enabled = false)
+        else -> NextActivityControlState("No next activity", enabled = false)
+    }
+}
 
 internal fun ReviewBrowserState.canSaveClip(item: ReviewItem): Boolean =
     savingClipItemId == null &&
         item.recordingAvailable != false &&
         item.id !in savedClipItemIds
+
+internal fun ReviewBrowserState.unreviewedShownAlerts(): List<ReviewItem> =
+    if (filters.severity == ReviewSeverity.ALERT) {
+        items.filter { item -> item.severity == ReviewSeverity.ALERT && !item.hasBeenReviewed }
+    } else {
+        emptyList()
+    }
 
 internal fun ReviewBrowserState.afterClipSaved(itemId: String): ReviewBrowserState = copy(
     savingClipItemId = null,
@@ -87,11 +158,24 @@ internal fun ReviewBrowserState.afterClipSaved(itemId: String): ReviewBrowserSta
     savedClipMessage = "Recording saved in Frigate",
 )
 
+internal fun ReviewCounts.unreviewedFor(severity: ReviewSeverity?): Int = when (severity) {
+    ReviewSeverity.ALERT -> unreviewedAlerts
+    ReviewSeverity.DETECTION -> unreviewedDetections
+    ReviewSeverity.UNKNOWN -> 0
+    null -> unreviewedTotal
+}
+
 internal fun List<ReviewItem>.withReviewStatus(
     reviewId: String,
     reviewed: Boolean,
 ): List<ReviewItem> = map { item ->
     if (item.id == reviewId) item.copy(hasBeenReviewed = reviewed) else item
+}
+
+internal fun List<ReviewItem>.withReviewStatuses(
+    reviewedById: Map<String, Boolean>,
+): List<ReviewItem> = map { item ->
+    reviewedById[item.id]?.let { reviewed -> item.copy(hasBeenReviewed = reviewed) } ?: item
 }
 
 internal fun List<ReviewItem>.afterReviewStatusChanged(

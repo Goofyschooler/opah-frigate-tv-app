@@ -20,7 +20,9 @@ This link always downloads `opah-latest.apk` from the newest published release.
 
 You can also open the project's [GitHub Releases page](https://github.com/VibeCodingAntagonist/opah-frigate-tv-app/releases),
 choose the newest release, and download the versioned file named like
-`opah-v0.3.0.apk`. Both APK names in that release contain the same app.
+`opah-vX.Y.Z.apk`. The letters stand for the release version; for example,
+version 0.4.0 is named `opah-v0.4.0.apk`. Both APK names in that release contain
+the same app.
 
 Do not download Opah from an unofficial mirror or APK website.
 
@@ -94,18 +96,19 @@ with the APK to confirm the download was not damaged or changed.
 On Windows PowerShell:
 
 ```powershell
-Get-FileHash .\opah-v0.3.0.apk -Algorithm SHA256
-Get-Content .\opah-v0.3.0.apk.sha256
+Get-FileHash .\opah-vX.Y.Z.apk -Algorithm SHA256
+Get-Content .\opah-vX.Y.Z.apk.sha256
 ```
 
 On macOS or Linux:
 
 ```bash
-sha256sum opah-v0.3.0.apk
-cat opah-v0.3.0.apk.sha256
+sha256sum opah-vX.Y.Z.apk
+cat opah-vX.Y.Z.apk.sha256
 ```
 
-The long strings of letters and numbers should match exactly.
+Replace `X.Y.Z` with the release version. The long strings of letters and
+numbers should match exactly.
 
 ## Optional: install with ADB
 
@@ -113,8 +116,10 @@ ADB is an Android developer tool. You do not need it for a normal installation.
 If you already use ADB, connect to the intended TV and run:
 
 ```text
-adb install opah-v0.3.0.apk
+adb install opah-vX.Y.Z.apk
 ```
+
+Replace `X.Y.Z` with the release version you downloaded.
 
 Turn off wireless debugging when you finish.
 

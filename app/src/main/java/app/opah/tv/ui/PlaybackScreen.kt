@@ -189,6 +189,25 @@ internal fun playbackContextLabel(
     PlaybackKind.LIVE -> if (startupFallbackActive) "Live • Lower quality" else "Live"
 }
 
+internal fun playbackMuteControlLabel(muted: Boolean, videoOnly: Boolean): String = when {
+    videoOnly -> "Video only is on"
+    muted -> "Turn on audio"
+    else -> "Mute audio"
+}
+
+internal fun playbackAlternateAudioControlLabel(videoOnly: Boolean): String =
+    if (videoOnly) "Use video and audio" else "Video only"
+
+internal fun refreshedPlaybackAudioCaption(
+    currentLabel: String,
+    muted: Boolean,
+    videoOnly: Boolean,
+): String = when (currentLabel) {
+    "Mute audio", "Turn on audio", "Video only is on" -> playbackMuteControlLabel(muted, videoOnly)
+    "Video only", "Use video and audio" -> playbackAlternateAudioControlLabel(videoOnly)
+    else -> currentLabel
+}
+
 @UnstableApi
 private class PlayerSession(
     val player: ExoPlayer,
@@ -216,6 +235,14 @@ fun PlaybackScreen(
     nextCameraName: String? = null,
     onNext: (() -> Unit)? = null,
     onOpenEarlier: (() -> Unit)? = null,
+    onReturnToLive: (() -> Unit)? = null,
+    snapshotCapturing: Boolean = false,
+    onInstantSnapshot: (() -> Unit)? = null,
+    onDemandRecordingActive: Boolean = false,
+    onDemandRecordingBusy: Boolean = false,
+    onToggleOnDemandRecording: (() -> Unit)? = null,
+    liveActionMessage: String? = null,
+    onPlaybackCompleted: (() -> Unit)? = null,
     activityReviewed: Boolean? = null,
     markingActivityReviewed: Boolean = false,
     onMarkActivityReviewed: (() -> Unit)? = null,
@@ -225,6 +252,9 @@ fun PlaybackScreen(
     activityRecordingSaved: Boolean = false,
     activityRecordingMessage: String? = null,
     onSaveActivityRecording: (() -> Unit)? = null,
+    nextActivityLabel: String? = null,
+    nextActivityEnabled: Boolean = false,
+    onNextActivity: (() -> Unit)? = null,
 ) {
     if (BuildConfig.DOCUMENTATION_MODE && request.uri.startsWith(DOCUMENTATION_URI_PREFIX)) {
         DocumentationPlaybackScreen(
@@ -240,6 +270,14 @@ fun PlaybackScreen(
             nextCameraName = nextCameraName,
             onNext = onNext,
             onOpenEarlier = onOpenEarlier,
+            onReturnToLive = onReturnToLive,
+            snapshotCapturing = snapshotCapturing,
+            onInstantSnapshot = onInstantSnapshot,
+            onDemandRecordingActive = onDemandRecordingActive,
+            onDemandRecordingBusy = onDemandRecordingBusy,
+            onToggleOnDemandRecording = onToggleOnDemandRecording,
+            liveActionMessage = liveActionMessage,
+            onPlaybackCompleted = onPlaybackCompleted,
             activityReviewed = activityReviewed,
             markingActivityReviewed = markingActivityReviewed,
             onMarkActivityReviewed = onMarkActivityReviewed,
@@ -249,6 +287,9 @@ fun PlaybackScreen(
             activityRecordingSaved = activityRecordingSaved,
             activityRecordingMessage = activityRecordingMessage,
             onSaveActivityRecording = onSaveActivityRecording,
+            nextActivityLabel = nextActivityLabel,
+            nextActivityEnabled = nextActivityEnabled,
+            onNextActivity = onNextActivity,
         )
         return
     }
@@ -281,6 +322,7 @@ fun PlaybackScreen(
     var resumeWhenStarted by rememberSaveable(request.uri) { mutableStateOf(true) }
     var session by remember(request.uri) { mutableStateOf<PlayerSession?>(null) }
     var playerView by remember(request.uri) { mutableStateOf<PlayerView?>(null) }
+    var completionReported by remember(request.uri) { mutableStateOf(false) }
     val lastVideoFrameAtMs = remember(session) { AtomicLong(0L) }
 
     DisposableEffect(
@@ -334,6 +376,19 @@ fun PlaybackScreen(
 
     var telemetry by remember(session) {
         mutableStateOf(PlaybackTelemetry(playWhenReady = session?.player?.playWhenReady ?: resumeWhenStarted))
+    }
+
+    LaunchedEffect(telemetry.ended, telemetry.playWhenReady, onReturnToLive) {
+        if (telemetry.ended && telemetry.playWhenReady && onReturnToLive != null) {
+            delay(500)
+            onReturnToLive()
+        }
+    }
+    LaunchedEffect(telemetry.ended, onPlaybackCompleted) {
+        if (telemetry.ended && !completionReported && onPlaybackCompleted != null) {
+            completionReported = true
+            onPlaybackCompleted()
+        }
     }
 
     LaunchedEffect(session, activeUri, startupFallbackActive, request.kind) {
@@ -461,7 +516,7 @@ fun PlaybackScreen(
         if (telemetry.safeError != null) {
             pipRequested = false
             controlsVisible = true
-            pipError = "Picture in Picture could not start because the video did not load."
+            pipError = "Picture in Picture could not start because the video did not load"
             return@LaunchedEffect
         }
         val activeSession = session ?: return@LaunchedEffect
@@ -763,6 +818,20 @@ fun PlaybackScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+                nextActivityLabel?.takeIf { !nextActivityEnabled }?.let {
+                    Text(
+                        text = it,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                liveActionMessage?.let {
+                    Text(
+                        text = it,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         }
 
@@ -816,6 +885,12 @@ fun PlaybackScreen(
                         nextCameraName = nextCameraName,
                         onNext = onNext,
                         onOpenEarlier = onOpenEarlier,
+                        onReturnToLive = onReturnToLive,
+                        snapshotCapturing = snapshotCapturing,
+                        onInstantSnapshot = onInstantSnapshot,
+                        onDemandRecordingActive = onDemandRecordingActive,
+                        onDemandRecordingBusy = onDemandRecordingBusy,
+                        onToggleOnDemandRecording = onToggleOnDemandRecording,
                         activityReviewed = activityReviewed,
                         markingActivityReviewed = markingActivityReviewed,
                         onMarkActivityReviewed = onMarkActivityReviewed,
@@ -824,6 +899,9 @@ fun PlaybackScreen(
                         savingActivityRecording = savingActivityRecording,
                         activityRecordingSaved = activityRecordingSaved,
                         onSaveActivityRecording = onSaveActivityRecording,
+                        nextActivityLabel = nextActivityLabel,
+                        nextActivityEnabled = nextActivityEnabled,
+                        onNextActivity = onNextActivity,
                         muted = muted,
                         audioHelpActive = videoOnly,
                         diagnosticsAvailable = diagnosticsAvailable,
@@ -852,7 +930,7 @@ fun PlaybackScreen(
                     )
                 }
             } ?: Text(
-                text = "Playback resources released while Opah is in the background.",
+                text = "Playback resources released while Opah is in the background",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.align(Alignment.Center),
             )
@@ -875,6 +953,14 @@ private fun DocumentationPlaybackScreen(
     nextCameraName: String?,
     onNext: (() -> Unit)?,
     onOpenEarlier: (() -> Unit)?,
+    onReturnToLive: (() -> Unit)?,
+    snapshotCapturing: Boolean,
+    onInstantSnapshot: (() -> Unit)?,
+    onDemandRecordingActive: Boolean,
+    onDemandRecordingBusy: Boolean,
+    onToggleOnDemandRecording: (() -> Unit)?,
+    liveActionMessage: String?,
+    onPlaybackCompleted: (() -> Unit)?,
     activityReviewed: Boolean?,
     markingActivityReviewed: Boolean,
     onMarkActivityReviewed: (() -> Unit)?,
@@ -884,6 +970,9 @@ private fun DocumentationPlaybackScreen(
     activityRecordingSaved: Boolean,
     activityRecordingMessage: String?,
     onSaveActivityRecording: (() -> Unit)?,
+    nextActivityLabel: String?,
+    nextActivityEnabled: Boolean,
+    onNextActivity: (() -> Unit)?,
 ) {
     val context = LocalContext.current
     val resourceName = when (request.uri.removePrefix(DOCUMENTATION_URI_PREFIX).substringBefore('?')) {
@@ -926,6 +1015,13 @@ private fun DocumentationPlaybackScreen(
         durationMs = if (recorded) 78_000L else 0L,
         seekable = recorded,
     )
+
+    LaunchedEffect(recorded, documentationPositionMs, documentationPlaying, onReturnToLive) {
+        if (recorded && documentationPlaying && documentationPositionMs >= telemetry.durationMs && onReturnToLive != null) {
+            delay(500)
+            onReturnToLive()
+        }
+    }
 
     LaunchedEffect(controlsVisible, diagnosticsVisible) {
         withFrameNanos { }
@@ -1023,6 +1119,12 @@ private fun DocumentationPlaybackScreen(
                 activityRecordingMessage?.let {
                     Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 }
+                nextActivityLabel?.takeIf { !nextActivityEnabled }?.let {
+                    Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                }
+                liveActionMessage?.let {
+                    Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
 
@@ -1063,7 +1165,7 @@ private fun DocumentationPlaybackScreen(
                     pipRequested = false
                     if (!entered) {
                         controlsVisible = true
-                        pipError = "Picture-in-picture was unavailable."
+                        pipError = "Picture-in-picture was unavailable"
                     }
                 Unit
             }
@@ -1078,6 +1180,12 @@ private fun DocumentationPlaybackScreen(
                     nextCameraName = nextCameraName,
                     onNext = onNext,
                     onOpenEarlier = onOpenEarlier,
+                    onReturnToLive = onReturnToLive,
+                    snapshotCapturing = snapshotCapturing,
+                    onInstantSnapshot = onInstantSnapshot,
+                    onDemandRecordingActive = onDemandRecordingActive,
+                    onDemandRecordingBusy = onDemandRecordingBusy,
+                    onToggleOnDemandRecording = onToggleOnDemandRecording,
                     activityReviewed = activityReviewed,
                     markingActivityReviewed = markingActivityReviewed,
                     onMarkActivityReviewed = onMarkActivityReviewed,
@@ -1086,6 +1194,9 @@ private fun DocumentationPlaybackScreen(
                     savingActivityRecording = savingActivityRecording,
                     activityRecordingSaved = activityRecordingSaved,
                     onSaveActivityRecording = onSaveActivityRecording,
+                    nextActivityLabel = nextActivityLabel,
+                    nextActivityEnabled = nextActivityEnabled,
+                    onNextActivity = onNextActivity,
                     muted = muted,
                     audioHelpActive = videoOnly,
                     pictureInPictureVisible = pictureInPictureVisible,
@@ -1264,6 +1375,12 @@ private fun PlaybackControls(
     nextCameraName: String?,
     onNext: (() -> Unit)?,
     onOpenEarlier: (() -> Unit)?,
+    onReturnToLive: (() -> Unit)?,
+    snapshotCapturing: Boolean,
+    onInstantSnapshot: (() -> Unit)?,
+    onDemandRecordingActive: Boolean,
+    onDemandRecordingBusy: Boolean,
+    onToggleOnDemandRecording: (() -> Unit)?,
     activityReviewed: Boolean?,
     markingActivityReviewed: Boolean,
     onMarkActivityReviewed: (() -> Unit)?,
@@ -1272,6 +1389,9 @@ private fun PlaybackControls(
     savingActivityRecording: Boolean,
     activityRecordingSaved: Boolean,
     onSaveActivityRecording: (() -> Unit)?,
+    nextActivityLabel: String?,
+    nextActivityEnabled: Boolean,
+    onNextActivity: (() -> Unit)?,
     muted: Boolean,
     audioHelpActive: Boolean,
     diagnosticsAvailable: Boolean,
@@ -1300,11 +1420,18 @@ private fun PlaybackControls(
         onSeekPositionChanged?.invoke(positionMs)
         Unit
     }
-    var focusedControlLabel by remember(request.uri) {
+    var focusedControlLabel by remember {
         mutableStateOf(if (telemetry.playWhenReady) "Pause video" else "Play video")
     }
     LaunchedEffect(activityRecordingSaved) {
         if (activityRecordingSaved) focusedControlLabel = "Recording saved"
+    }
+    LaunchedEffect(muted, audioHelpActive) {
+        focusedControlLabel = refreshedPlaybackAudioCaption(
+            currentLabel = focusedControlLabel,
+            muted = muted,
+            videoOnly = audioHelpActive,
+        )
     }
     val togglePlayback = {
         if (isRecorded && telemetry.ended) {
@@ -1401,6 +1528,15 @@ private fun PlaybackControls(
                             )
                         },
                     )
+                    if (nextActivityLabel != null && onNextActivity != null) {
+                        CompactPlaybackAction(
+                            iconRes = R.drawable.ic_chevron_right,
+                            label = nextActivityLabel,
+                            enabled = nextActivityEnabled,
+                            onFocused = { focusedControlLabel = it },
+                            onClick = onNextActivity,
+                        )
+                    }
                 } else {
                     CameraNeighborButton(
                         cameraName = nextCameraName,
@@ -1420,8 +1556,39 @@ private fun PlaybackControls(
                 if (availability.earlier && onOpenEarlier != null) {
                     CompactPlaybackAction(
                         iconRes = R.drawable.ic_replay,
-                        label = "Earlier video",
+                        label = "Go back 30 seconds",
                         onClick = onOpenEarlier,
+                        onFocused = { focusedControlLabel = it },
+                    )
+                }
+                if (isRecorded && onReturnToLive != null) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_videocam,
+                        label = "Return to live",
+                        onClick = onReturnToLive,
+                        onFocused = { focusedControlLabel = it },
+                    )
+                }
+                if (!isRecorded && onInstantSnapshot != null) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_videocam,
+                        label = if (snapshotCapturing) "Capturing snapshot" else "Take snapshot",
+                        enabled = !snapshotCapturing,
+                        onClick = onInstantSnapshot,
+                        onFocused = { focusedControlLabel = it },
+                    )
+                }
+                if (!isRecorded && onToggleOnDemandRecording != null) {
+                    CompactPlaybackAction(
+                        iconRes = R.drawable.ic_save_recording,
+                        label = when {
+                            onDemandRecordingBusy -> "Updating recording"
+                            onDemandRecordingActive -> "Stop recording"
+                            else -> "Start recording"
+                        },
+                        enabled = !onDemandRecordingBusy,
+                        selected = onDemandRecordingActive,
+                        onClick = onToggleOnDemandRecording,
                         onFocused = { focusedControlLabel = it },
                     )
                 }
@@ -1468,11 +1635,7 @@ private fun PlaybackControls(
                     } else {
                         R.drawable.ic_volume_on
                     },
-                    label = when {
-                        audioHelpActive -> "Audio help is on"
-                        muted -> "Turn on audio"
-                        else -> "Mute audio"
-                    },
+                    label = playbackMuteControlLabel(muted, audioHelpActive),
                     enabled = !audioHelpActive,
                     onClick = onToggleMute,
                     selected = muted,
@@ -1480,7 +1643,7 @@ private fun PlaybackControls(
                 )
                 CompactPlaybackAction(
                     iconRes = R.drawable.ic_audio_help,
-                    label = if (audioHelpActive) "Use normal audio" else "Audio help",
+                    label = playbackAlternateAudioControlLabel(audioHelpActive),
                     onClick = onToggleAudioHelp,
                     selected = audioHelpActive,
                     onFocused = { focusedControlLabel = it },
@@ -1912,7 +2075,7 @@ internal fun safePlaybackGuidance(errorCode: Int): String = when (errorCode) {
         PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED,
         PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_INIT_FAILED,
         PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_WRITE_FAILED,
-        -> "Audio could not start. Try Audio help from More."
+        -> "Audio could not start. Try Video only from More."
 
         else -> "Video couldn't play. Try again or choose another camera."
 }

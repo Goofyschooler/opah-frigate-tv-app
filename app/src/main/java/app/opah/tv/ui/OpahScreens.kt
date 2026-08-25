@@ -8,10 +8,13 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -25,11 +28,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
@@ -37,12 +42,14 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -50,14 +57,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -89,8 +100,8 @@ import app.opah.tv.data.model.CameraGroup
 import app.opah.tv.data.model.CameraPtzInfo
 import app.opah.tv.data.model.CameraStorageUsage
 import app.opah.tv.data.model.CustomThemeColors
-import app.opah.tv.data.model.FrigateCapabilityEvidence
 import app.opah.tv.data.model.FrigateFeature
+import app.opah.tv.data.model.FrigateMode
 import app.opah.tv.data.model.FrigatePerformanceSummary
 import app.opah.tv.data.network.PtzCommand
 import app.opah.tv.data.network.PtzConnectionStatus
@@ -102,15 +113,22 @@ import app.opah.tv.data.model.SavedCameraView
 import app.opah.tv.data.model.StreamPreference
 import app.opah.tv.data.model.ThemeColorPolicy
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
 
-private enum class InformationTab(val label: String) {
+internal enum class InformationTab(val label: String) {
     PERFORMANCE("Performance"),
     STORAGE("Storage"),
 }
+
+internal fun informationTabInitialFocusRequester(
+    candidate: InformationTab,
+    selected: InformationTab,
+    requester: FocusRequester?,
+): FocusRequester? = requester?.takeIf { candidate == selected }
 private const val SETUP_ADDRESS_INPUT = "setup:address"
 private const val SETUP_USERNAME_INPUT = "setup:username"
 private const val SETUP_PASSWORD_INPUT = "setup:password"
@@ -124,8 +142,8 @@ private val CAMERA_GROUP_CARD_WIDTH = 230.dp
 
 internal const val OPAH_REPOSITORY_URL = "https://github.com/VibeCodingAntagonist/opah-frigate-tv-app"
 internal const val OPAH_INDEPENDENCE_NOTICE =
-    "Opah is an independent community project. It is not made, approved, or supported by " +
-        "the Frigate team."
+    "Opah is an independent community project and is not affiliated with, sponsored by, " +
+        "endorsed by, or supported by Frigate, Inc."
 internal const val OPAH_TRADEMARK_NOTICE =
     "Frigate and Frigate NVR are trademarks of Frigate, Inc. Opah uses those names only to " +
         "explain what the app works with."
@@ -505,14 +523,75 @@ internal fun ConnectionSetupScreen(
 }
 
 @Composable
+private fun HomeHeroPreview(
+    cameras: List<Camera>,
+    previewState: HomePreviewState,
+    previewUpdate: HomePreviewUpdate,
+    restoreFocusKey: String?,
+    onFocusRestored: () -> Unit,
+    initialCameraFocusRequester: FocusRequester,
+    onMoveDown: () -> Unit,
+    onFocusKeyChanged: (String) -> Unit,
+    onPlayCamera: (Camera, String) -> Unit,
+    onOpenActions: (String) -> Unit,
+    cachedBitmap: (String) -> Bitmap?,
+    refreshBitmap: suspend (String, Int) -> Bitmap?,
+    modifier: Modifier = Modifier,
+) {
+    val previewCameraName by previewState.cameraName
+    val previewCamera = cameras.firstOrNull { it.name == previewCameraName } ?: cameras.first()
+    val focusKey = "home:hero"
+    MediaTile(
+        focusKey = focusKey,
+        restoreFocusKey = restoreFocusKey,
+        onFocusRestored = onFocusRestored,
+        onClick = { onPlayCamera(previewCamera, focusKey) },
+        onLongClick = { onOpenActions(previewCamera.name) },
+        accessibilityLabel = "Watch ${previewCamera.displayName}",
+        externalFocusRequester = initialCameraFocusRequester,
+        onFocused = {
+            previewUpdate.job?.cancel()
+            previewUpdate.pendingCameraName?.let { pending ->
+                if (cameras.any { camera -> camera.name == pending }) previewState.cameraName.value = pending
+            }
+            onFocusKeyChanged(it)
+        },
+        modifier = modifier.redirectDirectionalFocus(Key.DirectionDown, onMoveDown),
+    ) {
+        CameraSnapshot(
+            cameraName = previewCamera.name,
+            cachedBitmap = { cachedBitmap(previewCamera.name) },
+            refreshBitmap = { refreshBitmap(previewCamera.name, HOME_HERO_IMAGE_HEIGHT) },
+            minimumCachedHeight = HOME_HERO_MINIMUM_CACHED_HEIGHT,
+            contentScale = ContentScale.Fit,
+            containerColor = Color.Black,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
 internal fun HomeScreen(
     state: Phase0UiState,
     restoreFocusKey: String?,
     onFocusRestored: () -> Unit,
     onFocusKeyChanged: (String) -> Unit,
     initialCameraFocusRequester: FocusRequester,
-    onOpenCameras: () -> Unit,
     onOpenReview: () -> Unit,
+    onOpenBirdseye: (String) -> Unit,
+    onOpenCameraGroup: (String, List<String>, String) -> Unit,
+    onToggleFavoriteCamera: (String) -> Unit,
+    onMoveFavoriteCamera: (String, Int) -> Unit,
+    onHideCamera: (String) -> Unit,
+    onOpenCameraControls: (Camera) -> Unit,
+    onToggleFavoriteView: (String) -> Unit,
+    onMoveFavoriteView: (String, Int) -> Unit,
+    onRestoreHomeDefaults: () -> Unit,
+    onLoadModes: () -> Unit,
+    onSwitchMode: (String?) -> Unit,
+    onUndoMode: () -> Unit,
+    onClearModeMessage: () -> Unit,
     onPlayCamera: (Camera, String) -> Unit,
     onPlayReview: (ReviewItem, String) -> Unit,
     cachedBitmap: (String) -> Bitmap?,
@@ -521,71 +600,313 @@ internal fun HomeScreen(
     refreshReviewBitmap: suspend (ReviewItem, Int) -> Bitmap?,
 ) {
     val snapshot = state.snapshot ?: return
-    val cameras = snapshot.cameras.take(HOME_ROW_ITEM_LIMIT)
+    val cameras = orderedHomeCameras(
+        cameras = snapshot.cameras,
+        favoriteCameraNames = state.settings.favoriteCameraNames,
+        hiddenCameraNames = state.settings.hiddenHomeCameraNames,
+    )
     val alerts = snapshot.recentReviewItems
         .filter { it.severity == ReviewSeverity.ALERT }
         .take(HOME_ROW_ITEM_LIMIT)
     val detections = snapshot.recentReviewItems
         .filter { it.severity == ReviewSeverity.DETECTION }
         .take(HOME_ROW_ITEM_LIMIT)
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Column {
-                    Text("Home", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                    Text(
-                        text = "Live cameras and recent activity",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    val previewState = rememberSaveable(cameras, saver = HomePreviewState.Saver) {
+        HomePreviewState(cameras.firstOrNull()?.name)
+    }
+    val previewUpdateScope = rememberCoroutineScope()
+    val previewUpdate = remember(cameras) { HomePreviewUpdate(previewState.cameraName.value) }
+    val firstCameraFocusRequester = remember(cameras.firstOrNull()?.name) { FocusRequester() }
+    val savedViews = state.settings.savedCameraViews.filter { view ->
+        view.cameraNames.all { cameraName -> snapshot.cameras.any { it.name == cameraName } }
+    }
+    val frigateViews = snapshot.cameraGroups.filter { group ->
+        group.cameraNames.size in MIN_CAMERA_GROUP_SIZE..MAX_CAMERA_GROUP_SIZE &&
+            group.cameraNames.all { cameraName -> snapshot.cameras.any { it.name == cameraName } }
+    }
+    val views = buildList {
+        savedViews.forEach { view ->
+            add(
+                HomeViewChoice(
+                    key = "saved:${view.id}",
+                    title = view.name,
+                    detail = "${view.cameraNames.size} cameras",
+                    cameraNames = view.cameraNames,
+                ),
+            )
+        }
+        frigateViews.forEach { group ->
+            add(
+                HomeViewChoice(
+                    key = "group:${group.name}",
+                    title = group.displayName,
+                    detail = "Frigate group • ${group.cameraNames.size} cameras",
+                    cameraNames = group.cameraNames,
+                ),
+            )
+        }
+        if (snapshot.birdseye.enabled) {
+            add(HomeViewChoice("birdseye", "All Cameras", "Birdseye", emptyList(), birdseye = true))
+        }
+    }.let { choices -> orderedHomeViews(choices, state.settings.favoriteViewIds) }
+    val hasViews = views.isNotEmpty()
+    val firstViewFocusRequester = remember(views.firstOrNull()?.key) { FocusRequester() }
+    var cameraActionsName by rememberSaveable { mutableStateOf<String?>(null) }
+    var viewActionsKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var modeChooserVisible by rememberSaveable { mutableStateOf(false) }
+    var pendingMode by remember { mutableStateOf<PendingMode?>(null) }
+    val modesAvailable = snapshot.capabilities.supports(FrigateFeature.PROFILE_MODES)
+    val modeSwitchAvailable = snapshot.capabilities.supports(FrigateFeature.PROFILE_MODE_SWITCH)
+    val viewportHeightDp = with(LocalDensity.current) {
+        LocalWindowInfo.current.containerSize.height.toDp().value.toInt()
+    }
+    val homeHeroMaxHeight = homeHeroMaxHeightDp(viewportHeightDp).dp
+    val homeListState = rememberLazyListState()
+    val focusNavigationScope = rememberCoroutineScope()
+    val leadingMessageItemCount = listOf(
+        state.modes.errorMessage,
+        state.modes.statusMessage,
+        state.health.messages.takeIf(List<String>::isNotEmpty),
+    ).count { it != null }
+    val heroItemIndex = leadingMessageItemCount
+    val cameraRowItemIndex = leadingMessageItemCount + 1
+    val viewsRowItemIndex = leadingMessageItemCount + 3
+    val focusFirstView = {
+        if (hasViews) {
+            focusNavigationScope.launch {
+                scrollThenFocus(homeListState, viewsRowItemIndex, firstViewFocusRequester)
+            }
+        }
+    }
+    val focusFirstCamera = {
+        if (cameras.isNotEmpty()) {
+            focusNavigationScope.launch {
+                scrollThenFocus(homeListState, cameraRowItemIndex, firstCameraFocusRequester)
+            }
+        }
+    }
+    val focusHero = {
+        if (cameras.isNotEmpty()) {
+            focusNavigationScope.launch {
+                scrollThenFocus(homeListState, heroItemIndex, initialCameraFocusRequester)
+            }
+        }
+    }
+    LaunchedEffect(modesAvailable, state.modes.loadedOnce) {
+        if (modesAvailable && !state.modes.loadedOnce) onLoadModes()
+    }
+    LaunchedEffect(state.modes.statusMessage) {
+        if (state.modes.statusMessage != null) {
+            delay(5_000)
+            onClearModeMessage()
+        }
+    }
+    LaunchedEffect(restoreFocusKey, hasViews, viewsRowItemIndex) {
+        if (hasViews && restoreFocusKey?.startsWith("home:view:") == true) {
+            homeListState.scrollToItem(viewsRowItemIndex)
+        }
+    }
+
+    CompositionLocalProvider(LocalBringIntoViewSpec provides KeepVisibleBringIntoViewSpec) {
+        LazyColumn(
+            state = homeListState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                horizontal = OpahDesignTokens.ScreenHorizontalMargin,
+                vertical = OpahDesignTokens.ScreenVerticalMargin,
+            ),
+            verticalArrangement = Arrangement.spacedBy(OpahDesignTokens.SpaceMd),
+        ) {
+        state.modes.errorMessage?.let { message ->
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ScreenMessage(message, isError = true, modifier = Modifier.weight(1f))
+                    SecondaryAction(
+                        focusKey = "home:mode-dismiss",
+                        label = "Dismiss",
+                        onClick = onClearModeMessage,
                     )
                 }
-                Text("Connected", color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
             }
         }
-        item {
-            SectionHeader("Cameras", "Current images — select a camera to watch") {
-                FocusCard(
-                    focusKey = "home:open-cameras",
-                    restoreFocusKey = restoreFocusKey,
-                    onFocusRestored = onFocusRestored,
-                    onClick = onOpenCameras,
-                    onFocused = onFocusKeyChanged,
-                    accessibilityLabel = "View all cameras",
-                ) {
-                    Text("View all", modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
+        state.modes.statusMessage?.let { message ->
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ScreenMessage(message, isError = false, modifier = Modifier.weight(1f))
+                    if (state.modes.undoAvailable) {
+                        SecondaryAction(
+                            focusKey = "home:mode-undo",
+                            label = "Undo",
+                            onClick = onUndoMode,
+                            enabled = !state.modes.switching,
+                        )
+                    }
                 }
             }
         }
-        item {
+        if (state.health.messages.isNotEmpty()) {
+            item(key = "home-health-exceptions") {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    state.health.messages.forEach { message ->
+                        ScreenMessage(message, isError = true)
+                    }
+                }
+            }
+        }
+        if (cameras.isNotEmpty()) {
+            item(key = "home-preview") {
+                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    HomeHeroPreview(
+                        cameras = cameras,
+                        previewState = previewState,
+                        previewUpdate = previewUpdate,
+                        restoreFocusKey = restoreFocusKey,
+                        onFocusRestored = onFocusRestored,
+                        initialCameraFocusRequester = initialCameraFocusRequester,
+                        onMoveDown = focusFirstCamera,
+                        onFocusKeyChanged = onFocusKeyChanged,
+                        onPlayCamera = onPlayCamera,
+                        onOpenActions = { cameraActionsName = it },
+                        cachedBitmap = cachedBitmap,
+                        refreshBitmap = refreshBitmap,
+                        modifier = Modifier
+                            .widthIn(max = HOME_HERO_MAX_WIDTH)
+                            .heightIn(max = homeHeroMaxHeight)
+                            .aspectRatio(16f / 9f),
+                    )
+                    if (
+                        modesAvailable &&
+                        modeSwitchAvailable &&
+                        state.modes.loadedOnce &&
+                        state.modes.errorMessage == null
+                    ) {
+                        HomeModeAction(
+                            activeMode = modeDisplayName(state.modes.activeMode, state.modes.modes),
+                            enabled = !state.modes.switching,
+                            onClick = { modeChooserVisible = true },
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .focusProperties { down = initialCameraFocusRequester },
+                        )
+                    }
+                }
+            }
+        }
+        if (cameras.isEmpty()) {
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 80.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Text("No cameras are shown on Home", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    PrimaryAction(
+                        focusKey = "home:restore-cameras",
+                        label = "Restore cameras",
+                        onClick = onRestoreHomeDefaults,
+                    )
+                }
+            }
+        }
+        item(key = "home-camera-row") {
             BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                val cardWidth = (maxWidth - 36.dp) / 3
+                val cardWidth = (maxWidth - 48.dp) / 4
                 LazyRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(18.dp),
+                    contentPadding = PaddingValues(
+                        start = 3.dp,
+                        top = 5.dp,
+                        end = 3.dp,
+                        bottom = 16.dp,
+                    ),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     itemsIndexed(cameras, key = { _, camera -> camera.name }) { index, camera ->
                         val focusKey = "home:camera:${camera.name}"
-                        CameraCard(
-                            camera = camera,
+                        MediaTile(
                             focusKey = focusKey,
                             restoreFocusKey = restoreFocusKey,
                             onFocusRestored = onFocusRestored,
                             onClick = { onPlayCamera(camera, focusKey) },
+                            onLongClick = { cameraActionsName = camera.name },
+                            selected = previewState.cameraName.value == camera.name,
+                            accessibilityLabel = "Watch ${camera.displayName}",
+                            externalFocusRequester = firstCameraFocusRequester.takeIf { index == 0 },
+                            onFocused = {
+                                previewUpdate.pendingCameraName = camera.name
+                                previewUpdate.job?.cancel()
+                                if (previewState.cameraName.value != camera.name) {
+                                    previewUpdate.job = previewUpdateScope.launch {
+                                        delay(HOME_PREVIEW_SETTLE_MILLIS)
+                                        previewState.cameraName.value = camera.name
+                                    }
+                                }
+                                onFocusKeyChanged(it)
+                            },
+                            modifier = Modifier
+                                .width(cardWidth)
+                                .redirectDirectionalFocus(Key.DirectionUp, focusHero)
+                                .redirectDirectionalFocus(Key.DirectionDown, focusFirstView),
+                        ) {
+                            Column {
+                                CameraSnapshot(
+                                    cameraName = camera.name,
+                                    cachedBitmap = { cachedBitmap(camera.name) },
+                                    refreshBitmap = { refreshBitmap(camera.name, 240) },
+                                    refreshMillis = 30_000L,
+                                    initialRefreshDelayMillis = index * CAMERA_REFRESH_STAGGER_MS,
+                                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+                                )
+                                Text(
+                                    camera.displayName,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (hasViews) {
+            item(key = "home-views-title") {
+                Text("Views", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            }
+            item(key = "home-views-row") {
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(
+                        start = 3.dp,
+                        top = 5.dp,
+                        end = 3.dp,
+                        bottom = 16.dp,
+                    ),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    itemsIndexed(views, key = { _, view -> view.key }) { index, view ->
+                        val key = "home:view:${view.key}"
+                        HomeViewTile(
+                            title = view.title,
+                            detail = view.detail,
+                            focusKey = key,
+                            cameraName = view.cameraNames.firstOrNull() ?: cameras.firstOrNull()?.name,
+                            onClick = {
+                                if (view.birdseye) {
+                                    onOpenBirdseye(key)
+                                } else {
+                                    onOpenCameraGroup(view.title, view.cameraNames, key)
+                                }
+                            },
+                            onLongClick = { viewActionsKey = view.key },
+                            onFocused = onFocusKeyChanged,
+                            restoreFocusKey = restoreFocusKey,
+                            onFocusRestored = onFocusRestored,
+                            externalFocusRequester = firstViewFocusRequester.takeIf { index == 0 },
+                            onMoveUp = focusFirstCamera,
                             cachedBitmap = cachedBitmap,
                             refreshBitmap = refreshBitmap,
-                            initialRefreshDelayMillis = index * CAMERA_REFRESH_STAGGER_MS,
-                            externalFocusRequester = initialCameraFocusRequester.takeIf {
-                                camera == cameras.firstOrNull()
-                            },
-                            onFocused = onFocusKeyChanged,
-                            modifier = Modifier.width(cardWidth),
                         )
                     }
                 }
@@ -593,17 +914,17 @@ internal fun HomeScreen(
         }
         if (alerts.isNotEmpty()) {
             item {
-                SectionHeader("Recent alerts", "Important activity saved by your system") {
-                    FocusCard(
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Needs attention", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    SecondaryAction(
                         focusKey = "home:open-alerts",
-                        restoreFocusKey = restoreFocusKey,
-                        onFocusRestored = onFocusRestored,
+                        label = "${alerts.size} new",
                         onClick = onOpenReview,
-                        onFocused = onFocusKeyChanged,
-                        accessibilityLabel = "Open activity",
-                    ) {
-                        Text("Open Activity", modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
-                    }
+                    )
                 }
             }
             item {
@@ -621,18 +942,7 @@ internal fun HomeScreen(
         }
         if (detections.isNotEmpty()) {
             item {
-                SectionHeader("Recent activity", "Other activity saved by your system") {
-                    FocusCard(
-                        focusKey = "home:open-activity",
-                        restoreFocusKey = restoreFocusKey,
-                        onFocusRestored = onFocusRestored,
-                        onClick = onOpenReview,
-                        onFocused = onFocusKeyChanged,
-                        accessibilityLabel = "Open activity",
-                    ) {
-                        Text("Open Activity", modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
-                    }
-                }
+                Text("Recent activity", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             }
             item {
                 ReviewRow(
@@ -649,6 +959,369 @@ internal fun HomeScreen(
         }
         if (shouldShowHomeRecentActivityEmptyState(state.recentActivityLoaded, alerts.size + detections.size)) {
             item { ScreenMessage("No recent activity yet", isError = false) }
+        }
+        }
+    }
+
+    cameraActionsName?.let { cameraName ->
+        val camera = snapshot.cameras.firstOrNull { it.name == cameraName }
+        if (camera == null) {
+            cameraActionsName = null
+        } else {
+            val favoriteIndex = state.settings.favoriteCameraNames.indexOf(camera.name)
+            HomeCameraActionsDialog(
+                camera = camera,
+                favorite = favoriteIndex >= 0,
+                canMoveEarlier = favoriteIndex > 0,
+                canMoveLater = favoriteIndex >= 0 && favoriteIndex < state.settings.favoriteCameraNames.lastIndex,
+                hasControls = snapshot.ptzCameras[camera.name]?.hasControls == true,
+                onToggleFavorite = {
+                    onToggleFavoriteCamera(camera.name)
+                    cameraActionsName = null
+                },
+                onMove = { direction ->
+                    onMoveFavoriteCamera(camera.name, direction)
+                    cameraActionsName = null
+                },
+                onHide = {
+                    onHideCamera(camera.name)
+                    cameraActionsName = null
+                },
+                onControls = {
+                    cameraActionsName = null
+                    onOpenCameraControls(camera)
+                },
+                onDismiss = { cameraActionsName = null },
+            )
+        }
+    }
+    viewActionsKey?.let { viewKey ->
+        val favoriteIndex = state.settings.favoriteViewIds.indexOf(viewKey)
+        HomeViewActionsDialog(
+            title = views.firstOrNull { it.key == viewKey }?.title ?: "View",
+            favorite = favoriteIndex >= 0,
+            canMoveEarlier = favoriteIndex > 0,
+            canMoveLater = favoriteIndex >= 0 && favoriteIndex < state.settings.favoriteViewIds.lastIndex,
+            onToggleFavorite = {
+                onToggleFavoriteView(viewKey)
+                viewActionsKey = null
+            },
+            onMove = { direction ->
+                onMoveFavoriteView(viewKey, direction)
+                viewActionsKey = null
+            },
+            onDismiss = { viewActionsKey = null },
+        )
+    }
+    if (modeChooserVisible) {
+        ModeChooserDialog(
+            modes = state.modes.modes,
+            activeMode = state.modes.activeMode,
+            onChoose = { name, displayName ->
+                modeChooserVisible = false
+                if (name != state.modes.activeMode) pendingMode = PendingMode(name, displayName)
+            },
+            onDismiss = { modeChooserVisible = false },
+        )
+    }
+    pendingMode?.let { mode ->
+        ConfirmModeDialog(
+            mode = mode,
+            switching = state.modes.switching,
+            onConfirm = {
+                pendingMode = null
+                onSwitchMode(mode.name)
+            },
+            onDismiss = { pendingMode = null },
+        )
+    }
+}
+
+private data class PendingMode(val name: String?, val displayName: String)
+
+@Composable
+private fun ModeChooserDialog(
+    modes: List<FrigateMode>,
+    activeMode: String?,
+    onChoose: (String?, String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        DialogSurface(modifier = Modifier.width(520.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Choose a Mode", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Modes change Frigate behavior", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    item(key = "default") {
+                        ChoiceRow(
+                            focusKey = "home:mode:default",
+                            title = "Default",
+                            selected = activeMode == null,
+                            onClick = { onChoose(null, "Default") },
+                        )
+                    }
+                    items(modes, key = FrigateMode::name) { mode ->
+                        ChoiceRow(
+                            focusKey = "home:mode:${mode.name}",
+                            title = mode.displayName,
+                            selected = activeMode == mode.name,
+                            onClick = { onChoose(mode.name, mode.displayName) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConfirmModeDialog(
+    mode: PendingMode,
+    switching: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        DialogSurface(modifier = Modifier.width(520.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text("Switch to ${mode.displayName}?", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("This changes the active Frigate Mode", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    PrimaryAction(
+                        focusKey = "home:mode-confirm",
+                        label = if (switching) "Switching…" else "Switch Mode",
+                        onClick = onConfirm,
+                        enabled = !switching,
+                    )
+                    SecondaryAction(
+                        focusKey = "home:mode-cancel",
+                        label = "Cancel",
+                        onClick = onDismiss,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private data class HomeViewChoice(
+    val key: String,
+    val title: String,
+    val detail: String,
+    val cameraNames: List<String>,
+    val birdseye: Boolean = false,
+)
+
+internal fun orderedHomeCameras(
+    cameras: List<Camera>,
+    favoriteCameraNames: List<String>,
+    hiddenCameraNames: Set<String>,
+): List<Camera> {
+    val favoriteRank = favoriteCameraNames.withIndex().associate { it.value to it.index }
+    return cameras.filterNot { it.name in hiddenCameraNames }
+        .sortedWith(compareBy<Camera> { favoriteRank[it.name] ?: Int.MAX_VALUE }.thenBy(Camera::order))
+}
+
+private fun orderedHomeViews(
+    views: List<HomeViewChoice>,
+    favoriteViewIds: List<String>,
+): List<HomeViewChoice> {
+    val favoriteRank = favoriteViewIds.withIndex().associate { it.value to it.index }
+    return views.withIndex()
+        .sortedWith(
+            compareBy<IndexedValue<HomeViewChoice>> { favoriteRank[it.value.key] ?: Int.MAX_VALUE }
+                .thenBy(IndexedValue<HomeViewChoice>::index),
+        )
+        .map(IndexedValue<HomeViewChoice>::value)
+}
+
+@Composable
+private fun HomeViewTile(
+    title: String,
+    detail: String,
+    focusKey: String,
+    cameraName: String?,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onFocused: (String) -> Unit,
+    restoreFocusKey: String?,
+    onFocusRestored: () -> Unit,
+    externalFocusRequester: FocusRequester?,
+    onMoveUp: () -> Unit,
+    cachedBitmap: (String) -> Bitmap?,
+    refreshBitmap: suspend (String, Int) -> Bitmap?,
+) {
+    MediaTile(
+        focusKey = focusKey,
+        accessibilityLabel = "$title, $detail",
+        onClick = onClick,
+        onLongClick = onLongClick,
+        onFocused = onFocused,
+        restoreFocusKey = restoreFocusKey,
+        onFocusRestored = onFocusRestored,
+        externalFocusRequester = externalFocusRequester,
+        modifier = Modifier
+            .width(270.dp)
+            .redirectDirectionalFocus(Key.DirectionUp, onMoveUp),
+    ) {
+        Box(modifier = Modifier.fillMaxWidth().height(108.dp)) {
+            cameraName?.let { name ->
+                CameraSnapshot(
+                    cameraName = name,
+                    cachedBitmap = { cachedBitmap(name) },
+                    refreshBitmap = { refreshBitmap(name, 220) },
+                    refreshMillis = 30_000L,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = OpahDesignTokens.MediaOverlayOpacity))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Text(title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    detail,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeModeAction(
+    activeMode: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    FocusableSurface(
+        focusKey = "home:mode",
+        restoreFocusKey = null,
+        onFocusRestored = {},
+        onClick = onClick,
+        enabled = enabled,
+        accessibilityLabel = "Change Mode, current Mode $activeMode",
+        style = FocusableSurfaceStyle.SECONDARY_ACTION,
+        modifier = modifier.size(48.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Image(
+                painter = painterResource(R.drawable.ic_mode),
+                contentDescription = null,
+                colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.onSurface),
+                modifier = Modifier.size(24.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun HomeCameraActionsDialog(
+    camera: Camera,
+    favorite: Boolean,
+    canMoveEarlier: Boolean,
+    canMoveLater: Boolean,
+    hasControls: Boolean,
+    onToggleFavorite: () -> Unit,
+    onMove: (Int) -> Unit,
+    onHide: () -> Unit,
+    onControls: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        DialogSurface(modifier = Modifier.width(520.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(camera.displayName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Home options", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SecondaryAction(
+                    focusKey = "home:camera-actions:favorite",
+                    label = if (favorite) "Remove favorite" else "Pin as favorite",
+                    onClick = onToggleFavorite,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (favorite) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        SecondaryAction(
+                            focusKey = "home:camera-actions:earlier",
+                            label = "Move earlier",
+                            onClick = { onMove(-1) },
+                            enabled = canMoveEarlier,
+                        )
+                        SecondaryAction(
+                            focusKey = "home:camera-actions:later",
+                            label = "Move later",
+                            onClick = { onMove(1) },
+                            enabled = canMoveLater,
+                        )
+                    }
+                }
+                if (hasControls) {
+                    SecondaryAction(
+                        focusKey = "home:camera-actions:controls",
+                        label = "Camera controls",
+                        onClick = onControls,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                SecondaryAction(
+                    focusKey = "home:camera-actions:hide",
+                    label = "Hide from Home",
+                    onClick = onHide,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeViewActionsDialog(
+    title: String,
+    favorite: Boolean,
+    canMoveEarlier: Boolean,
+    canMoveLater: Boolean,
+    onToggleFavorite: () -> Unit,
+    onMove: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        DialogSurface(modifier = Modifier.width(480.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Home options", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SecondaryAction(
+                    focusKey = "home:view-actions:favorite",
+                    label = if (favorite) "Remove favorite" else "Pin as favorite",
+                    onClick = onToggleFavorite,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (favorite) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        SecondaryAction(
+                            focusKey = "home:view-actions:earlier",
+                            label = "Move earlier",
+                            onClick = { onMove(-1) },
+                            enabled = canMoveEarlier,
+                        )
+                        SecondaryAction(
+                            focusKey = "home:view-actions:later",
+                            label = "Move later",
+                            onClick = { onMove(1) },
+                            enabled = canMoveLater,
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1126,70 +1799,6 @@ private fun CameraAction(
 }
 
 @Composable
-internal fun BirdseyeScreen(
-    state: Phase0UiState,
-    restoreFocusKey: String?,
-    onFocusRestored: () -> Unit,
-    onPlay: (String) -> Unit,
-    cachedBitmap: (String) -> Bitmap?,
-    refreshBitmap: suspend (String, Int) -> Bitmap?,
-) {
-    val snapshot = state.snapshot ?: return
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text("Birdseye", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            Text("See all cameras together", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        if (snapshot.birdseye.playable) {
-            val focusKey = "birdseye:watch"
-            FocusCard(
-                focusKey = focusKey,
-                restoreFocusKey = restoreFocusKey,
-                onFocusRestored = onFocusRestored,
-                onClick = { onPlay(focusKey) },
-                accessibilityLabel = "Watch Birdseye",
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    CameraSnapshot(
-                        cameraName = BIRDSEYE_CAMERA_NAME,
-                        cachedBitmap = { cachedBitmap(BIRDSEYE_CAMERA_NAME) },
-                        refreshBitmap = { refreshBitmap(BIRDSEYE_CAMERA_NAME, 300) },
-                        modifier = Modifier
-                            .width(534.dp)
-                            .aspectRatio(16f / 9f),
-                    )
-                    Column(
-                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text("BIRDSEYE", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.ExtraBold)
-                        Text("All cameras at a glance", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                        Text("Watch live", color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        } else {
-            ScreenMessage(
-                message = when {
-                    snapshot.capabilities[FrigateFeature.BIRDSEYE].evidence ==
-                        FrigateCapabilityEvidence.CAMERA_ACCESS_RESTRICTED ->
-                        "Birdseye is not available for this account"
-                    snapshot.birdseye.enabled -> "Birdseye is not ready right now"
-                    else -> "Birdseye is not turned on in Frigate"
-                },
-                isError = false,
-            )
-        }
-    }
-}
-
-@Composable
 private fun PtzControlsDialog(
     camera: Camera,
     info: CameraPtzInfo,
@@ -1200,6 +1809,38 @@ private fun PtzControlsDialog(
     cachedBitmap: (String) -> Bitmap?,
     refreshBitmap: suspend (String, Int) -> Bitmap?,
 ) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val directControlFocusRequester = remember(camera.name) { FocusRequester() }
+    val shelfFocusRequester = remember(camera.name) { FocusRequester() }
+    var directControlFocused by remember(camera.name) { mutableStateOf(false) }
+    var movingCommand by remember(camera.name) { mutableStateOf<PtzCommand?>(null) }
+    val connected = state.connection.status == PtzConnectionStatus.CONNECTED
+    fun stopMovement() {
+        if (movingCommand != null) {
+            movingCommand = null
+            onCommand(PtzCommand.Stop)
+        }
+    }
+    BackHandler {
+        stopMovement()
+        onClose()
+    }
+    DisposableEffect(lifecycleOwner, camera.name, connected) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP && connected) onCommand(PtzCommand.Stop)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            if (connected) onCommand(PtzCommand.Stop)
+        }
+    }
+    LaunchedEffect(camera.name, connected) {
+        if (connected) {
+            withFrameNanos { }
+            directControlFocusRequester.requestFocus()
+        }
+    }
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -1208,6 +1849,42 @@ private fun PtzControlsDialog(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background.copy(alpha = 0.98f))
+                .focusRequester(directControlFocusRequester)
+                .onFocusChanged { directControlFocused = it.isFocused }
+                .onPreviewKeyEvent { event ->
+                    if (!connected || !directControlFocused || !info.canMove) return@onPreviewKeyEvent false
+                    val command = when (event.key) {
+                        Key.DirectionUp -> PtzCommand.MoveUp
+                        Key.DirectionDown -> PtzCommand.MoveDown
+                        Key.DirectionLeft -> PtzCommand.MoveLeft
+                        Key.DirectionRight -> PtzCommand.MoveRight
+                        else -> null
+                    }
+                    if (command != null) {
+                        when (event.type) {
+                            KeyEventType.KeyDown -> if (movingCommand == null) {
+                                movingCommand = command
+                                onCommand(command)
+                            }
+                            KeyEventType.KeyUp -> stopMovement()
+                            else -> Unit
+                        }
+                        true
+                    } else if (
+                        event.type == KeyEventType.KeyUp &&
+                        (event.key == Key.DirectionCenter || event.key == Key.Enter)
+                    ) {
+                        if (movingCommand != null) stopMovement() else shelfFocusRequester.requestFocus()
+                        true
+                    } else {
+                        event.key == Key.DirectionCenter || event.key == Key.Enter
+                    }
+                }
+                .semantics {
+                    contentDescription =
+                        "Camera control. Arrows move. Center stops. Press center again for zoom, focus, and presets. Back exits."
+                }
+                .focusable(enabled = connected && info.canMove)
                 .padding(40.dp),
             contentAlignment = Alignment.Center,
         ) {
@@ -1231,7 +1908,7 @@ private fun PtzControlsDialog(
                             .clip(RoundedCornerShape(14.dp)),
                     )
                     Text(
-                        "Hold a control to move the camera",
+                        "Arrows move • Center stops • Back exits",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -1253,7 +1930,13 @@ private fun PtzControlsDialog(
                             }
                         }
                         PtzConnectionStatus.CONNECTED -> {
-                            PtzConnectedControls(info, state.errorMessage, onCommand, onClose)
+                            PtzConnectedControls(
+                                info,
+                                state.errorMessage,
+                                shelfFocusRequester,
+                                onCommand,
+                                onClose,
+                            )
                         }
                     }
                 }
@@ -1266,14 +1949,19 @@ private fun PtzControlsDialog(
 private fun PtzConnectedControls(
     info: CameraPtzInfo,
     errorMessage: String?,
+    initialFocusRequester: FocusRequester,
     onCommand: (PtzCommand) -> Unit,
     onClose: () -> Unit,
 ) {
+    Text("Camera controls", fontWeight = FontWeight.Bold)
+    Button(
+        onClick = { onCommand(PtzCommand.Stop) },
+        modifier = Modifier.focusRequester(initialFocusRequester),
+    ) { Text("Stop") }
     if (info.canMove) {
         PtzHoldButton("Up", "↑", PtzCommand.MoveUp, onCommand)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             PtzHoldButton("Left", "←", PtzCommand.MoveLeft, onCommand)
-            Button(onClick = { onCommand(PtzCommand.Stop) }) { Text("Stop") }
             PtzHoldButton("Right", "→", PtzCommand.MoveRight, onCommand)
         }
         PtzHoldButton("Down", "↓", PtzCommand.MoveDown, onCommand)
@@ -1403,8 +2091,62 @@ private fun CameraCard(
 }
 
 private const val CAMERA_REFRESH_STAGGER_MS = 140L
+private const val HOME_PREVIEW_SETTLE_MILLIS = 300L
+private const val HOME_HERO_IMAGE_HEIGHT = 720
+private const val HOME_HERO_MINIMUM_CACHED_HEIGHT = 600
+private val HOME_HERO_MAX_WIDTH = 680.dp
+private const val HOME_INITIAL_SHELF_RESERVE_DP = 236
 private const val HOME_ROW_ITEM_LIMIT = 8
 private const val PTZ_STEP_MILLIS = 350L
+private val KeepVisibleBringIntoViewSpec = object : BringIntoViewSpec {}
+
+internal fun homeHeroMaxHeightDp(viewportHeightDp: Int): Int =
+    (viewportHeightDp - HOME_INITIAL_SHELF_RESERVE_DP).coerceIn(240, 360)
+
+private fun Modifier.redirectDirectionalFocus(direction: Key, onMove: () -> Unit): Modifier =
+    onPreviewKeyEvent { event ->
+        if (event.key != direction) return@onPreviewKeyEvent false
+        when (event.type) {
+            KeyEventType.KeyDown -> {
+                if (event.nativeKeyEvent.repeatCount == 0) onMove()
+                true
+            }
+            KeyEventType.KeyUp -> true
+            else -> false
+        }
+    }
+
+private suspend fun scrollThenFocus(
+    listState: LazyListState,
+    itemIndex: Int,
+    focusRequester: FocusRequester,
+) {
+    listState.scrollToItem(itemIndex)
+    repeat(8) {
+        withFrameNanos { }
+        if (runCatching(focusRequester::requestFocus).getOrDefault(false)) {
+            withFrameNanos { }
+            listState.scrollToItem(itemIndex)
+            return
+        }
+    }
+}
+
+private class HomePreviewUpdate(initialCameraName: String?) {
+    var pendingCameraName: String? = initialCameraName
+    var job: Job? = null
+}
+
+private class HomePreviewState(initialCameraName: String?) {
+    val cameraName = mutableStateOf(initialCameraName)
+
+    companion object {
+        val Saver = Saver<HomePreviewState, String>(
+            save = { state -> state.cameraName.value.orEmpty() },
+            restore = { saved -> HomePreviewState(saved.takeIf(String::isNotEmpty)) },
+        )
+    }
+}
 
 @Composable
 private fun ReviewRow(
@@ -1524,7 +2266,7 @@ internal fun SettingsScreen(
             Text("Playback defaults and this TV’s Frigate connection", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
-            SettingsSection("Appearance", "Follow the TV, use a fixed theme, or create your own.") {
+            SettingsSection("Appearance", "Follow the TV, use a fixed theme, or create your own") {
                 ChoiceRow(
                     values = AppearanceMode.entries,
                     selected = state.settings.appearanceMode,
@@ -1565,14 +2307,14 @@ internal fun SettingsScreen(
             }
         }
         item {
-            SettingsSection("Live playback", "Defaults apply the next time a stream opens.") {
+            SettingsSection("Live playback", "Defaults apply the next time a stream opens") {
                 SettingToggle("Prefer RTP over TCP", state.settings.preferRtpTcp, onPreferRtpTcp)
                 SettingToggle("Start live video muted", state.settings.startLiveMuted, onStartMuted)
                 SettingToggle("Show playback Info control", state.settings.diagnosticsEnabled, onDiagnostics)
             }
         }
         item {
-            SettingsSection("Support", "Inspect the current connection, camera streams, and TV decoders.") {
+            SettingsSection("Support", "Inspect the current connection, camera streams, and TV decoders") {
                 FocusCard(
                     focusKey = "settings:diagnostics",
                     restoreFocusKey = null,
@@ -1602,7 +2344,7 @@ internal fun SettingsScreen(
             }
         }
         item {
-            SettingsSection("Frigate account", "API authentication and RTSP routing are managed separately.") {
+            SettingsSection("Frigate account", "API authentication and RTSP routing are managed separately") {
                 ReadOnlyValue("Server", profile.apiBaseUrl)
                 ReadOnlyValue("Username", profile.username)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1612,7 +2354,7 @@ internal fun SettingsScreen(
             }
         }
         item {
-            SettingsSection("RTSP routing", "Change the live-stream route without signing in again.") {
+            SettingsSection("RTSP routing", "Change the live-stream route without signing in again") {
                 ProductionTvInput(
                     label = "RTSP host override (optional)",
                     value = rtspHost,
@@ -1650,6 +2392,7 @@ internal fun AboutScreen(
     onBack: (() -> Unit)? = null,
     initialFocusRequester: FocusRequester? = null,
 ) {
+    onBack?.let { BackHandler(onBack = it) }
     val uriHandler = LocalUriHandler.current
     var repositoryButtonFocused by remember { mutableStateOf(false) }
     var repositoryButtonArmed by remember { mutableStateOf(false) }
@@ -1668,13 +2411,6 @@ internal fun AboutScreen(
             .padding(horizontal = 34.dp, vertical = 24.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        onBack?.let {
-            SafeBackButton(
-                onClick = it,
-                initialFocusRequester = initialFocusRequester,
-                label = "Back to Settings",
-            )
-        }
         Row(
             horizontalArrangement = Arrangement.spacedBy(18.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1702,12 +2438,17 @@ internal fun AboutScreen(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                SettingsSection("Independent project", isFocusable = true) {
+                SettingsSection(
+                    "Independent project",
+                    "Frigate names are used only to describe compatibility",
+                    isFocusable = true,
+                    initialFocusRequester = initialFocusRequester,
+                ) {
                     Text(OPAH_INDEPENDENCE_NOTICE, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 SettingsSection(
                     "Privacy",
-                    "Opah connects this device directly to the Frigate server you choose.",
+                    "Opah connects this device directly to the Frigate server you choose",
                 ) {
                     Text(
                         OPAH_PRIVACY_NOTICE,
@@ -1719,7 +2460,7 @@ internal fun AboutScreen(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                SettingsSection("Project and support", "Opah uses the Apache License 2.0.") {
+                SettingsSection("Project and support", "Opah uses the Apache License 2.0") {
                     Text(
                         OPAH_REPOSITORY_URL,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1757,6 +2498,7 @@ internal fun DiagnosticsScreen(
     onBack: (() -> Unit)? = null,
     initialFocusRequester: FocusRequester? = null,
 ) {
+    onBack?.let { BackHandler(onBack = it) }
     val snapshot = state.snapshot ?: return
     val device = state.device
     val birdseye = snapshot.birdseye
@@ -1777,22 +2519,9 @@ internal fun DiagnosticsScreen(
                     Text("Connection, authorization, and decoder evidence", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    onBack?.let {
-                        Button(
-                            onClick = it,
-                        ) { Text("Back to Settings") }
-                    }
                     Button(
                         onClick = onRefresh,
                         enabled = !state.loading,
-                        // The Settings card activates on key-down. Landing on Back
-                        // here lets a held Select repeat immediately close this page.
-                        // Refresh is a safe target for any carried-over repeat.
-                        modifier = if (initialFocusRequester == null) {
-                            Modifier
-                        } else {
-                            Modifier.focusRequester(initialFocusRequester)
-                        },
                     ) {
                         Text(if (state.loading) "Refreshing…" else "Refresh")
                     }
@@ -1800,7 +2529,11 @@ internal fun DiagnosticsScreen(
             }
         }
         item {
-            SettingsSection("Frigate", isFocusable = true) {
+            SettingsSection(
+                "Frigate",
+                isFocusable = true,
+                initialFocusRequester = initialFocusRequester,
+            ) {
                 ReadOnlyValue("Version", snapshot.frigateVersion)
                 ReadOnlyValue("Compatibility", snapshot.versionCompatibility.name.replace('_', ' '))
                 ReadOnlyValue("Role", snapshot.user.role)
@@ -1811,7 +2544,7 @@ internal fun DiagnosticsScreen(
         item {
             SettingsSection(
                 "Birdseye",
-                "Frigate's server-composed multi-camera live view.",
+                "Frigate's server-composed multi-camera live view",
                 isFocusable = true,
             ) {
                 ReadOnlyValue(
@@ -1839,9 +2572,9 @@ internal fun DiagnosticsScreen(
                 }
                 Text(
                     if (birdseye.playable) {
-                        "Home and Cameras use one composite decoder instead of opening every camera feed."
+                        "Home and Cameras use one composite decoder instead of opening every camera feed"
                     } else {
-                        "Normal camera viewing remains available while Birdseye is not ready."
+                        "Normal camera viewing remains available while Birdseye is not ready"
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
@@ -1851,7 +2584,7 @@ internal fun DiagnosticsScreen(
         item {
             SettingsSection("Device", isFocusable = true) {
                 if (device == null) {
-                    Text("Device inspection is still loading.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Device inspection is still loading", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
                     ReadOnlyValue("Model", "${device.manufacturer} ${device.model}")
                     ReadOnlyValue("Android", "${device.androidRelease} (API ${device.apiLevel})")
@@ -1871,7 +2604,7 @@ internal fun DiagnosticsScreen(
         item(key = "diagnostics-streams-header") {
             SettingsSection(
                 "Discovered live streams",
-                "Move down to inspect each permitted camera.",
+                "Move down to inspect each permitted camera",
                 isFocusable = true,
             ) {}
         }
@@ -1918,6 +2651,7 @@ internal fun InformationScreen(
     initialFocusRequester: FocusRequester? = null,
     initialTabName: String? = null,
 ) {
+    onBack?.let { BackHandler(onBack = it) }
     LaunchedEffect(state.activeProfile) {
         onLoad()
     }
@@ -1938,26 +2672,17 @@ internal fun InformationScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    onBack?.let {
-                        SafeBackButton(
-                            onClick = it,
-                            initialFocusRequester = initialFocusRequester,
-                            label = "Back to Settings",
-                        )
-                    }
-                    Column {
-                        Text("System", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                        Text(
-                            "Performance and recording space",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                Column {
+                    Text("System", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Performance and recording space",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                Button(onClick = onRefresh, enabled = !information.loading) {
+                Button(
+                    onClick = onRefresh,
+                    enabled = !information.loading,
+                ) {
                     Text(if (information.loading) "Refreshing…" else "Refresh")
                 }
             }
@@ -1973,6 +2698,11 @@ internal fun InformationScreen(
                         selected = item == tab,
                         accessibilityLabel = item.label,
                         modifier = Modifier.width(170.dp),
+                        externalFocusRequester = informationTabInitialFocusRequester(
+                            candidate = item,
+                            selected = tab,
+                            requester = initialFocusRequester,
+                        ),
                     ) {
                         Text(
                             item.label,
@@ -2024,7 +2754,7 @@ internal fun InformationScreen(
                         key = { _, camera -> camera.cameraName },
                     ) { index, camera -> CameraStorageRow(camera, index) }
                     if (storage.cameras.isEmpty()) {
-                        item { InformationFocusRow("No permitted cameras are reporting recording storage.") }
+                        item { InformationFocusRow("No permitted cameras are reporting recording storage") }
                     }
                 }
             }
@@ -2245,7 +2975,7 @@ private fun SavedRecordingDetail(
 }
 
 @Composable
-private fun SavedRecordingThumbnail(
+internal fun SavedRecordingThumbnail(
     export: RecordingExport,
     cachedBitmap: () -> Bitmap?,
     refreshBitmap: suspend () -> Bitmap?,
@@ -2350,7 +3080,7 @@ private fun PerformanceOverview(
                 Text("Loading performance information…", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 ScreenMessage(
-                    errorMessage ?: "Performance information is not available.",
+                    errorMessage ?: "Performance information is not available",
                     isError = errorMessage != null,
                 )
             }
@@ -2384,7 +3114,7 @@ private fun PerformanceOverview(
 
 @Composable
 private fun PerformanceAccelerators(summary: FrigatePerformanceSummary) {
-    SettingsSection("Hardware acceleration", "GPU and NPU values are shown when Frigate reports them.", isFocusable = true) {
+    SettingsSection("Hardware acceleration", "GPU and NPU values are shown when Frigate reports them", isFocusable = true) {
         summary.accelerators.forEach { accelerator ->
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("${accelerator.kind} • ${accelerator.name}", modifier = Modifier.weight(1.6f), fontWeight = FontWeight.Bold)
@@ -2397,7 +3127,7 @@ private fun PerformanceAccelerators(summary: FrigatePerformanceSummary) {
 
 @Composable
 private fun PerformanceDetectors(summary: FrigatePerformanceSummary) {
-    SettingsSection("Detectors", "Lower inference time is faster.", isFocusable = true) {
+    SettingsSection("Detectors", "Lower inference time is faster", isFocusable = true) {
         summary.detectors.forEach { detector ->
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(detector.name, fontWeight = FontWeight.Bold)
@@ -2413,7 +3143,7 @@ private fun PerformanceDetectors(summary: FrigatePerformanceSummary) {
 
 @Composable
 private fun PerformanceCameraHeader() {
-    SettingsSection("Cameras", "Performance for permitted cameras only.") {
+    SettingsSection("Cameras", "Performance for permitted cameras only") {
         Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
             Text("Camera", modifier = Modifier.weight(1.8f), color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("Camera FPS", modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -2479,7 +3209,7 @@ private fun StorageOverview(
                 Text("Loading recording storage…", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 ScreenMessage(
-                    errorMessage ?: "Storage information is not available.",
+                    errorMessage ?: "Storage information is not available",
                     isError = errorMessage != null,
                 )
             }
@@ -2546,7 +3276,7 @@ private fun StorageMetric(label: String, value: String, modifier: Modifier = Mod
 
 @Composable
 private fun CameraStorageHeader() {
-    SettingsSection("Cameras", "Storage and estimated recording bandwidth for permitted cameras.") {
+    SettingsSection("Cameras", "Storage and estimated recording bandwidth for permitted cameras") {
         Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
             Text("Camera", modifier = Modifier.weight(1.8f), color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("Storage", modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -2665,7 +3395,6 @@ private val STORAGE_COLORS = listOf(
     Color(0xFFFF4F78),
 )
 
-private const val BIRDSEYE_CAMERA_NAME = "birdseye"
 @Composable
 private fun SectionHeader(
     title: String,
@@ -2690,6 +3419,7 @@ internal fun SettingsSection(
     title: String,
     subtitle: String? = null,
     isFocusable: Boolean = false,
+    initialFocusRequester: FocusRequester? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -2699,7 +3429,16 @@ internal fun SettingsSection(
             .fillMaxWidth()
             .then(
                 if (isFocusable) {
-                    Modifier.onFocusChanged { focused = it.isFocused }.focusable()
+                    Modifier
+                        .then(
+                            if (initialFocusRequester == null) {
+                                Modifier
+                            } else {
+                                Modifier.focusRequester(initialFocusRequester)
+                            },
+                        )
+                        .onFocusChanged { focused = it.isFocused }
+                        .focusable()
                 } else {
                     Modifier
                 },
@@ -2729,9 +3468,10 @@ internal fun <T> ChoiceRow(
     label: (T) -> String,
     keyPrefix: String,
     onSelect: (T) -> Unit,
+    externalFocusRequester: FocusRequester? = null,
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        values.forEach { value ->
+        values.forEachIndexed { index, value ->
             FocusCard(
                 focusKey = "$keyPrefix:$value",
                 restoreFocusKey = null,
@@ -2739,6 +3479,7 @@ internal fun <T> ChoiceRow(
                 onClick = { onSelect(value) },
                 selected = value == selected,
                 accessibilityLabel = label(value),
+                externalFocusRequester = externalFocusRequester.takeIf { index == 0 },
             ) {
                 Text(label(value), modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
             }
@@ -2753,6 +3494,7 @@ internal fun ThemeColorEditor(
 ) {
     val safeColors = ThemeColorPolicy.sanitize(colors)
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Quick styles", fontWeight = FontWeight.Bold)
         CUSTOM_THEME_PRESETS.chunked(3).forEach { row ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -2770,37 +3512,188 @@ internal fun ThemeColorEditor(
                 repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
             }
         }
-    }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(safeColors.backgroundArgb), RoundedCornerShape(10.dp))
-            .border(
-                1.dp,
-                Color(ThemeColorPolicy.readableForeground(safeColors.backgroundArgb)).copy(alpha = 0.28f),
-                RoundedCornerShape(10.dp),
-            )
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            "Preview",
-            color = Color(ThemeColorPolicy.readableForeground(safeColors.backgroundArgb)),
-            fontWeight = FontWeight.Bold,
+        Text("Make it yours", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
+        ThemeAdjustmentRow(
+            focusKey = "settings:theme-adjust:accent-hue",
+            label = "Accent color",
+            value = themeHueName(ThemeColorPolicy.toHsl(safeColors.accentArgb).hue),
+            swatchArgb = safeColors.accentArgb,
+            onDecrease = {
+                onChange(safeColors.copy(accentArgb = ThemeColorPolicy.adjustHue(safeColors.accentArgb, -10)))
+            },
+            onIncrease = {
+                onChange(safeColors.copy(accentArgb = ThemeColorPolicy.adjustHue(safeColors.accentArgb, 10)))
+            },
         )
-        Box(
+        ThemeAdjustmentRow(
+            focusKey = "settings:theme-adjust:accent-strength",
+            label = "Accent intensity",
+            value = themeIntensityLabel(ThemeColorPolicy.toHsl(safeColors.accentArgb).saturation),
+            swatchArgb = safeColors.accentArgb,
+            onDecrease = {
+                onChange(safeColors.copy(accentArgb = ThemeColorPolicy.adjustSaturation(safeColors.accentArgb, -5)))
+            },
+            onIncrease = {
+                onChange(safeColors.copy(accentArgb = ThemeColorPolicy.adjustSaturation(safeColors.accentArgb, 5)))
+            },
+        )
+        ThemeAdjustmentRow(
+            focusKey = "settings:theme-adjust:accent-brightness",
+            label = "Accent brightness",
+            value = themeBrightnessLabel(ThemeColorPolicy.toHsl(safeColors.accentArgb).lightness),
+            swatchArgb = safeColors.accentArgb,
+            onDecrease = {
+                onChange(safeColors.copy(accentArgb = ThemeColorPolicy.adjustLightness(safeColors.accentArgb, -5)))
+            },
+            onIncrease = {
+                onChange(safeColors.copy(accentArgb = ThemeColorPolicy.adjustLightness(safeColors.accentArgb, 5)))
+            },
+        )
+        ThemeAdjustmentRow(
+            focusKey = "settings:theme-adjust:background-hue",
+            label = "Background tint",
+            value = themeHueName(ThemeColorPolicy.toHsl(safeColors.backgroundArgb).hue),
+            swatchArgb = safeColors.backgroundArgb,
+            onDecrease = {
+                onChange(safeColors.copy(backgroundArgb = ThemeColorPolicy.adjustHue(safeColors.backgroundArgb, -10)))
+            },
+            onIncrease = {
+                onChange(safeColors.copy(backgroundArgb = ThemeColorPolicy.adjustHue(safeColors.backgroundArgb, 10)))
+            },
+        )
+        ThemeAdjustmentRow(
+            focusKey = "settings:theme-adjust:background-strength",
+            label = "Background intensity",
+            value = themeIntensityLabel(ThemeColorPolicy.toHsl(safeColors.backgroundArgb).saturation),
+            swatchArgb = safeColors.backgroundArgb,
+            onDecrease = {
+                onChange(safeColors.copy(backgroundArgb = ThemeColorPolicy.adjustSaturation(safeColors.backgroundArgb, -5)))
+            },
+            onIncrease = {
+                onChange(safeColors.copy(backgroundArgb = ThemeColorPolicy.adjustSaturation(safeColors.backgroundArgb, 5)))
+            },
+        )
+        ThemeAdjustmentRow(
+            focusKey = "settings:theme-adjust:background-brightness",
+            label = "Background brightness",
+            value = themeBrightnessLabel(ThemeColorPolicy.toHsl(safeColors.backgroundArgb).lightness),
+            swatchArgb = safeColors.backgroundArgb,
+            onDecrease = {
+                onChange(safeColors.copy(backgroundArgb = ThemeColorPolicy.adjustLightness(safeColors.backgroundArgb, -3)))
+            },
+            onIncrease = {
+                onChange(safeColors.copy(backgroundArgb = ThemeColorPolicy.adjustLightness(safeColors.backgroundArgb, 3)))
+            },
+        )
+        Row(
             modifier = Modifier
-                .background(Color(safeColors.accentArgb), RoundedCornerShape(8.dp))
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .fillMaxWidth()
+                .background(Color(safeColors.backgroundArgb), RoundedCornerShape(10.dp))
+                .border(
+                    1.dp,
+                    Color(ThemeColorPolicy.readableForeground(safeColors.backgroundArgb)).copy(alpha = 0.28f),
+                    RoundedCornerShape(10.dp),
+                )
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "Selected color",
-                color = Color(ThemeColorPolicy.readableForeground(safeColors.accentArgb)),
+                "Preview",
+                color = Color(ThemeColorPolicy.readableForeground(safeColors.backgroundArgb)),
                 fontWeight = FontWeight.Bold,
             )
+            Box(
+                modifier = Modifier
+                    .background(Color(safeColors.accentArgb), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            ) {
+                Text(
+                    "Selected color",
+                    color = Color(ThemeColorPolicy.readableForeground(safeColors.accentArgb)),
+                    fontWeight = FontWeight.Bold,
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun ThemeAdjustmentRow(
+    focusKey: String,
+    label: String,
+    value: String,
+    swatchArgb: Int,
+    onDecrease: () -> Unit,
+    onIncrease: () -> Unit,
+) {
+    FocusCard(
+        focusKey = focusKey,
+        restoreFocusKey = null,
+        onFocusRestored = {},
+        onClick = onIncrease,
+        accessibilityLabel = "$label, $value. Use left and right to change",
+        modifier = Modifier
+            .fillMaxWidth()
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.DirectionLeft -> {
+                        onDecrease()
+                        true
+                    }
+                    Key.DirectionRight -> {
+                        onIncrease()
+                        true
+                    }
+                    else -> false
+                }
+            },
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 9.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .background(Color(swatchArgb), CircleShape)
+                    .border(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f), CircleShape),
+            )
+            Text(label, modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+            Text(value, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("◀  Change  ▶", style = MaterialTheme.typography.labelMedium)
+        }
+    }
+}
+
+internal fun themeHueName(hue: Int): String = when (hue.coerceIn(0, 359)) {
+    in 0..14, in 345..359 -> "Red"
+    in 15..44 -> "Orange"
+    in 45..74 -> "Yellow"
+    in 75..104 -> "Lime"
+    in 105..149 -> "Green"
+    in 150..189 -> "Teal"
+    in 190..214 -> "Cyan"
+    in 215..254 -> "Blue"
+    in 255..284 -> "Indigo"
+    in 285..319 -> "Purple"
+    else -> "Pink"
+}
+
+internal fun themeIntensityLabel(saturation: Int): String = when (saturation.coerceIn(0, 100)) {
+    in 0..24 -> "Muted"
+    in 25..69 -> "Balanced"
+    else -> "Vivid"
+}
+
+internal fun themeBrightnessLabel(lightness: Int): String = when (lightness.coerceIn(0, 100)) {
+    in 0..19 -> "Very dark"
+    in 20..39 -> "Dark"
+    in 40..59 -> "Medium"
+    in 60..79 -> "Bright"
+    else -> "Very bright"
 }
 
 private data class ThemePreset(
@@ -2860,7 +3753,12 @@ private fun ThemePresetCard(
 }
 
 @Composable
-internal fun SettingToggle(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
+internal fun SettingToggle(
+    label: String,
+    value: Boolean,
+    onChange: (Boolean) -> Unit,
+    externalFocusRequester: FocusRequester? = null,
+) {
     FocusCard(
         focusKey = "settings:toggle:$label",
         restoreFocusKey = null,
@@ -2868,6 +3766,7 @@ internal fun SettingToggle(label: String, value: Boolean, onChange: (Boolean) ->
         onClick = { onChange(!value) },
         selected = value,
         accessibilityLabel = "$label, ${if (value) "on" else "off"}",
+        externalFocusRequester = externalFocusRequester,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
