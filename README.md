@@ -1,7 +1,7 @@
 # Opah
 
 Opah is an Android TV and Google TV app for viewing cameras and recordings from
-an existing [Frigate security-camera system](https://frigate.video/). Designed
+an existing [Frigate NVR](https://frigate.video/). Designed
 for a television remote, it lets you watch live cameras, use multi-camera views,
 review recent activity, search saved video, browse history, and keep or share
 important clips.
