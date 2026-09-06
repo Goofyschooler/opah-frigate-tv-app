@@ -1,6 +1,7 @@
 package app.opah.tv
 
 import android.app.PictureInPictureParams
+import android.Manifest
 import android.content.pm.PackageManager
 import android.content.Intent
 import android.content.ClipData
@@ -11,25 +12,49 @@ import android.os.Bundle
 import android.provider.Settings
 import android.util.Rational
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.annotation.RequiresApi
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import androidx.compose.runtime.mutableStateOf
 import app.opah.tv.data.model.RecordingExport
+import app.opah.tv.notifications.android.TvAlertIntentContract
+import app.opah.tv.notifications.android.TvAlertOverlayPermission
 import app.opah.tv.ui.OpahApp
 import app.opah.tv.ui.Phase0ViewModel
+import app.opah.tv.ui.views.NativeHostActions
+import app.opah.tv.ui.views.NativeOpahController
 import java.io.File
 import java.io.FileOutputStream
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+@androidx.media3.common.util.UnstableApi
 class MainActivity : ComponentActivity() {
     private val pipModeActive = mutableStateOf(false)
     private var fullyDrawnReported = false
     private val viewModel: Phase0ViewModel by viewModels {
         Phase0ViewModel.Factory(application)
+    }
+    private var pendingNotificationAction = PendingNotificationAction.NONE
+    private var awaitingOverlayPermission = false
+    private var nativeOpahController: NativeOpahController? = null
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val action = pendingNotificationAction
+        pendingNotificationAction = PendingNotificationAction.NONE
+        if (granted) {
+            runNotificationAction(action)
+        } else {
+            viewModel.notificationPermissionDenied()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -41,31 +66,109 @@ class MainActivity : ComponentActivity() {
         val documentationActivityPage = intent.documentationExtra(EXTRA_DOCUMENTATION_ACTIVITY_PAGE)
         val documentationClipsPage = intent.documentationExtra(EXTRA_DOCUMENTATION_CLIPS_PAGE)
         if (BuildConfig.DOCUMENTATION_MODE) viewModel.setDocumentationScenario(documentationScenario)
+        handleTvAlertLaunch(intent)
         handleCameraLaunch(intent)
-        setContent {
-            OpahApp(
+        if (BuildConfig.NATIVE_VIEW_PRESENTATION) {
+            val controller = NativeOpahController(
+                activity = this,
                 viewModel = viewModel,
-                pictureInPictureAvailable = supportsTelevisionPictureInPicture(),
-                pictureInPictureActive = pipModeActive.value,
-                onEnterPictureInPicture = ::requestLivePictureInPicture,
-                onFullyDrawn = ::reportFullyDrawnOnce,
-                onExitRequested = ::finish,
-                onInstallUpdate = ::openUpdateInstaller,
-                onShareSnapshot = ::shareSnapshot,
-                onShareClip = ::shareClip,
+                actions = NativeHostActions(
+                    onExitRequested = ::finish,
+                    onInstallUpdate = ::openUpdateInstaller,
+                    onEnableTvAlerts = ::requestEnableTvAlerts,
+                    onTestTvAlert = ::requestTestTvAlert,
+                    onOpenNotificationSettings = ::openNotificationSettings,
+                    onOpenOverlaySettings = ::openOverlaySettings,
+                    pictureInPictureAvailable = supportsTelevisionPictureInPicture(),
+                    onEnterPictureInPicture = ::requestLivePictureInPicture,
+                    onShareSnapshot = ::shareSnapshot,
+                    onShareClip = ::shareClip,
+                    onFullyDrawn = ::reportFullyDrawnOnce,
+                ),
                 initialDestinationName = documentationDestination,
                 initialSettingsPageName = documentationSettingsPage,
                 initialInformationTabName = documentationInformationTab,
                 initialActivityPageName = documentationActivityPage,
                 initialClipsPageName = documentationClipsPage,
             )
+            nativeOpahController = controller
+            setContentView(controller.root)
+            onBackPressedDispatcher.addCallback(
+                this,
+                object : OnBackPressedCallback(true) {
+                    override fun handleOnBackPressed() {
+                        controller.handleSystemBack()
+                    }
+                },
+            )
+            controller.start()
+        } else {
+            setContent {
+                OpahApp(
+                    viewModel = viewModel,
+                    pictureInPictureAvailable = supportsTelevisionPictureInPicture(),
+                    pictureInPictureActive = pipModeActive.value,
+                    onEnterPictureInPicture = ::requestLivePictureInPicture,
+                    onFullyDrawn = ::reportFullyDrawnOnce,
+                    onExitRequested = ::finish,
+                    onInstallUpdate = ::openUpdateInstaller,
+                    onShareSnapshot = ::shareSnapshot,
+                    onShareClip = ::shareClip,
+                    onEnableTvAlerts = ::requestEnableTvAlerts,
+                    onTestTvAlert = ::requestTestTvAlert,
+                    onOpenNotificationSettings = ::openNotificationSettings,
+                    onOpenOverlaySettings = ::openOverlaySettings,
+                    initialDestinationName = documentationDestination,
+                    initialSettingsPageName = documentationSettingsPage,
+                    initialInformationTabName = documentationInformationTab,
+                    initialActivityPageName = documentationActivityPage,
+                    initialClipsPageName = documentationClipsPage,
+                )
+            }
         }
+    }
+
+    override fun onDestroy() {
+        nativeOpahController?.stop()
+        nativeOpahController = null
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        handleTvAlertLaunch(intent)
         handleCameraLaunch(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.refreshPrivacyUnlockState()
+        viewModel.refreshTvAlertDeliveryStatus()
+        if (awaitingOverlayPermission) {
+            awaitingOverlayPermission = false
+            val action = pendingNotificationAction
+            pendingNotificationAction = PendingNotificationAction.NONE
+            if (TvAlertOverlayPermission.isGranted(this)) {
+                if (action != PendingNotificationAction.NONE) runNotificationAction(action)
+            } else if (action != PendingNotificationAction.NONE) {
+                viewModel.onScreenAlertPermissionDenied()
+            }
+            return
+        }
+        if (
+            pendingNotificationAction != PendingNotificationAction.NONE &&
+            NotificationManagerCompat.from(this).areNotificationsEnabled()
+        ) {
+            val action = pendingNotificationAction
+            pendingNotificationAction = PendingNotificationAction.NONE
+            runNotificationAction(action)
+        }
+    }
+
+    override fun onStop() {
+        (application as OpahApplication).container.onAppBackgrounded()
+        super.onStop()
     }
 
     private fun handleCameraLaunch(intent: Intent) {
@@ -79,6 +182,107 @@ class MainActivity : ComponentActivity() {
             pathSegments = uri?.pathSegments.orEmpty(),
         )
         cameraName?.let(viewModel::openCameraByName)
+    }
+
+    private fun handleTvAlertLaunch(intent: Intent) {
+        if (TvAlertIntentContract.isLocalTestOpen(intent)) {
+            viewModel.openLocalTestAlertSettings()
+            return
+        }
+        val payload = TvAlertIntentContract.payload(intent) ?: return
+        viewModel.openTvAlert(payload.profileKey, payload.reviewId, payload.actionNonce)
+    }
+
+    private fun requestEnableTvAlerts() {
+        requestNotificationPermissionOrRun(PendingNotificationAction.ENABLE_ALERTS)
+    }
+
+    private fun requestTestTvAlert(includeImage: Boolean) {
+        requestNotificationPermissionOrRun(
+            if (includeImage) {
+                PendingNotificationAction.SEND_TEST_WITH_IMAGE
+            } else {
+                PendingNotificationAction.SEND_TEST_WITHOUT_IMAGE
+            },
+        )
+    }
+
+    private fun requestNotificationPermissionOrRun(
+        action: PendingNotificationAction,
+    ) {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingNotificationAction = action
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            runNotificationAction(action)
+        }
+    }
+
+    private fun runNotificationAction(action: PendingNotificationAction) {
+        if (action == PendingNotificationAction.NONE) return
+        if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+            pendingNotificationAction = action
+            viewModel.notificationDeliveryBlocked()
+            openNotificationSettings()
+            return
+        }
+        val onScreenAlertsEnabled =
+            (application as OpahApplication).container.tvAlertOverlaySettings()
+                .displayDurationSeconds > 0
+        if (onScreenAlertsEnabled && !TvAlertOverlayPermission.isGranted(this)) {
+            openOverlaySettings(action)
+            return
+        }
+        when (action) {
+            PendingNotificationAction.ENABLE_ALERTS -> viewModel.enableTvAlertsAfterPermission()
+            PendingNotificationAction.SEND_TEST_WITHOUT_IMAGE -> sendTestAlertFromBackground(false)
+            PendingNotificationAction.SEND_TEST_WITH_IMAGE -> sendTestAlertFromBackground(true)
+            PendingNotificationAction.NONE -> Unit
+        }
+    }
+
+    private fun sendTestAlertFromBackground(includeImage: Boolean) {
+        viewModel.prepareLocalTestAlert()
+        moveTaskToBack(true)
+        lifecycleScope.launch {
+            delay(TEST_ALERT_POST_DELAY_MILLIS)
+            viewModel.sendLocalTestAlert(includeImage)
+        }
+    }
+
+    private fun openNotificationSettings() {
+        val settingsIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        } else {
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                "package:$packageName".toUri(),
+            )
+        }
+        runCatching { startActivity(settingsIntent) }
+    }
+
+    private fun openOverlaySettings(
+        action: PendingNotificationAction = PendingNotificationAction.NONE,
+    ) {
+        if (action != PendingNotificationAction.NONE) pendingNotificationAction = action
+        awaitingOverlayPermission = true
+        val settingsIntent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                data = "package:$packageName".toUri()
+            }
+        }
+        runCatching { startActivity(settingsIntent) }
+            .onFailure {
+                awaitingOverlayPermission = false
+                pendingNotificationAction = PendingNotificationAction.NONE
+                viewModel.onScreenAlertSettingsUnavailable()
+            }
     }
 
     private fun openUpdateInstaller(apkPath: String) {
@@ -162,6 +366,7 @@ class MainActivity : ComponentActivity() {
     ) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         pipModeActive.value = isInPictureInPictureMode
+        nativeOpahController?.onPictureInPictureModeChanged(isInPictureInPictureMode)
         if (!isInPictureInPictureMode && Build.VERSION.SDK_INT >= 31) {
             disableAutomaticPictureInPictureEntry()
         }
@@ -208,6 +413,7 @@ class MainActivity : ComponentActivity() {
         if (BuildConfig.DOCUMENTATION_MODE) getStringExtra(name) else null
 
     private companion object {
+        const val TEST_ALERT_POST_DELAY_MILLIS = 1_200L
         const val EXTRA_CAMERA_NAME = "app.opah.tv.extra.CAMERA_NAME"
         const val EXTRA_CAMERA_NAME_COMPAT = "camera"
         const val EXTRA_DOCUMENTATION_SCENARIO = "documentationScenario"
@@ -217,6 +423,13 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_DOCUMENTATION_ACTIVITY_PAGE = "documentationActivityPage"
         const val EXTRA_DOCUMENTATION_CLIPS_PAGE = "documentationClipsPage"
     }
+}
+
+private enum class PendingNotificationAction {
+    NONE,
+    ENABLE_ALERTS,
+    SEND_TEST_WITHOUT_IMAGE,
+    SEND_TEST_WITH_IMAGE,
 }
 
 internal fun cameraNameFromLaunch(

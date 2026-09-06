@@ -45,6 +45,7 @@ class SettingsRepository(
             )
             preferences[REDUCED_MOTION] = updated.reducedMotion
             preferences[HIGH_CONTRAST] = updated.highContrast
+            preferences[SUBTLE_ROUNDED_CORNERS] = updated.subtleRoundedCorners
             preferences[FAVORITE_CAMERA_NAMES] = json.encodeToString(updated.favoriteCameraNames)
             preferences[HIDDEN_HOME_CAMERA_NAMES] = updated.hiddenHomeCameraNames
             preferences[FAVORITE_VIEW_IDS] = json.encodeToString(updated.favoriteViewIds)
@@ -92,6 +93,7 @@ class SettingsRepository(
                 .let(::sanitizeSavedCameraViews),
             reducedMotion = preferences[REDUCED_MOTION] ?: false,
             highContrast = preferences[HIGH_CONTRAST] ?: false,
+            subtleRoundedCorners = preferences[SUBTLE_ROUNDED_CORNERS] ?: false,
             favoriteCameraNames = preferences[FAVORITE_CAMERA_NAMES]
                 ?.let(::decodeIdentifierOrder)
                 .orEmpty(),
@@ -184,6 +186,7 @@ class SettingsRepository(
         val SAVED_CAMERA_VIEWS = stringPreferencesKey("saved_camera_views")
         val REDUCED_MOTION = booleanPreferencesKey("reduced_motion")
         val HIGH_CONTRAST = booleanPreferencesKey("high_contrast")
+        val SUBTLE_ROUNDED_CORNERS = booleanPreferencesKey("subtle_rounded_corners")
         val FAVORITE_CAMERA_NAMES = stringPreferencesKey("favorite_camera_names")
         val HIDDEN_HOME_CAMERA_NAMES = stringSetPreferencesKey("hidden_home_camera_names")
         val FAVORITE_VIEW_IDS = stringPreferencesKey("favorite_view_ids")

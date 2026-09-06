@@ -196,6 +196,18 @@ class FrigateRepository(
         item: ReviewItem,
     ): ReviewItem = reviewRepository.enrich(profile, allowedCameras, item)
 
+    suspend fun recognizedLicensePlates(
+        profile: ConnectionProfile,
+        allowedCameras: Set<String>,
+        camera: String,
+        detectionIds: Set<String>,
+    ): Set<String> = reviewRepository.recognizedLicensePlates(
+        profile = profile,
+        allowedCameras = allowedCameras,
+        camera = camera,
+        detectionIds = detectionIds,
+    )
+
     suspend fun loadRecordingHistory(
         profile: ConnectionProfile,
         allowedCameras: Set<String>,

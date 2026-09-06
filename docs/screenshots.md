@@ -6,9 +6,13 @@ private address appears in the gallery.
 
 ## Start and connection states
 
-| Connecting | Recoverable connection failure |
+| Connecting | Connection setup |
 | --- | --- |
-| <img src="screenshots/01-connecting.png" alt="Opah connecting screen" width="720"> | <img src="screenshots/03-connection-recovery.png" alt="Opah recoverable connection failure screen" width="720"> |
+| <img src="screenshots/01-connecting.png" alt="Opah connecting screen" width="720"> | <img src="screenshots/02-connection-setup.png" alt="Opah first connection screen" width="720"> |
+
+| Recoverable connection failure |
+| --- |
+| <img src="screenshots/03-connection-recovery.png" alt="Opah recoverable connection failure screen" width="720"> |
 
 ## Home and navigation
 
@@ -18,9 +22,9 @@ private address appears in the gallery.
 
 ## Cameras and live views
 
-| Camera catalog | Birdseye playback |
+| Create a camera view | Birdseye playback |
 | --- | --- |
-| <img src="screenshots/06-cameras.png" alt="Opah Cameras page with camera groups and fictional camera previews" width="720"> | <img src="screenshots/07-birdseye.png" alt="Opah full-screen Birdseye playback with an example four-camera view" width="720"> |
+| <img src="screenshots/06-cameras.png" alt="Opah camera-view chooser with four fictional cameras" width="720"> | <img src="screenshots/07-birdseye.png" alt="Opah full-screen Birdseye playback with an example four-camera view" width="720"> |
 
 | Four-camera view | Camera controls |
 | --- | --- |
@@ -28,9 +32,9 @@ private address appears in the gallery.
 
 ## Activity
 
-| Recent activity |
-| --- |
-| <img src="screenshots/08-review.png" alt="Opah recent activity with example alerts and Reviewed labels" width="720"> |
+| New activity | Selected activity |
+| --- | --- |
+| <img src="screenshots/08-review.png" alt="Opah New activity page with two fictional alerts" width="720"> | <img src="screenshots/09-review-detail.png" alt="Opah activity details with the Play recording action focused" width="720"> |
 
 | History | Search |
 | --- | --- |
@@ -38,9 +42,9 @@ private address appears in the gallery.
 
 ## Clips
 
-| Clips |
-| --- |
-| <img src="screenshots/22-saved-recordings.png" alt="Opah Clips page with fictional recording previews" width="720"> |
+| Saved recordings | Incidents |
+| --- | --- |
+| <img src="screenshots/22-saved-recordings.png" alt="Opah Clips page with fictional recording previews" width="720"> | <img src="screenshots/23-incidents.png" alt="Opah Incidents page grouping two fictional recordings" width="720"> |
 
 ## Playback
 
@@ -52,11 +56,11 @@ private address appears in the gallery.
 | --- |
 | <img src="screenshots/17-picture-in-picture.png" alt="Opah live camera in Android TV picture-in-picture mode over a neutral documentation backdrop" width="720"> |
 
-## System
+## Server
 
-| Performance |
-| --- |
-| <img src="screenshots/12-information-performance.png" alt="Opah System performance tab with example Frigate values" width="720"> |
+| Performance | Storage |
+| --- | --- |
+| <img src="screenshots/12-information-performance.png" alt="Opah Server performance tab with fictional Frigate values" width="720"> | <img src="screenshots/13-information-storage.png" alt="Opah Server storage dashboard with fictional usage values" width="720"> |
 
 ## Settings and updates
 
@@ -64,9 +68,9 @@ private address appears in the gallery.
 | --- | --- |
 | <img src="screenshots/14-settings.png" alt="Opah Settings page" width="720"> | <img src="screenshots/25-update.png" alt="Opah Update page with installed and available version information" width="720"> |
 
-| Custom color example | Diagnostics |
+| Custom color example | Device information |
 | --- | --- |
-| <img src="screenshots/15-custom-theme.png" alt="Opah Settings page using a custom television color" width="720"> | <img src="screenshots/16-diagnostics.png" alt="Opah Diagnostics page with fictional compatibility data" width="720"> |
+| <img src="screenshots/15-custom-theme.png" alt="Opah Appearance page using a custom television color" width="720"> | <img src="screenshots/16-diagnostics.png" alt="Opah Device Info page with fictional decoder data" width="720"> |
 
 ## About
 

@@ -1,4 +1,40 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Opah</string>
+    <string name="native_frigate_connection">Frigate connection</string>
+    <string name="native_connection_privacy_help">Enter the address used to open Frigate • server details stay on this TV</string>
+    <string name="native_playback_starting">Starting video</string>
+    <string name="native_playback_start_failed">Video could not be started</string>
+    <string name="native_live_start_failed">Live video could not start</string>
+    <string name="native_playback_loading">Loading video</string>
+    <string name="native_playback_finished">Playback finished</string>
+    <string name="native_playback_failed">Video could not be played</string>
+    <string name="native_documentation_playback_progress" translatable="false">0:08 / 0:24</string>
+    <string name="native_picture_in_picture_unavailable">Picture-in-picture is unavailable</string>
+    <string name="native_live_video_route">Live video address</string>
+    <string name="native_live_video_route_help">Live video normally uses the Frigate address • change this only when your network requires another host or RTSP port</string>
+    <string name="native_separate_live_video_help">Use this only when live video must reach a different host or port than the Frigate address above</string>
+    <string name="native_default_rtsp_port" translatable="false">8554</string>
+    <string name="native_time_picker_selected_time">%1$d:%2$02d %3$s</string>
+    <string name="native_time_picker_hour">Hour     %1$d     ‹  ›</string>
+    <string name="native_time_picker_minute">Minute     %1$02d     ‹  ›</string>
+    <string name="native_time_picker_time_of_day">Time of day     %1$s     ‹  ›</string>
+    <string name="native_time_picker_help">Choose a row, then use left or right to make an exact change</string>
+    <string name="native_reading_help">Use up and down to read • Select moves forward</string>
+    <string name="native_pin_length_help">Use 4 to 8 numbers</string>
+    <string name="native_activity_title">Activity</string>
+    <string name="native_motion_choose_camera">1  Choose a camera</string>
+    <string name="native_motion_choose_area">2  Choose an area on the picture</string>
+    <string name="native_motion_selected_area">Selected: %1$s</string>
+    <string name="native_motion_find">Find motion</string>
+    <string name="native_motion_cancel_search">Cancel search</string>
+    <string name="native_motion_results_title">Motion found</string>
+    <plurals name="native_motion_results_count">
+        <item quantity="one">Motion found  %1$d</item>
+        <item quantity="other">Motion found  %1$d</item>
+    </plurals>
+    <plurals name="native_camera_selection_count">
+        <item quantity="one">Choose two to four cameras • %1$d selected</item>
+        <item quantity="other">Choose two to four cameras • %1$d selected</item>
+    </plurals>
 </resources>

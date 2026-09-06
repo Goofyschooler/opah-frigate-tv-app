@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<app.opah.tv.ui.views.NativeThemePreviewView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/native_theme_preview"
+    android:layout_width="match_parent"
+    android:layout_height="150dp"
+    android:layout_marginStart="12dp"
+    android:layout_marginTop="4dp"
+    android:layout_marginEnd="2dp"
+    android:layout_marginBottom="10dp" />

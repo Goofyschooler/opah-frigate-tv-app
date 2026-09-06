@@ -2,6 +2,56 @@
 
 This page lists the user-visible changes in each Opah release.
 
+## 0.5.0 - Unreleased
+
+### A clearer television interface
+
+- Use a rebuilt Android TV interface with compact navigation, consistent focus
+  outlines, and layouts that make better use of the screen.
+- See new and reviewed Activity separately, use visual search controls, and
+  read recorded-video dates directly in the player.
+- Use visual Appearance, Server Performance, and Server Storage dashboards
+  instead of long text-only settings lists.
+- Set up the normal Frigate address first and reveal a separate live-video
+  address only when the network needs it.
+
+### Calm awareness
+
+- Receive optional native TV alerts for important Frigate activity while
+  another TV app is open.
+- Choose important activity, custom filters, cameras, schedules, Frigate Modes,
+  notification detail, and snooze options.
+- See when Android permission or channel settings are blocking alerts and send
+  a local test alert without waiting for camera activity.
+
+### Shared-TV privacy
+
+- Protect Activity, History, Search, Clips, Incidents, Settings, and selected
+  actions with a local PIN.
+- Mark selected cameras as private and include them in the local PIN protection.
+- Lock or unlock each protected area independently without changing the
+  Frigate account or its permissions.
+
+### Monitor and briefing
+
+- Start Monitor Mode from a saved View or Frigate camera group and let Opah
+  bring one important active camera forward.
+- Choose Fixed, Calm, Active, or Patrol behavior, optional audio, a timer, and
+  whether the TV should stay awake.
+- See a factual Home briefing when activity happened since you last watched.
+- Play a bounded highlight sequence, open the new items as a Review queue, or
+  dismiss only the items currently shown.
+
+### More reliable playback
+
+- Let Opah test valid stream, transport, audio, and decoder choices and remember
+  what works for each camera and TV.
+- Run **Check camera compatibility** from Cameras and Playback settings and
+  reset remembered choices when troubleshooting.
+
+Opah remains compatible with Frigate 0.17.2. Frigate 0.18 is the primary API
+generation for features that need newer Review, Mode, and activity metadata.
+
 ## 0.4.0 - 2026-08-25
 
 ### A new living-room design

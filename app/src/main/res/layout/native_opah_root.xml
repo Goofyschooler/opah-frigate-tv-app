@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<app.opah.tv.ui.views.NativeRootLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/native_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clipChildren="false"
+    android:clipToPadding="false">
+
+    <FrameLayout
+        android:id="@+id/native_content_host"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginStart="68dp"
+        android:paddingStart="16dp"
+        android:paddingTop="16dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="16dp" />
+
+    <LinearLayout
+        android:id="@+id/native_nav_rail"
+        android:layout_width="56dp"
+        android:layout_height="match_parent"
+        android:background="@drawable/native_nav_background"
+        android:descendantFocusability="blocksDescendants"
+        android:elevation="12dp"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:paddingStart="5dp"
+        android:paddingTop="14dp"
+        android:paddingEnd="5dp"
+        android:paddingBottom="14dp">
+
+        <ImageView
+            android:id="@+id/native_brand_mark"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:contentDescription="@string/app_name"
+            android:importantForAccessibility="no"
+            android:scaleType="centerInside"
+            android:src="@drawable/opah_brand_mark" />
+
+        <LinearLayout
+            android:id="@+id/native_nav_items"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="10dp"
+            android:layout_weight="1"
+            android:gravity="center_horizontal"
+            android:orientation="vertical" />
+    </LinearLayout>
+</app.opah.tv.ui.views.NativeRootLayout>

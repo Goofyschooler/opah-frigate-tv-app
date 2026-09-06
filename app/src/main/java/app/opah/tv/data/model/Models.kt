@@ -97,6 +97,34 @@ data class ReviewItem(
     val subLabels: List<String> = emptyList(),
     val summary: ReviewSummaryMetadata? = null,
     val linkedEvents: List<SearchEvent> = emptyList(),
+    val rawSeverity: String? = null,
+    val significantMotionAreas: List<Int> = emptyList(),
+)
+
+/** A Review snapshot carried by Frigate's real-time channel, before REST reconciliation. */
+data class RealtimeReviewItem(
+    val id: String,
+    val camera: String,
+    val startTime: Double,
+    val endTime: Double?,
+    val severity: ReviewSeverity,
+    val rawSeverity: String?,
+    val thumbnailPath: String?,
+    val objects: Set<String> = emptySet(),
+    val zones: Set<String> = emptySet(),
+    val audio: Set<String> = emptySet(),
+    val detectionIds: Set<String> = emptySet(),
+    val subLabels: Set<String> = emptySet(),
+    val significantMotionAreas: Set<Int> = emptySet(),
+    val summary: ReviewSummaryMetadata? = null,
+    val hasBeenReviewed: Boolean? = null,
+)
+
+data class RealtimeReviewUpdate(
+    val lifecycle: ReviewLifecycle,
+    val rawLifecycle: String?,
+    val before: RealtimeReviewItem?,
+    val after: RealtimeReviewItem,
 )
 
 data class ReviewSummaryMetadata(
@@ -212,6 +240,15 @@ data class RecordingExportStart(
 enum class ReviewSeverity {
     ALERT,
     DETECTION,
+    SIGNIFICANT_MOTION,
+    UNKNOWN,
+}
+
+enum class ReviewLifecycle {
+    NEW,
+    UPDATE,
+    END,
+    GENAI,
     UNKNOWN,
 }
 
@@ -362,6 +399,7 @@ data class ServerVersionInfo(
     val prerelease: String? = null,
     val apiGeneration: FrigateApiGeneration = FrigateApiGeneration.UNKNOWN,
     val validatedContract: Boolean = compatibility == ServerVersionCompatibility.SUPPORTED,
+    val latestTestedBuild: String? = null,
 )
 
 enum class StreamPreference {
@@ -387,6 +425,7 @@ data class AppSettings(
     val savedCameraViews: List<SavedCameraView> = emptyList(),
     val reducedMotion: Boolean = false,
     val highContrast: Boolean = false,
+    val subtleRoundedCorners: Boolean = false,
     val favoriteCameraNames: List<String> = emptyList(),
     val hiddenHomeCameraNames: Set<String> = emptySet(),
     val favoriteViewIds: List<String> = emptyList(),

@@ -129,7 +129,10 @@ class FrigateApiClient(
         val severity = when (query.severity) {
             ReviewSeverity.ALERT -> "alert"
             ReviewSeverity.DETECTION -> "detection"
-            ReviewSeverity.UNKNOWN, null -> null
+            ReviewSeverity.SIGNIFICANT_MOTION,
+            ReviewSeverity.UNKNOWN,
+            null,
+            -> null
         }
         severity?.let { builder.addQueryParameter("severity", it) }
         query.label?.takeIf(String::isNotBlank)?.let { builder.addQueryParameter("labels", it) }

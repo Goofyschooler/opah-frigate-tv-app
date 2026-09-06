@@ -60,6 +60,7 @@ import app.opah.tv.data.model.ReviewItem
 import app.opah.tv.data.model.StartupTarget
 import app.opah.tv.data.model.StartupTargetKind
 import app.opah.tv.playback.PlaybackKind
+import app.opah.tv.privacy.PinScope
 
 private class HomeFocusMemory(initialKey: String? = null) {
     var key: String? = initialKey
@@ -93,10 +94,13 @@ internal fun navigationAccessibilityLabel(
     destination: AppDestination,
     updateAvailable: Boolean,
     unreviewedAlertCount: Int = 0,
+    activityCountLoading: Boolean = false,
 ): String = when {
     destination == AppDestination.SETTINGS && updateAvailable -> "Settings, update available"
+    destination == AppDestination.ACTIVITY && activityCountLoading ->
+        "Activity, checking for unreviewed alerts"
     destination == AppDestination.ACTIVITY && unreviewedAlertCount > 0 ->
-        "Activity, $unreviewedAlertCount new alerts in the last 24 hours"
+        "Activity, $unreviewedAlertCount unreviewed alerts in the last 24 hours"
     else -> destination.label
 }
 
@@ -106,7 +110,7 @@ internal fun compactAlertCount(count: Int): String? = when {
     else -> count.toString()
 }
 
-internal enum class RootSurface { PLAYBACK, CAMERA_GROUP, CONNECTED, LOADING, RECOVERY, SETUP }
+internal enum class RootSurface { PLAYBACK, MONITOR, CAMERA_GROUP, CONNECTED, LOADING, RECOVERY, SETUP }
 
 internal data class CameraNeighbors(
     val previous: Camera?,
@@ -162,8 +166,10 @@ internal fun rootSurface(
     connectionWorkInProgress: Boolean = false,
     savedSessionRecoveryAvailable: Boolean = false,
     hasCameraGroupView: Boolean = false,
+    hasMonitorMode: Boolean = false,
 ): RootSurface = when {
     hasPlayback -> RootSurface.PLAYBACK
+    hasMonitorMode -> RootSurface.MONITOR
     hasCameraGroupView -> RootSurface.CAMERA_GROUP
     hasConnectedContent -> RootSurface.CONNECTED
     connectionWorkInProgress -> RootSurface.SETUP
@@ -183,13 +189,18 @@ fun OpahApp(
     onInstallUpdate: (String) -> Unit = {},
     onShareSnapshot: (Bitmap, String) -> Boolean = { _, _ -> false },
     onShareClip: (app.opah.tv.data.model.RecordingExport) -> Unit = {},
+    onEnableTvAlerts: () -> Unit = {},
+    onTestTvAlert: (Boolean) -> Unit = {},
+    onOpenNotificationSettings: () -> Unit = {},
+    onOpenOverlaySettings: () -> Unit = {},
     initialDestinationName: String? = null,
     initialSettingsPageName: String? = null,
     initialInformationTabName: String? = null,
     initialActivityPageName: String? = null,
     initialClipsPageName: String? = null,
 ) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
+    val unprojectedState by viewModel.state.collectAsStateWithLifecycle()
+    val state = unprojectedState.projectForPrivacy()
     OpahTheme(
         state.settings.appearanceMode,
         state.settings.customThemeColors,
@@ -214,6 +225,9 @@ fun OpahApp(
         var restoreFocusKey by rememberSaveable { mutableStateOf<String?>(null) }
         var playbackReturnFocusKey by rememberSaveable { mutableStateOf<String?>(null) }
         var cameraGroupOriginFocusKey by rememberSaveable { mutableStateOf<String?>(null) }
+        var cameraGroupOriginDestinationName by rememberSaveable {
+            mutableStateOf(AppDestination.HOME.name)
+        }
         val normalizedInitialActivityPage = initialActivityPageName
             ?.let { runCatching { ActivityPage.valueOf(it).name }.getOrNull() }
             ?: ActivityPage.RECENT.name
@@ -245,7 +259,26 @@ fun OpahApp(
             connectionWorkInProgress = state.connectionWorkInProgress,
             savedSessionRecoveryAvailable = state.savedSessionRecoveryAvailable,
             hasCameraGroupView = state.cameraGroupView != null,
+            hasMonitorMode = state.monitorMode != null,
         )
+
+        LaunchedEffect(state.tvAlertNavigation?.requestId) {
+            val request = state.tvAlertNavigation ?: return@LaunchedEffect
+            when (request.destination) {
+                TvAlertNavigationDestination.ACTIVITY -> {
+                    destinationName = AppDestination.ACTIVITY.name
+                    activityPageName = ActivityPage.RECENT.name
+                    activityBackDestinationName = AppDestination.HOME.name
+                    activityBackFocusKey = null
+                }
+                TvAlertNavigationDestination.TV_ALERT_SETTINGS -> {
+                    destinationName = AppDestination.SETTINGS.name
+                    settingsPageName = SettingsPage.TV_ALERTS.name
+                    settingsReturnPageName = SettingsPage.TV_ALERTS.name
+                }
+            }
+            viewModel.consumeTvAlertNavigation(request.requestId)
+        }
 
         LaunchedEffect(
             surface,
@@ -260,7 +293,10 @@ fun OpahApp(
                 configuredStartupApplied = true
                 return@LaunchedEffect
             }
-            if (surface == RootSurface.PLAYBACK || surface == RootSurface.CAMERA_GROUP) {
+            if (surface == RootSurface.PLAYBACK ||
+                surface == RootSurface.CAMERA_GROUP ||
+                surface == RootSurface.MONITOR
+            ) {
                 // A deep link or camera shortcut already won launch precedence.
                 configuredStartupApplied = true
                 return@LaunchedEffect
@@ -293,6 +329,7 @@ fun OpahApp(
             if (
                 surface == RootSurface.CONNECTED ||
                 surface == RootSurface.CAMERA_GROUP ||
+                surface == RootSurface.MONITOR ||
                 surface == RootSurface.SETUP
             ) {
                 withFrameNanos { }
@@ -331,7 +368,8 @@ fun OpahApp(
                 val activityItems = (
                     listOfNotNull(state.review.playbackItem) +
                         state.review.items +
-                        state.snapshot?.recentReviewItems.orEmpty()
+                        state.snapshot?.recentReviewItems.orEmpty() +
+                        state.briefing.summary?.entries.orEmpty().map { it.item }
                     ).distinctBy(app.opah.tv.data.model.ReviewItem::id)
                 val activityItem = playbackRequest.activityItemId?.let { activityId ->
                     activityItems.firstOrNull { it.id == activityId }
@@ -347,6 +385,17 @@ fun OpahApp(
                     queueContext = playbackRequest.activityQueueContext,
                     loading = state.review.advancingPlayback,
                 )
+                val activityQueuePosition = playbackRequest.activityItemId?.let {
+                    playbackRequest.activityContextItemIds.indexOf(it).takeIf { index -> index >= 0 }
+                }
+                val activityQueueProgress = activityQueuePosition?.let { index ->
+                    val total = playbackRequest.activityContextItemIds.size
+                    if (playbackRequest.briefingHighlight) {
+                        "Highlight ${index + 1} of $total • ${total - index - 1} remaining"
+                    } else {
+                        "Activity ${index + 1} of $total"
+                    }
+                }
                 val historySaveKey = playbackRequest.recordingSaveKey
                 PlaybackScreen(
                     request = playbackRequest,
@@ -410,9 +459,9 @@ fun OpahApp(
                             }
                         },
                     liveActionMessage = state.liveActions.errorMessage ?: state.liveActions.message,
-                    onPlaybackCompleted = activityItem
-                        ?.takeIf { !it.hasBeenReviewed && state.settings.autoMarkReviewedAfterPlayback }
-                        ?.let { item -> { viewModel.setReviewReviewed(item, true) } },
+                    onPlaybackCompleted = activityItem?.let { item ->
+                        { viewModel.onReviewPlaybackCompleted(item) }
+                    },
                     activityReviewed = activityItem?.hasBeenReviewed,
                     markingActivityReviewed = activityItem != null &&
                         state.review.markingReviewedItemId == activityItem.id,
@@ -449,12 +498,22 @@ fun OpahApp(
                         historySaveKey != null -> state.history.savedMessage
                         else -> null
                     },
+                    activityQueueProgress = activityQueueProgress,
+                    onCompatibilityTestStatus = viewModel::reportPlaybackCompatibilityStatus,
                     onSaveActivityRecording = when {
                         activityItem != null -> { { viewModel.saveReviewClip(activityItem) } }
                         historySaveKey != null -> { { viewModel.saveHistoryClip(playbackRequest) } }
                         else -> null
                     },
-                    nextActivityLabel = nextActivityControl?.label,
+                    nextActivityLabel = nextActivityControl?.label?.let { label ->
+                        if (playbackRequest.briefingHighlight && label == "Next activity") {
+                            val remaining = playbackRequest.activityContextItemIds.size -
+                                (activityQueuePosition ?: 0) - 1
+                            "Next highlight ($remaining remaining)"
+                        } else {
+                            label
+                        }
+                    },
                     nextActivityEnabled = nextActivityControl?.enabled == true,
                     onNextActivity = nextActivityControl?.let { viewModel::playNextReviewActivity },
                 )
@@ -468,10 +527,12 @@ fun OpahApp(
                     pictureInPictureAvailable = pictureInPictureAvailable,
                     pictureInPictureActive = pictureInPictureActive,
                     onEnterPictureInPicture = onEnterPictureInPicture,
+                    onStartMonitor = viewModel::startMonitorMode,
                     onBack = {
-                        destinationName = AppDestination.CAMERAS.name
+                        destinationName = cameraGroupOriginDestinationName
                         restoreFocusKey = cameraGroupOriginFocusKey
                         cameraGroupOriginFocusKey = null
+                        cameraGroupOriginDestinationName = AppDestination.HOME.name
                         viewModel.closeCameraGroup()
                     },
                     cachedBitmap = { camera -> viewModel.cachedCameraImage(camera)?.bitmap },
@@ -481,15 +542,37 @@ fun OpahApp(
                 )
             }
 
+            RootSurface.MONITOR -> {
+                val monitor = requireNotNull(state.monitorMode)
+                MonitorModeScreen(
+                    state = monitor,
+                    onPreset = viewModel::setMonitorPreset,
+                    onManualCamera = viewModel::selectMonitorCamera,
+                    onPlaybackReady = viewModel::monitorPlaybackReady,
+                    onPlaybackFailed = viewModel::monitorPlaybackFailed,
+                    onKeepScreenAwake = viewModel::setMonitorKeepScreenAwake,
+                    onAudioEnabled = viewModel::setMonitorAudioEnabled,
+                    onExitMinutes = viewModel::setMonitorExitMinutes,
+                    onBack = viewModel::closeMonitorMode,
+                    cachedBitmap = { camera -> viewModel.cachedCameraImage(camera)?.bitmap },
+                    refreshBitmap = { camera, height ->
+                        viewModel.refreshCameraImage(camera, height).getOrNull()?.bitmap
+                    },
+                )
+            }
+
             RootSurface.CONNECTED -> {
                 BackHandler(
-                    enabled = state.ptz.cameraName != null ||
+                    enabled = state.tvAlertPrivacyGateOpen ||
+                        state.ptz.cameraName != null ||
                         destination != AppDestination.HOME ||
                         state.review.selectedItemId != null ||
                         state.exports.selectedItemId != null ||
                         settingsPage != SettingsPage.MAIN,
                 ) {
-                    if (state.ptz.cameraName != null) {
+                    if (state.tvAlertPrivacyGateOpen) {
+                        viewModel.cancelTvAlertPrivacyGate()
+                    } else if (state.ptz.cameraName != null) {
                         viewModel.closePtzControls()
                     } else if (destination == AppDestination.ACTIVITY && state.review.selectedItemId != null) {
                         if (state.review.queueActive) viewModel.endReviewQueue() else viewModel.closeReviewItem()
@@ -517,7 +600,9 @@ fun OpahApp(
                     destination = destination,
                     updateAvailable = state.appUpdate.updateAvailable,
                     unreviewedAlertCount = state.review.counts.unreviewedAlerts,
+                    activityCountLoading = state.review.countsLoading,
                     onDestination = {
+                        if (state.tvAlertPrivacyGateOpen) viewModel.cancelTvAlertPrivacyGate()
                         destinationName = it.name
                         if (it == AppDestination.ACTIVITY) {
                             activityBackDestinationName = AppDestination.HOME.name
@@ -554,6 +639,16 @@ fun OpahApp(
                                 Button(onClick = viewModel::clearError) { Text("Dismiss") }
                             }
                         }
+                        if (state.tvAlertPrivacyGateOpen) {
+                            PrivacyPinGateScreen(
+                                pinConfigured = state.privacy.pinConfigured,
+                                busy = state.privacy.busy,
+                                message = state.privacy.errorMessage,
+                                protectedContentLabel = "this alert",
+                                onSubmit = { pin -> viewModel.unlockTvAlert(pin) },
+                                onBack = viewModel::cancelTvAlertPrivacyGate,
+                            )
+                        } else {
                         when (destination) {
                             AppDestination.HOME -> HomeScreen(
                                 state = state,
@@ -567,6 +662,25 @@ fun OpahApp(
                                     activityBackDestinationName = AppDestination.HOME.name
                                     activityBackFocusKey = lastHomeFocus.key
                                 },
+                                onPlayBriefing = {
+                                    playbackReturnFocusKey = state.snapshot?.cameras?.firstOrNull()
+                                        ?.let { camera -> "home:camera:${camera.name}" }
+                                    returnDestinationName = AppDestination.HOME.name
+                                    viewModel.playBriefingHighlights()
+                                },
+                                onReviewBriefing = {
+                                    viewModel.openBriefingReviewQueue()
+                                    destinationName = AppDestination.ACTIVITY.name
+                                    activityPageName = ActivityPage.RECENT.name
+                                    activityBackDestinationName = AppDestination.HOME.name
+                                    activityBackFocusKey = state.snapshot?.cameras?.firstOrNull()
+                                        ?.let { camera -> "home:camera:${camera.name}" }
+                                },
+                                onDismissBriefing = viewModel::dismissBriefing,
+                                onOpenCameras = { key ->
+                                    lastHomeFocus.key = key
+                                    destinationName = AppDestination.CAMERAS.name
+                                },
                                 onOpenBirdseye = { key ->
                                     lastHomeFocus.key = key
                                     playbackReturnFocusKey = key
@@ -576,6 +690,7 @@ fun OpahApp(
                                 onOpenCameraGroup = { title, cameraNames, key ->
                                     lastHomeFocus.key = key
                                     cameraGroupOriginFocusKey = key
+                                    cameraGroupOriginDestinationName = AppDestination.HOME.name
                                     when {
                                         key.startsWith("home:view:saved:") -> viewModel.rememberLastViewedTarget(
                                             StartupTarget(
@@ -591,6 +706,11 @@ fun OpahApp(
                                         )
                                     }
                                     viewModel.openCameraGroup(title, cameraNames)
+                                },
+                                onStartMonitor = { title, cameraNames, key ->
+                                    lastHomeFocus.key = key
+                                    restoreFocusKey = key
+                                    viewModel.startMonitorModeForView(title, cameraNames)
                                 },
                                 onToggleFavoriteCamera = viewModel::toggleFavoriteCamera,
                                 onMoveFavoriteCamera = viewModel::moveFavoriteCamera,
@@ -643,7 +763,12 @@ fun OpahApp(
                                 onPtzCommand = viewModel::sendPtzCommand,
                                 onOpenCameraGroup = { title, cameraNames, focusKey ->
                                     cameraGroupOriginFocusKey = focusKey
+                                    cameraGroupOriginDestinationName = AppDestination.CAMERAS.name
                                     viewModel.openCameraGroup(title, cameraNames)
+                                },
+                                onStartMonitor = { title, cameraNames, focusKey ->
+                                    restoreFocusKey = focusKey
+                                    viewModel.startMonitorModeForView(title, cameraNames)
                                 },
                                 onSaveCameraView = viewModel::saveCameraView,
                                 onDeleteCameraView = viewModel::deleteCameraView,
@@ -805,10 +930,27 @@ fun OpahApp(
                                 },
                             )
 
-                            AppDestination.SETTINGS -> when (settingsPage) {
+                            AppDestination.SETTINGS -> when {
+                                state.privacy.pinConfigured &&
+                                    PinScope.SETTINGS in state.privacy.protectedScopes &&
+                                    PinScope.SETTINGS !in state.privacy.unlockedScopes -> PrivacyPinGateScreen(
+                                        pinConfigured = true,
+                                        busy = state.privacy.busy,
+                                        message = state.privacy.errorMessage,
+                                        initialFocusRequester = settingsDetailFocusRequester,
+                                        onSubmit = viewModel::unlockPrivacy,
+                                        onBack = {
+                                            destinationName = AppDestination.HOME.name
+                                            settingsPageName = SettingsPage.MAIN.name
+                                        },
+                                    )
+
+                                else -> when (settingsPage) {
                                 SettingsPage.MAIN -> SettingsHubScreen(
                                     update = state.appUpdate,
                                     settings = state.settings,
+                                    privacy = state.privacy,
+                                    tvAlerts = state.tvAlerts,
                                     restorePage = settingsReturnPageName?.let { name ->
                                         runCatching { SettingsPage.valueOf(name) }.getOrNull()
                                     },
@@ -854,8 +996,102 @@ fun OpahApp(
                                     onStartMuted = viewModel::updateStartLiveMuted,
                                     onPlaybackDetails = viewModel::updateDiagnosticsEnabled,
                                     onAutoMarkReviewed = viewModel::updateAutoMarkReviewedAfterPlayback,
+                                    onTestCamera = {
+                                        settingsPageName = SettingsPage.PLAYBACK_TEST.name
+                                    },
+                                    onDiagnosticData = {
+                                        settingsPageName = SettingsPage.CAMERA_DIAGNOSTICS.name
+                                    },
                                     onBack = {
                                         settingsReturnPageName = SettingsPage.PLAYBACK.name
+                                        settingsPageName = SettingsPage.MAIN.name
+                                    },
+                                    initialFocusRequester = settingsDetailFocusRequester,
+                                )
+
+                                SettingsPage.PLAYBACK_TEST -> PlaybackTestCameraScreen(
+                                    state = state,
+                                    onTestCamera = { cameraName, mode ->
+                                        playbackReturnFocusKey =
+                                            "settings:playback-test:$cameraName"
+                                        returnDestinationName = AppDestination.SETTINGS.name
+                                        viewModel.testCameraPlayback(cameraName, mode)
+                                    },
+                                    onResetCamera = viewModel::resetCameraPlaybackCompatibility,
+                                    onLoadChoices = viewModel::loadCameraPlaybackCompatibilityChoices,
+                                    onBack = {
+                                        settingsPageName = SettingsPage.PLAYBACK.name
+                                    },
+                                    initialFocusRequester = settingsDetailFocusRequester,
+                                )
+
+                                SettingsPage.CAMERA_DIAGNOSTICS -> CameraDiagnosticDataScreen(
+                                    state = state,
+                                    onRefresh = viewModel::refresh,
+                                    onLoadPlaybackChoices =
+                                        viewModel::loadCameraPlaybackCompatibilityChoices,
+                                    onBack = {
+                                        settingsPageName = SettingsPage.PLAYBACK.name
+                                    },
+                                    initialFocusRequester = settingsDetailFocusRequester,
+                                )
+
+                                SettingsPage.TV_ALERTS -> TvAlertsSettingsScreen(
+                                    state = state,
+                                    onEnable = onEnableTvAlerts,
+                                    onDisable = viewModel::disableTvAlerts,
+                                    onMode = viewModel::setTvAlertMode,
+                                    onPrivacy = viewModel::setTvAlertPrivacy,
+                                    onSignificantMotion = viewModel::setTvAlertSignificantMotion,
+                                    onCustomSeverity = viewModel::setTvAlertCustomSeverity,
+                                    onAllCameras = viewModel::setTvAlertAllCameras,
+                                    onCamera = viewModel::setTvAlertCamera,
+                                    onAnyLabel = viewModel::clearTvAlertLabels,
+                                    onLabel = viewModel::setTvAlertLabel,
+                                    onAnyZone = viewModel::clearTvAlertZones,
+                                    onZone = viewModel::setTvAlertZone,
+                                    onAnyIdentity = viewModel::clearTvAlertIdentities,
+                                    onIdentity = viewModel::setTvAlertIdentity,
+                                    onAnyPlate = viewModel::clearTvAlertPlates,
+                                    onPlate = viewModel::setTvAlertPlate,
+                                    onSchedule = viewModel::setTvAlertSchedulePreset,
+                                    onScheduleWindow = viewModel::setTvAlertScheduleWindow,
+                                    onAnyMode = viewModel::clearTvAlertModes,
+                                    onModeFilter = viewModel::setTvAlertModeFilter,
+                                    onMinimumThreatLevel = viewModel::setTvAlertMinimumThreatLevel,
+                                    onSnooze = viewModel::snoozeTvAlerts,
+                                    onSnoozeUntilTomorrow = viewModel::snoozeTvAlertsUntilTomorrow,
+                                    onSnoozeUntilModeChanges = viewModel::snoozeTvAlertsUntilModeChanges,
+                                    onClearSnooze = viewModel::clearTvAlertSnoozes,
+                                    onTestAlert = onTestTvAlert,
+                                    onOverlayVerticalPosition =
+                                        viewModel::setTvAlertOverlayVerticalPosition,
+                                    onOverlayHorizontalPosition =
+                                        viewModel::setTvAlertOverlayHorizontalPosition,
+                                    onOverlayImageSize = viewModel::setTvAlertOverlayImageSize,
+                                    onOverlayDisplayDurationSeconds =
+                                        viewModel::setTvAlertOverlayDisplayDurationSeconds,
+                                    onOpenAndroidSettings = onOpenNotificationSettings,
+                                    onOpenOverlaySettings = onOpenOverlaySettings,
+                                    onLoadModes = viewModel::loadModes,
+                                    onRefreshDeliveryStatus = viewModel::refreshTvAlertDeliveryStatus,
+                                    onBack = {
+                                        settingsReturnPageName = SettingsPage.TV_ALERTS.name
+                                        settingsPageName = SettingsPage.MAIN.name
+                                    },
+                                    initialFocusRequester = settingsDetailFocusRequester,
+                                )
+
+                                SettingsPage.PRIVACY -> PrivacySettingsScreen(
+                                    state = state,
+                                    onSetupPin = viewModel::setupLocalPin,
+                                    onUnlockPinChoices = viewModel::unlockPrivacy,
+                                    onPinScope = viewModel::setPinScope,
+                                    onRemovePin = viewModel::removeLocalPin,
+                                    onCameraPrivate = viewModel::setCameraPrivate,
+                                    onLockNow = viewModel::lockPrivacyNow,
+                                    onBack = {
+                                        settingsReturnPageName = SettingsPage.PRIVACY.name
                                         settingsPageName = SettingsPage.MAIN.name
                                     },
                                     initialFocusRequester = settingsDetailFocusRequester,
@@ -871,8 +1107,10 @@ fun OpahApp(
                                     initialFocusRequester = settingsDetailFocusRequester,
                                 )
 
-                                SettingsPage.CONNECTION -> ConnectionSettingsScreen(
+                                SettingsPage.CONNECTION -> InformationScreen(
                                     state = state,
+                                    onLoad = { viewModel.loadInformation() },
+                                    onRefresh = { viewModel.loadInformation(force = true) },
                                     onUpdateLiveRoute = viewModel::updateRtspRoute,
                                     onSignOut = { viewModel.logout(false) },
                                     onForgetServer = { viewModel.logout(true) },
@@ -881,12 +1119,16 @@ fun OpahApp(
                                         settingsPageName = SettingsPage.MAIN.name
                                     },
                                     initialFocusRequester = settingsDetailFocusRequester,
+                                    initialTabName = InformationTab.CONNECTION.name,
                                 )
 
                                 SettingsPage.SYSTEM -> InformationScreen(
                                     state = state,
                                     onLoad = { viewModel.loadInformation() },
                                     onRefresh = { viewModel.loadInformation(force = true) },
+                                    onUpdateLiveRoute = viewModel::updateRtspRoute,
+                                    onSignOut = { viewModel.logout(false) },
+                                    onForgetServer = { viewModel.logout(true) },
                                     onBack = {
                                         settingsReturnPageName = SettingsPage.SYSTEM.name
                                         settingsPageName = SettingsPage.MAIN.name
@@ -906,13 +1148,16 @@ fun OpahApp(
                                 )
 
                                 SettingsPage.ABOUT -> AboutScreen(
+                                    connectedServerVersion = state.snapshot?.frigateVersion,
                                     onBack = {
                                         settingsReturnPageName = SettingsPage.ABOUT.name
                                         settingsPageName = SettingsPage.MAIN.name
                                     },
                                     initialFocusRequester = settingsDetailFocusRequester,
                                 )
+                                }
                             }
+                        }
                         }
                     }
                 }
@@ -945,6 +1190,7 @@ private fun ConnectedShell(
     destination: AppDestination,
     updateAvailable: Boolean,
     unreviewedAlertCount: Int,
+    activityCountLoading: Boolean,
     onDestination: (AppDestination) -> Unit,
     contentClaimsInitialFocus: Boolean,
     contentEntryFocusRequester: FocusRequester?,
@@ -1016,6 +1262,7 @@ private fun ConnectedShell(
             destination = rootDestination,
             updateAvailable = updateAvailable,
             unreviewedAlertCount = unreviewedAlertCount,
+            activityCountLoading = activityCountLoading,
             navRequesters = navRequesters,
             expansionState = railExpansionState,
             contentEntryFocusRequester = contentEntryFocusRequester,
@@ -1078,6 +1325,7 @@ private fun ConnectedNavigationRail(
     destination: AppDestination,
     updateAvailable: Boolean,
     unreviewedAlertCount: Int,
+    activityCountLoading: Boolean,
     navRequesters: Map<AppDestination, FocusRequester>,
     expansionState: NavigationRailExpansionState,
     contentEntryFocusRequester: FocusRequester?,
@@ -1136,6 +1384,7 @@ private fun ConnectedNavigationRail(
                     item,
                     updateAvailable,
                     unreviewedAlertCount,
+                    activityCountLoading,
                 ),
                 onClick = { onSelect(item) },
                 externalFocusRequester = navRequesters.getValue(item),
@@ -1166,6 +1415,7 @@ private fun ConnectedNavigationRail(
                     destination,
                     updateAvailable,
                     unreviewedAlertCount,
+                    activityCountLoading,
                     expanded,
                 )
             }
@@ -1180,6 +1430,7 @@ private fun NavigationRailItemContent(
     destination: AppDestination,
     updateAvailable: Boolean,
     unreviewedAlertCount: Int,
+    activityCountLoading: Boolean,
     expanded: Boolean,
 ) {
     val iconTint = if (item == destination) {
@@ -1218,7 +1469,8 @@ private fun NavigationRailItemContent(
                 )
             }
             if (item == AppDestination.ACTIVITY) {
-                compactAlertCount(unreviewedAlertCount)?.let { count ->
+                val countLabel = if (activityCountLoading) "…" else compactAlertCount(unreviewedAlertCount)
+                countLabel?.let { count ->
                     Text(
                         text = count,
                         maxLines = 1,
@@ -1241,9 +1493,16 @@ private fun NavigationRailItemContent(
                     },
                     fontWeight = if (item == destination) FontWeight.Bold else FontWeight.Normal,
                 )
-                if (item == AppDestination.ACTIVITY && unreviewedAlertCount > 0) {
+                if (item == AppDestination.ACTIVITY && activityCountLoading) {
                     Text(
-                        text = "$unreviewedAlertCount new alerts",
+                        text = "Checking alerts",
+                        maxLines = 1,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else if (item == AppDestination.ACTIVITY && unreviewedAlertCount > 0) {
+                    Text(
+                        text = "$unreviewedAlertCount unreviewed alerts",
                         maxLines = 1,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall,

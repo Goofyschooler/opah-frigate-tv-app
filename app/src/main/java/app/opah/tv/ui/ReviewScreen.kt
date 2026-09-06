@@ -133,6 +133,7 @@ internal fun ReviewScreen(
     if (selected != null) {
         ReviewDetail(
             item = selected,
+            imageRevision = state.privacy.epoch,
             recordingState = review.recordingState,
             errorMessage = review.detailErrorMessage,
             onPlay = { onPlayItem(selected) },
@@ -182,7 +183,7 @@ internal fun ReviewScreen(
                 Column {
                     Text("Activity", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "Find alerts and other recorded activity",
+                        "Alerts are important activity; Everything also includes other detections",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -230,7 +231,7 @@ internal fun ReviewScreen(
                     },
                 )
                 ReviewCategoryButton(
-                    label = "All activity",
+                    label = "Everything",
                     selected = review.filters.severity == null,
                     onClick = { onSeverity(null) },
                     externalFocusRequester = allActivityFocusRequester,
@@ -271,11 +272,11 @@ internal fun ReviewScreen(
                 }
             }
             Text(
-                review.filters.summary(state.snapshot?.cameras.orEmpty()).let { summary ->
+                review.filters.countSummary(review.counts).let { summary ->
                     if (review.filters.activeDetailCount() == 0 && !review.countsLoading) {
-                        "$summary • ${review.counts.unreviewedFor(review.filters.severity)} new"
-                    } else {
                         summary
+                    } else {
+                        review.filters.summary(state.snapshot?.cameras.orEmpty())
                     }
                 },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -335,6 +336,7 @@ internal fun ReviewScreen(
 
             else -> ReviewGrid(
                 items = review.items,
+                imageRevision = state.privacy.epoch,
                 restoreFocusKey = restoreFocusKey,
                 onFocusRestored = onFocusRestored,
                 onSelectItem = onSelectItem,
@@ -441,6 +443,7 @@ private fun ReviewCategoryButton(
 @Composable
 private fun ReviewGrid(
     items: List<ReviewItem>,
+    imageRevision: Long,
     restoreFocusKey: String?,
     onFocusRestored: () -> Unit,
     onSelectItem: (ReviewItem, String) -> Unit,
@@ -487,6 +490,7 @@ private fun ReviewGrid(
                     ) {
                         ReviewThumbnail(
                             item = item,
+                            imageRevision = imageRevision,
                             cachedBitmap = { cachedBitmap(item) },
                             refreshBitmap = { refreshBitmap(item, 300) },
                             modifier = Modifier.fillMaxSize(),
@@ -568,6 +572,7 @@ private fun ReviewGrid(
 @Composable
 private fun ReviewDetail(
     item: ReviewItem,
+    imageRevision: Long,
     recordingState: ReviewRecordingState,
     errorMessage: String?,
     onPlay: () -> Unit,
@@ -660,6 +665,7 @@ private fun ReviewDetail(
         ) {
             ReviewThumbnail(
                 item = item,
+                imageRevision = imageRevision,
                 cachedBitmap = cachedBitmap,
                 refreshBitmap = refreshBitmap,
                 modifier = Modifier
@@ -910,17 +916,20 @@ private fun ReviewDetailFacts(facts: List<Pair<String, String>>) {
 @Composable
 internal fun ReviewThumbnail(
     item: ReviewItem,
+    imageRevision: Long,
     cachedBitmap: () -> Bitmap?,
     refreshBitmap: suspend () -> Bitmap?,
     modifier: Modifier = Modifier,
 ) {
-    var bitmap by remember(item.id, item.thumbnailPath) { mutableStateOf(cachedBitmap()) }
-    var unavailable by remember(item.id, item.thumbnailPath) { mutableStateOf(item.thumbnailPath == null) }
-    LaunchedEffect(item.id, item.thumbnailPath) {
-        if (item.thumbnailPath != null) {
-            val loaded = refreshBitmap()
-            if (loaded == null) unavailable = true else bitmap = loaded
-        }
+    var bitmap by remember(item.id, item.thumbnailPath, imageRevision) {
+        mutableStateOf(cachedBitmap())
+    }
+    var unavailable by remember(item.id, item.thumbnailPath, imageRevision) {
+        mutableStateOf(false)
+    }
+    LaunchedEffect(item.id, item.thumbnailPath, imageRevision) {
+        val loaded = refreshBitmap()
+        if (loaded == null) unavailable = true else bitmap = loaded
     }
     Box(
         modifier = modifier
@@ -1126,6 +1135,7 @@ private fun ReviewPicker.title(): String = when (this) {
 private fun ReviewSeverity.displayName(): String = when (this) {
     ReviewSeverity.ALERT -> "Alert"
     ReviewSeverity.DETECTION -> "Activity"
+    ReviewSeverity.SIGNIFICANT_MOTION -> "Motion"
     ReviewSeverity.UNKNOWN -> "Activity"
 }
 
@@ -1158,13 +1168,24 @@ private fun cameraLabel(camera: String?, cameras: List<Camera>): String =
         ?: "All"
 
 private fun ReviewFilters.summary(cameras: List<Camera>): String = buildList {
-    add(if (severity == ReviewSeverity.ALERT) "Alerts" else "All activity")
+    add(if (severity == ReviewSeverity.ALERT) "Alerts" else "Everything")
     camera?.let { add(cameraLabel(it, cameras)) }
     label?.let { friendlyName(it)?.let(::add) }
     zone?.let { friendlyName(it)?.let(::add) }
     add(timeRange.displayName)
     if (reviewStatus != ReviewStatusFilter.ALL) add(reviewStatus.displayName)
 }.joinToString(" • ")
+
+internal fun ReviewFilters.countSummary(counts: app.opah.tv.data.model.ReviewCounts): String {
+    val range = timeRange.displayName.lowercase()
+    return if (severity == ReviewSeverity.ALERT) {
+        val count = counts.unreviewedAlerts
+        "$count unreviewed ${if (count == 1) "alert" else "alerts"} from the last $range"
+    } else {
+        val count = counts.unreviewedTotal
+        "$count unreviewed ${if (count == 1) "item" else "items"} from the last $range, including alerts"
+    }
+}
 
 private fun ReviewFilters.emptyMessage(): String {
     val category = if (severity == ReviewSeverity.ALERT) "alerts" else "activity"

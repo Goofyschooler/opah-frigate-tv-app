@@ -100,6 +100,7 @@ internal fun FocusableSurface(
     modifier: Modifier = Modifier,
     onLongClick: (() -> Unit)? = null,
     enabled: Boolean = true,
+    focusable: Boolean = enabled,
     selected: Boolean = false,
     accessibilityLabel: String = focusKey,
     externalFocusRequester: FocusRequester? = null,
@@ -115,8 +116,8 @@ internal fun FocusableSurface(
     var longPressTriggered by remember(focusKey) { mutableStateOf(false) }
     val rememberedRequester = remember(focusKey) { FocusRequester() }
     val requester = externalFocusRequester ?: rememberedRequester
-    LaunchedEffect(restoreFocusKey, enabled) {
-        if (restoreFocusKey != focusKey || !enabled) return@LaunchedEffect
+    LaunchedEffect(restoreFocusKey, focusable) {
+        if (restoreFocusKey != focusKey || !focusable) return@LaunchedEffect
         for (attempt in 0 until 8) {
             withFrameNanos { }
             if (requester.requestFocus()) {
@@ -244,7 +245,7 @@ internal fun FocusableSurface(
                     }
                 }
             }
-            .focusable(enabled)
+            .focusable(focusable)
             .clip(shape)
             .drawWithContent {
                 // Focus changes stay in the draw phase so ordinary D-pad

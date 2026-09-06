@@ -152,9 +152,13 @@ internal fun SettingsRow(
     value: String?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    focusable: Boolean = enabled,
+    selected: Boolean = false,
     restoreFocusKey: String? = null,
     onFocusRestored: () -> Unit = {},
     externalFocusRequester: FocusRequester? = null,
+    onFocusStateChanged: (Boolean) -> Unit = {},
     accessibilityLabel: String = listOfNotNull(title, value).joinToString(", "),
 ) {
     FocusableSurface(
@@ -162,8 +166,12 @@ internal fun SettingsRow(
         restoreFocusKey = restoreFocusKey,
         onFocusRestored = onFocusRestored,
         onClick = onClick,
+        enabled = enabled,
+        focusable = focusable,
+        selected = selected,
         accessibilityLabel = accessibilityLabel,
         externalFocusRequester = externalFocusRequester,
+        onFocusStateChanged = onFocusStateChanged,
         activateOnKeyUp = true,
         style = FocusableSurfaceStyle.SETTINGS_ROW,
         modifier = modifier.fillMaxWidth(),
@@ -240,6 +248,7 @@ internal fun SegmentedTab(
 }
 
 internal const val SEGMENTED_TAB_ACTIVATES_ON_KEY_UP = true
+internal const val ACTION_SURFACE_ACTIVATES_ON_KEY_UP = true
 
 @Composable
 internal fun PrimaryAction(
@@ -248,6 +257,7 @@ internal fun PrimaryAction(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    focusable: Boolean = enabled,
     externalFocusRequester: FocusRequester? = null,
     onFocused: () -> Unit = {},
 ) = ActionSurface(
@@ -257,6 +267,7 @@ internal fun PrimaryAction(
     FocusableSurfaceStyle.PRIMARY_ACTION,
     modifier,
     enabled,
+    focusable,
     externalFocusRequester,
     onFocused,
 )
@@ -268,6 +279,7 @@ internal fun SecondaryAction(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    focusable: Boolean = enabled,
     externalFocusRequester: FocusRequester? = null,
     onFocused: () -> Unit = {},
 ) = ActionSurface(
@@ -277,6 +289,7 @@ internal fun SecondaryAction(
     FocusableSurfaceStyle.SECONDARY_ACTION,
     modifier,
     enabled,
+    focusable,
     externalFocusRequester,
     onFocused,
 )
@@ -288,6 +301,7 @@ internal fun PlaybackAction(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    focusable: Boolean = enabled,
     externalFocusRequester: FocusRequester? = null,
     onFocused: () -> Unit = {},
 ) = ActionSurface(
@@ -297,6 +311,7 @@ internal fun PlaybackAction(
     FocusableSurfaceStyle.PLAYBACK_ACTION,
     modifier,
     enabled,
+    focusable,
     externalFocusRequester,
     onFocused,
 )
@@ -309,6 +324,7 @@ private fun ActionSurface(
     style: FocusableSurfaceStyle,
     modifier: Modifier,
     enabled: Boolean,
+    focusable: Boolean,
     externalFocusRequester: FocusRequester?,
     onFocused: () -> Unit,
 ) {
@@ -318,9 +334,11 @@ private fun ActionSurface(
         onFocusRestored = {},
         onClick = onClick,
         enabled = enabled,
+        focusable = focusable,
         accessibilityLabel = label,
         externalFocusRequester = externalFocusRequester,
         onFocused = { onFocused() },
+        activateOnKeyUp = ACTION_SURFACE_ACTIVATES_ON_KEY_UP,
         style = style,
         modifier = modifier,
     ) {

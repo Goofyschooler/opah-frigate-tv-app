@@ -27,7 +27,7 @@ class FrigateCapabilityResolver(
         birdseye: BirdseyeStatus,
         birdseyePermitted: Boolean,
         ptzCameras: Map<String, CameraPtzInfo>? = null,
-        userRole: String = "admin",
+        userRole: String = "viewer",
         runtimeOverrides: Map<FrigateFeature, FrigateCapabilityAvailability> = emptyMap(),
     ): FrigateCapabilities {
         val apiEvidence = apiEvidence(version)
@@ -129,7 +129,11 @@ class FrigateCapabilityResolver(
         val knownApiLine = version.major == 0 && version.minor in setOf(17, 18)
         if (!knownApiLine) return null
         return when (version.compatibility) {
-            ServerVersionCompatibility.SUPPORTED -> FrigateCapabilityEvidence.VALIDATED_API
+            ServerVersionCompatibility.SUPPORTED -> if (version.validatedContract) {
+                FrigateCapabilityEvidence.VALIDATED_API
+            } else {
+                FrigateCapabilityEvidence.COMPATIBLE_API_LINE
+            }
             ServerVersionCompatibility.COMPATIBLE_UNVERIFIED ->
                 FrigateCapabilityEvidence.COMPATIBLE_API_LINE
             ServerVersionCompatibility.UNSUPPORTED,

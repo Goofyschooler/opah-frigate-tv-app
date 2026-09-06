@@ -2,6 +2,7 @@ package app.opah.tv.ui
 
 import android.app.Application
 import android.graphics.Bitmap
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -10,8 +11,10 @@ import app.opah.tv.OpahApplication
 import app.opah.tv.BuildConfig
 import app.opah.tv.data.ConnectionProfileFactory
 import app.opah.tv.data.CameraImage
+import app.opah.tv.data.ReviewImage
 import app.opah.tv.data.DiscoveryBootstrap
 import app.opah.tv.data.sanitizeRecentActivitySearches
+import app.opah.tv.data.compatibilityIdentityComponents
 import app.opah.tv.data.network.AuthenticationExpiredException
 import app.opah.tv.data.network.InvalidCredentialsException
 import app.opah.tv.data.network.OpahErrorCode
@@ -19,6 +22,8 @@ import app.opah.tv.data.network.PtzCommand
 import app.opah.tv.data.network.PtzConnectionState
 import app.opah.tv.data.network.PtzConnectionStatus
 import app.opah.tv.data.network.toOpahFailure
+import app.opah.tv.data.realtime.CameraScopeState
+import app.opah.tv.data.realtime.RealtimeAuthenticationState
 import app.opah.tv.data.model.Camera
 import app.opah.tv.data.model.CameraPtzInfo
 import app.opah.tv.data.model.AppSettings
@@ -59,9 +64,66 @@ import app.opah.tv.domain.StreamUriFactory
 import app.opah.tv.playback.PlaybackKind
 import app.opah.tv.playback.PlaybackRequest
 import app.opah.tv.playback.BIRDSEYE_STRETCH_PREFERENCE_KEY
+import app.opah.tv.privacy.PinRelockReason
+import app.opah.tv.privacy.PinProtectionChangeResult
+import app.opah.tv.privacy.PinScope
+import app.opah.tv.privacy.PinSetupResult
+import app.opah.tv.privacy.PinUnlockResult
+import app.opah.tv.privacy.PrivacyPolicyMutationResult
+import app.opah.tv.privacy.PrivacyRepositoryState
+import app.opah.tv.privacy.RecognitionDisclosure
+import app.opah.tv.privacy.NotificationDisclosure
+import app.opah.tv.privacy.AuthorizationFreshness
+import app.opah.tv.privacy.PrivacyDecision
+import app.opah.tv.privacy.PrivacyDecisionEngine
+import app.opah.tv.privacy.PrivacyGrant
+import app.opah.tv.privacy.PrivacyRequest
+import app.opah.tv.privacy.PrivacySessionEvidence
+import app.opah.tv.privacy.PrivacySurface
+import app.opah.tv.privacy.PrivacyTarget
+import app.opah.tv.notifications.AlertConfigurationMutationResult
+import app.opah.tv.notifications.AlertConfigurationState
+import app.opah.tv.notifications.AlertMode
+import app.opah.tv.notifications.NotificationPrivacy
+import app.opah.tv.notifications.AlertSnooze
+import app.opah.tv.notifications.AlertSnoozeScope
+import app.opah.tv.notifications.AlertDayOfWeek
+import app.opah.tv.notifications.AlertScheduleWindow
+import app.opah.tv.notifications.TvAlertOpenResolution
+import app.opah.tv.notifications.nextLocalDayStartEpochMillis
+import app.opah.tv.awareness.AwarenessReviewSeverity
+import app.opah.tv.monitor.MonitorAction
+import app.opah.tv.monitor.MonitorArbiter
+import app.opah.tv.monitor.MonitorCommand
+import app.opah.tv.monitor.MonitorConfiguration
+import app.opah.tv.monitor.MonitorPhase
+import app.opah.tv.monitor.MonitorPreset
+import app.opah.tv.monitor.MonitorState
+import app.opah.tv.playback.compatibility.PlaybackPurpose
+import app.opah.tv.playback.compatibility.AudioMode
+import app.opah.tv.playback.compatibility.DecoderMode
+import app.opah.tv.playback.compatibility.TransportMode
+import app.opah.tv.notifications.android.TvAlertActivationResult
+import app.opah.tv.notifications.android.TvAlertDeliveryStatus
+import app.opah.tv.notifications.android.TvAlertOverlayHorizontalPosition
+import app.opah.tv.notifications.android.TvAlertOverlayImageSize
+import app.opah.tv.notifications.android.TvAlertOverlaySettings
+import app.opah.tv.notifications.android.TvAlertOverlayVerticalPosition
+import app.opah.tv.notifications.android.TV_ALERT_OVERLAY_MAX_DISPLAY_SECONDS
+import app.opah.tv.notifications.android.TV_ALERT_OVERLAY_MIN_DISPLAY_SECONDS
+import app.opah.tv.briefing.BriefingAcknowledgementReason
+import app.opah.tv.briefing.BriefingAudience
+import app.opah.tv.briefing.BriefingDismissalTarget
+import app.opah.tv.briefing.BriefingEntry
+import app.opah.tv.briefing.BriefingRefreshRequest
+import app.opah.tv.briefing.BriefingScopeKey
+import app.opah.tv.briefing.BriefingSummary
+import app.opah.tv.briefing.afterPresentedEntriesAcknowledged
+import app.opah.tv.playback.compatibility.CompatibilityIdentityDomain
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -71,6 +133,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.text.DateFormat
 import java.text.SimpleDateFormat
 import java.io.File
@@ -115,6 +179,7 @@ data class AppUpdateUiState(
     val availableRelease: AppRelease? = null,
     val downloading: Boolean = false,
     val preparedApkPath: String? = null,
+    val statusMessage: String? = null,
     val errorMessage: String? = null,
 )
 
@@ -151,6 +216,94 @@ data class HealthUiState(
     val messages: List<String> get() = messagesByCamera.values.sorted()
 }
 
+data class PrivacyUiState(
+    val loading: Boolean = true,
+    val available: Boolean = false,
+    val epoch: Long = 0L,
+    val guestModeActive: Boolean = false,
+    val startInGuestMode: Boolean = false,
+    val privateCameraIds: Set<String> = emptySet(),
+    val guestModeFrigateModes: Set<String> = emptySet(),
+    val pinConfigured: Boolean = false,
+    val pinRecordCorrupt: Boolean = false,
+    val protectedScopes: Set<PinScope> = emptySet(),
+    val unlockedScopes: Set<PinScope> = emptySet(),
+    val pinSelectionsUnlocked: Boolean = false,
+    val ownerRecognitionDisclosure: RecognitionDisclosure = RecognitionDisclosure.SHOW_ALL,
+    val guestRecognitionDisclosure: RecognitionDisclosure = RecognitionDisclosure.HIDE_ALL,
+    val globalNotificationDisclosure: NotificationDisclosure = NotificationDisclosure.TEXT_ONLY,
+    val guestNotificationDisclosure: NotificationDisclosure = NotificationDisclosure.TEXT_ONLY,
+    val busy: Boolean = false,
+    val statusMessage: String? = null,
+    val errorMessage: String? = null,
+)
+
+data class TvAlertsUiState(
+    val loading: Boolean = true,
+    val available: Boolean = false,
+    val enabled: Boolean = false,
+    val mode: AlertMode = AlertMode.IMPORTANT_ACTIVITY,
+    val notificationPrivacy: NotificationPrivacy = NotificationPrivacy.TEXT_ONLY,
+    val snoozeCount: Int = 0,
+    val significantMotionEnabled: Boolean = false,
+    val customSeverities: Set<AwarenessReviewSeverity> = setOf(AwarenessReviewSeverity.ALERT),
+    val cameraIds: Set<String> = emptySet(),
+    val labels: Set<String> = emptySet(),
+    val zones: Set<String> = emptySet(),
+    val subLabels: Set<String> = emptySet(),
+    val plateLabels: Set<String> = emptySet(),
+    val schedulePreset: TvAlertSchedulePreset = TvAlertSchedulePreset.ALWAYS,
+    val scheduleStartMinute: Int = DEFAULT_TV_ALERT_START_MINUTE,
+    val scheduleEndMinute: Int = DEFAULT_TV_ALERT_END_MINUTE,
+    val frigateModes: Set<String> = emptySet(),
+    val minimumThreatLevel: Int? = null,
+    val snoozeChoice: TvAlertSnoozeChoice = TvAlertSnoozeChoice.NONE,
+    val deliveryStatus: TvAlertDeliveryStatus = TvAlertDeliveryStatus.AVAILABLE,
+    val overlayPermissionGranted: Boolean = false,
+    val overlaySettings: TvAlertOverlaySettings = TvAlertOverlaySettings(),
+    val busy: Boolean = false,
+    val statusMessage: String? = null,
+    val errorMessage: String? = null,
+)
+
+enum class TvAlertSchedulePreset {
+    ALWAYS,
+    CUSTOM,
+}
+
+internal fun alertSchedulePreset(schedules: List<AlertScheduleWindow>): TvAlertSchedulePreset = when {
+    schedules.isEmpty() -> TvAlertSchedulePreset.ALWAYS
+    else -> TvAlertSchedulePreset.CUSTOM
+}
+
+enum class TvAlertSnoozeChoice {
+    NONE,
+    FIFTEEN_MINUTES,
+    ONE_HOUR,
+    UNTIL_TOMORROW,
+    UNTIL_MODE_CHANGES,
+    MULTIPLE,
+}
+
+internal const val DEFAULT_TV_ALERT_START_MINUTE = 7 * 60
+internal const val DEFAULT_TV_ALERT_END_MINUTE = 22 * 60
+
+internal fun alertSnoozeChoice(snoozes: List<AlertSnooze>, nowEpochMillis: Long): TvAlertSnoozeChoice {
+    val snooze = snoozes.singleOrNull() ?: return if (snoozes.isEmpty()) {
+        TvAlertSnoozeChoice.NONE
+    } else {
+        TvAlertSnoozeChoice.MULTIPLE
+    }
+    if (snooze.untilModeChangesFrom != null) return TvAlertSnoozeChoice.UNTIL_MODE_CHANGES
+    val remaining = (snooze.expiresAtEpochMillis ?: return TvAlertSnoozeChoice.MULTIPLE) - nowEpochMillis
+    return when {
+        remaining <= 0L -> TvAlertSnoozeChoice.NONE
+        remaining <= 20L * 60L * 1_000L -> TvAlertSnoozeChoice.FIFTEEN_MINUTES
+        remaining <= 70L * 60L * 1_000L -> TvAlertSnoozeChoice.ONE_HOUR
+        else -> TvAlertSnoozeChoice.UNTIL_TOMORROW
+    }
+}
+
 data class CameraGroupStream(
     val camera: Camera,
     val uri: String,
@@ -163,11 +316,39 @@ data class CameraGroupViewUiState(
     val decoderWarning: Boolean = false,
 )
 
+data class MonitorModeUiState(
+    val title: String,
+    val cameras: List<Camera>,
+    val preset: MonitorPreset,
+    val visibleCameraIds: Set<String>,
+    val arbitration: MonitorState,
+    val liveCompatibilityRequestId: String? = null,
+    val keepScreenAwake: Boolean = false,
+    val audioEnabled: Boolean = false,
+    val exitAtEpochMillis: Long? = null,
+    val exitAfterMinutes: Int? = null,
+    val statusMessage: String? = null,
+)
+
+data class BriefingUiState(
+    val loading: Boolean = false,
+    val summary: BriefingSummary? = null,
+    val activeHighlightIds: Set<String> = emptySet(),
+    val errorMessage: String? = null,
+    val audience: BriefingAudience? = null,
+    val privacyEpoch: Long? = null,
+)
+
 private data class HistoryLoadResult(
     val hourStartSeconds: Double,
     val summaries: List<RecordingHourSummary>,
     val segments: List<RecordingSegment>,
     val motion: List<MotionActivity>,
+)
+
+private data class BoundPrivacyGrant(
+    val request: PrivacyRequest,
+    val grant: PrivacyGrant,
 )
 
 internal fun decoderCapacityMayBeInsufficient(
@@ -197,11 +378,16 @@ internal fun AppUpdateUiState.afterSuccessfulCheck(result: AppUpdateCheckResult)
             result.availability == AppUpdateAvailability.UPDATE_AVAILABLE &&
                 latestVersion == result.latestRelease.version.canonical
         },
+        statusMessage = when (result.availability) {
+            AppUpdateAvailability.UPDATE_AVAILABLE -> "Check complete • Opah ${result.latestRelease.version.canonical} is available"
+            AppUpdateAvailability.UP_TO_DATE -> "Check complete • Opah is up to date"
+        },
     )
 
 internal fun AppUpdateUiState.afterFailedCheck(message: String): AppUpdateUiState = copy(
     checking = false,
     checkedOnce = true,
+    statusMessage = null,
     errorMessage = message,
 )
 
@@ -213,6 +399,70 @@ internal fun shouldScheduleAutomaticUpdateCheck(
 ): Boolean = enabled && !checkedOnce && !checking && !scheduled
 
 private const val AUTOMATIC_UPDATE_CHECK_DELAY_MILLIS = 5_000L
+private const val TV_ALERT_OPEN_RETRY_ATTEMPTS = 40
+private const val TV_ALERT_OPEN_RETRY_DELAY_MILLIS = 250L
+private const val BRIEFING_PRIVACY_SCHEMA_VERSION = 1
+
+private fun Long.nextNavigationRequestId(): Long = if (this == Long.MAX_VALUE) 1L else this + 1L
+
+private fun NotificationPrivacy.toPrivacyDisclosure(): NotificationDisclosure = when (this) {
+    NotificationPrivacy.FULL_PREVIEW -> NotificationDisclosure.FULL_PREVIEW
+    NotificationPrivacy.BLURRED_PREVIEW -> NotificationDisclosure.BLURRED_PREVIEW
+    NotificationPrivacy.TEXT_ONLY -> NotificationDisclosure.TEXT_ONLY
+    NotificationPrivacy.NEVER_NOTIFY -> NotificationDisclosure.NEVER
+}
+
+private fun Set<String>.withSelection(value: String, enabled: Boolean): Set<String> =
+    if (enabled) this + value else this - value
+
+enum class TvAlertNavigationDestination {
+    ACTIVITY,
+    TV_ALERT_SETTINGS,
+}
+
+data class TvAlertNavigationUiState(
+    val requestId: Long,
+    val destination: TvAlertNavigationDestination,
+    val expired: Boolean = false,
+)
+
+enum class PlaybackCompatibilityTestMode {
+    AUTOMATIC,
+    STANDARD_CONNECTION,
+    RELIABLE_CONNECTION,
+    VIDEO_ONLY,
+    RELIABLE_VIDEO_ONLY,
+}
+
+internal fun savedPlaybackChoiceLabel(
+    audioMode: AudioMode,
+    transportMode: TransportMode,
+    decoderMode: DecoderMode,
+): String = buildList {
+    add(if (transportMode == TransportMode.FORCE_RTP_TCP) "reliable connection" else "standard connection")
+    add(if (audioMode == AudioMode.VIDEO_ONLY) "video only" else "video and sound")
+    add(
+        when (decoderMode) {
+            DecoderMode.PLATFORM_DEFAULT -> "automatic video decoder"
+            DecoderMode.PREFER_HARDWARE -> "TV video decoder"
+            DecoderMode.ALLOW_SOFTWARE -> "compatibility video decoder"
+        },
+    )
+}.joinToString(" • ")
+
+private data class PendingTvAlertOpen(
+    val profileKey: String,
+    val reviewId: String,
+    val actionNonce: String,
+)
+
+private data class ActiveBriefingIdentity(
+    val profile: ConnectionProfile,
+    val profileKey: String,
+    val scopeKey: BriefingScopeKey,
+    val privacyEpoch: Long,
+    val audience: BriefingAudience,
+)
 
 data class Phase0UiState(
     val loading: Boolean = true,
@@ -241,6 +491,14 @@ data class Phase0UiState(
     val motionReview: MotionReviewUiState = MotionReviewUiState(),
     val health: HealthUiState = HealthUiState(),
     val savedSessionRecoveryAvailable: Boolean = false,
+    val playbackCompatibilityMessage: String? = null,
+    val playbackCompatibilityChoices: Map<String, String> = emptyMap(),
+    val privacy: PrivacyUiState = PrivacyUiState(),
+    val tvAlerts: TvAlertsUiState = TvAlertsUiState(),
+    val tvAlertNavigation: TvAlertNavigationUiState? = null,
+    val tvAlertPrivacyGateOpen: Boolean = false,
+    val monitorMode: MonitorModeUiState? = null,
+    val briefing: BriefingUiState = BriefingUiState(),
 )
 
 class Phase0ViewModel(application: Application) : AndroidViewModel(application) {
@@ -257,7 +515,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     private val cameraImageRepository = container.cameraImageRepository
     private val reviewImageRepository = container.reviewImageRepository
     private val ptzWebSocketClient = container.ptzWebSocketClient
+    private val privacyRepository = container.privacyRepository
+    private val alertConfigurationRepository = container.alertConfigurationRepository
+    private val pinCredentialService = container.pinCredentialService
+    private val privacyDecisionEngine = PrivacyDecisionEngine()
     private val operationsRepository = container.frigateOperationsRepository
+    private val briefingCoordinator = container.briefingCoordinator
+    private val briefingScopeFactory = container.briefingScopeFactory
     private val documentationImages = DocumentationImageStore(application)
     private var reviewLoadJob: Job? = null
     private var reviewDetailJob: Job? = null
@@ -269,12 +533,18 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     private var activitySearchJob: Job? = null
     private var activitySearchRequestId: Long = 0
     private var enrichmentJob: Job? = null
+    private var briefingRefreshJob: Job? = null
     private var updateCheckJob: Job? = null
     private var automaticUpdateCheckJob: Job? = null
     private var exportsLoadJob: Job? = null
     private var motionSearchJob: Job? = null
     private var motionSearchRequestId: Long = 0
     private var pendingCameraName: String? = null
+    private var tvAlertNavigationRequestId = 0L
+    private var pendingTvAlertOpen: PendingTvAlertOpen? = null
+    private var monitorJob: Job? = null
+    private val monitorMutex = Mutex()
+    private val monitorArbiter = MonitorArbiter()
     private val documentationReviewStatuses = mutableMapOf<String, Boolean>()
 
     private val _state = MutableStateFlow(Phase0UiState())
@@ -284,6 +554,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.value = DocumentationFixtures.state(null)
         } else {
+            _state.update { current ->
+                current.copy(
+                    tvAlerts = current.tvAlerts.copy(
+                        overlaySettings = container.tvAlertOverlaySettings(),
+                    ),
+                )
+            }
             viewModelScope.launch {
                 ptzWebSocketClient.state.collect { connection ->
                     _state.update { current ->
@@ -297,9 +574,129 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     scheduleAutomaticUpdateCheckIfNeeded(settings)
                 }
             }
+            viewModelScope.launch {
+                privacyRepository.initialize()
+                privacyRepository.state.collect { repositoryState ->
+                    val previousPrivacy = _state.value.privacy
+                    _state.update { current ->
+                        val previous = current.privacy
+                        val privacy = when (repositoryState) {
+                            PrivacyRepositoryState.Loading -> previous.copy(loading = true)
+                            is PrivacyRepositoryState.Unavailable -> previous.copy(
+                                loading = false,
+                                available = false,
+                                epoch = repositoryState.epoch,
+                                unlockedScopes = emptySet(),
+                                pinSelectionsUnlocked = false,
+                                busy = false,
+                                errorMessage = "Privacy controls are unavailable",
+                            )
+                            is PrivacyRepositoryState.Ready -> {
+                                val proof = container.pinUnlockSessionOwner.currentProof(
+                                    repositoryState.policy.epoch,
+                                    SystemClock.elapsedRealtime(),
+                                )
+                                previous.copy(
+                                    loading = false,
+                                    available = true,
+                                    epoch = repositoryState.policy.epoch,
+                                    guestModeActive = repositoryState.policy.guestModeActive,
+                                    startInGuestMode = repositoryState.policy.startInGuestMode,
+                                    privateCameraIds = repositoryState.policy.privateCameraIds,
+                                    guestModeFrigateModes = repositoryState.policy.guestModeFrigateModes,
+                                    pinConfigured = repositoryState.pinConfigured,
+                                    pinRecordCorrupt = repositoryState.pinRecordCorrupt,
+                                    protectedScopes = repositoryState.protectedScopes,
+                                    unlockedScopes = proof?.scopes.orEmpty(),
+                                    pinSelectionsUnlocked = proof != null,
+                                    ownerRecognitionDisclosure = repositoryState.policy.ownerRecognitionDisclosure,
+                                    guestRecognitionDisclosure = repositoryState.policy.guestRecognitionDisclosure,
+                                    globalNotificationDisclosure = repositoryState.policy.globalNotificationDisclosure,
+                                    guestNotificationDisclosure = repositoryState.policy.guestNotificationDisclosure,
+                                    errorMessage = if (repositoryState.pinRecordCorrupt) {
+                                        "PIN protection needs recovery"
+                                    } else {
+                                        previous.errorMessage?.takeIf { previous.busy }
+                                    },
+                                )
+                            }
+                        }
+                        current.copy(privacy = privacy)
+                    }
+                    val currentPrivacy = _state.value.privacy
+                    if (
+                        currentPrivacy.epoch != previousPrivacy.epoch ||
+                        currentPrivacy.available != previousPrivacy.available ||
+                        currentPrivacy.guestModeActive != previousPrivacy.guestModeActive ||
+                        currentPrivacy.unlockedScopes != previousPrivacy.unlockedScopes
+                    ) {
+                        enforceCurrentPrivacyState()
+                        loadBriefing(refreshFromFrigate = currentPrivacy.available && _state.value.recentActivityLoaded)
+                    }
+                }
+            }
+            viewModelScope.launch {
+                alertConfigurationRepository.state.collect { repositoryState ->
+                    _state.update { current ->
+                        val previous = current.tvAlerts
+                        val alerts = when (repositoryState) {
+                            AlertConfigurationState.Loading -> previous.copy(
+                                loading = true,
+                                available = false,
+                                busy = false,
+                            )
+                            is AlertConfigurationState.Unavailable -> previous.copy(
+                                loading = false,
+                                available = false,
+                                enabled = false,
+                                busy = false,
+                                errorMessage = "TV alerts are unavailable",
+                            )
+                            is AlertConfigurationState.Ready -> previous.copy(
+                                loading = false,
+                                available = true,
+                                enabled = repositoryState.configuration.enabled,
+                                mode = repositoryState.configuration.policy.mode,
+                                notificationPrivacy = repositoryState.configuration.policy.notificationPrivacy,
+                                snoozeCount = repositoryState.configuration.snoozes.size,
+                                significantMotionEnabled =
+                                    repositoryState.configuration.policy.significantMotionEnabled,
+                                customSeverities = repositoryState.configuration.policy.customSeverities,
+                                cameraIds = repositoryState.configuration.policy.cameraIds,
+                                labels = repositoryState.configuration.policy.labels,
+                                zones = repositoryState.configuration.policy.zones,
+                                subLabels = repositoryState.configuration.policy.subLabels,
+                                plateLabels = repositoryState.configuration.policy.plateLabels,
+                                schedulePreset = alertSchedulePreset(
+                                    repositoryState.configuration.policy.schedules,
+                                ),
+                                scheduleStartMinute = repositoryState.configuration.policy.schedules
+                                    .firstOrNull()?.startMinuteInclusive ?: DEFAULT_TV_ALERT_START_MINUTE,
+                                scheduleEndMinute = repositoryState.configuration.policy.schedules
+                                    .firstOrNull()?.endMinuteExclusive ?: DEFAULT_TV_ALERT_END_MINUTE,
+                                frigateModes = repositoryState.configuration.policy.frigateModes,
+                                minimumThreatLevel =
+                                    repositoryState.configuration.policy.minimumThreatLevel,
+                                snoozeChoice = alertSnoozeChoice(
+                                    repositoryState.configuration.snoozes,
+                                    System.currentTimeMillis().coerceAtLeast(0L),
+                                ),
+                                busy = false,
+                                errorMessage = null,
+                            )
+                        }
+                        current.copy(tvAlerts = alerts)
+                    }
+                }
+            }
             viewModelScope.launch(Dispatchers.Default) {
                 runCatching { codecService.inspect() }
-                    .onSuccess { device -> _state.update { it.copy(device = device) } }
+                    .onSuccess { device ->
+                        // Build the process playback composition off the UI thread before live
+                        // camera actions become available through the published diagnostics.
+                        container.singleLivePlaybackCoordinator
+                        _state.update { it.copy(device = device) }
+                    }
                     .onFailure { error ->
                         if (error is CancellationException) throw error
                         logger.warning("Device codec inspection failed", error)
@@ -339,7 +736,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     fun checkForUpdates(forceRefresh: Boolean = false) {
         if (BuildConfig.DOCUMENTATION_MODE || updateCheckJob?.isActive == true) return
         _state.update {
-            it.copy(appUpdate = it.appUpdate.copy(checking = true, errorMessage = null))
+            it.copy(
+                appUpdate = it.appUpdate.copy(
+                    checking = true,
+                    statusMessage = "Checking for an update…",
+                    errorMessage = null,
+                ),
+            )
         }
         updateCheckJob = viewModelScope.launch {
             try {
@@ -519,19 +922,25 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             beginWork("Refreshing Frigate diagnostics…")
             runCatching {
                 val user = sessionManager.restore(profile)
-                repository.discover(profile, user)
+                val snapshot = repository.discover(profile, user)
+                val counts = runCatching {
+                    repository.loadReviewCounts(profile, snapshot.user.allowedCameras)
+                }
+                snapshot to counts
             }
-                .onSuccess { snapshot ->
+                .onSuccess { (snapshot, counts) ->
                     clearImageCaches()
-                    _state.update {
-                        it.copy(
+                    _state.update { current ->
+                        current.copy(
                             loading = false,
                             statusMessage = "Connected",
                             errorMessage = null,
                             snapshot = snapshot,
                             recentActivityLoaded = true,
                             cameraGroupView = null,
-                            review = ReviewBrowserState(),
+                            review = ReviewBrowserState(
+                                counts = counts.getOrDefault(current.review.counts),
+                            ),
                             history = HistoryBrowserState(),
                             activitySearch = ActivitySearchState(),
                             information = InformationUiState(),
@@ -549,6 +958,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             setDocumentationScenario("SETUP")
             return
         }
+        container.onSignedOut()
         val beforeLogout = _state.value
         val profile = beforeLogout.activeProfile ?: beforeLogout.savedProfile
         reviewLoadJob?.cancel()
@@ -562,6 +972,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         motionSearchJob?.cancel()
         motionSearchRequestId += 1
         enrichmentJob?.cancel()
+        briefingRefreshJob?.cancel()
         ptzWebSocketClient.disconnect()
         viewModelScope.launch {
             val activeEventId = beforeLogout.liveActions.recordingEventId
@@ -575,6 +986,14 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                         activeEventId,
                     )
                 }.onFailure { error -> logger.warning("Stopping on-demand recording during sign out failed", error) }
+            }
+            if (forgetServer && profile != null) {
+                val profileKey = container.compatibilityIdentityFactory.derive(
+                    CompatibilityIdentityDomain.PROFILE,
+                    profile.compatibilityIdentityComponents(),
+                ).value
+                runCatching { container.briefingStore.deleteProfile(profileKey) }
+                    .onFailure { error -> logger.warning("Removing saved briefing state failed", error) }
             }
             sessionManager.signOut(profile, forgetServer)
             _state.update {
@@ -599,6 +1018,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     liveActions = LiveActionsUiState(),
                     motionReview = MotionReviewUiState(),
                     health = HealthUiState(),
+                    briefing = BriefingUiState(),
                     savedSessionRecoveryAvailable = false,
                 )
             }
@@ -608,8 +1028,477 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun enableTvAlertsAfterPermission() {
+        if (_state.value.tvAlerts.busy) return
+        _state.update {
+            it.copy(tvAlerts = it.tvAlerts.copy(busy = true, statusMessage = null, errorMessage = null))
+        }
+        viewModelScope.launch {
+            val result = container.enableTvAlertsFromVisibleUserAction()
+            _state.update { current ->
+                val message = when (result) {
+                    TvAlertActivationResult.STARTED -> "TV alerts are on"
+                    TvAlertActivationResult.NOTIFICATION_PERMISSION_REQUIRED ->
+                        "Allow notifications to turn on TV alerts"
+                    TvAlertActivationResult.ON_SCREEN_PERMISSION_REQUIRED ->
+                        "Allow on-screen alerts in Android settings"
+                    TvAlertActivationResult.NOTIFICATIONS_BLOCKED ->
+                        "Notifications are blocked in Android settings"
+                    TvAlertActivationResult.START_REJECTED ->
+                        "Android could not start TV alerts"
+                    TvAlertActivationResult.CONFIGURATION_UNAVAILABLE ->
+                        "TV alert settings are unavailable"
+                }
+                current.copy(
+                    tvAlerts = current.tvAlerts.copy(
+                        busy = false,
+                        statusMessage = message.takeIf { result == TvAlertActivationResult.STARTED },
+                        errorMessage = message.takeUnless { result == TvAlertActivationResult.STARTED },
+                    ),
+                )
+            }
+        }
+    }
+
+    fun notificationPermissionDenied() {
+        _state.update {
+            it.copy(
+                tvAlerts = it.tvAlerts.copy(
+                    busy = false,
+                    statusMessage = null,
+                    errorMessage = "Allow notifications to use TV alerts",
+                ),
+            )
+        }
+    }
+
+    fun notificationDeliveryBlocked() {
+        _state.update {
+            it.copy(
+                tvAlerts = it.tvAlerts.copy(
+                    busy = false,
+                    deliveryStatus = TvAlertDeliveryStatus.BLOCKED,
+                    statusMessage = null,
+                    errorMessage = "Allow Opah notifications in Android settings",
+                ),
+            )
+        }
+    }
+
+    fun onScreenAlertPermissionDenied() {
+        _state.update {
+            it.copy(
+                tvAlerts = it.tvAlerts.copy(
+                    busy = false,
+                    overlayPermissionGranted = false,
+                    statusMessage = null,
+                    errorMessage = "Allow on-screen alerts in Android settings",
+                ),
+            )
+        }
+    }
+
+    fun onScreenAlertSettingsUnavailable() {
+        _state.update {
+            it.copy(
+                tvAlerts = it.tvAlerts.copy(
+                    busy = false,
+                    overlayPermissionGranted = false,
+                    statusMessage = null,
+                    errorMessage = "Android could not open display settings",
+                ),
+            )
+        }
+    }
+
+    fun refreshTvAlertDeliveryStatus() {
+        val deliveryStatus = container.tvAlertDeliveryStatus()
+        val overlayPermissionGranted = container.tvAlertOverlayPermissionGranted()
+        _state.update { current ->
+            current.copy(
+                tvAlerts = current.tvAlerts.copy(
+                    deliveryStatus = deliveryStatus,
+                    overlayPermissionGranted = overlayPermissionGranted,
+                ),
+            )
+        }
+    }
+
+    fun disableTvAlerts() {
+        if (_state.value.tvAlerts.busy) return
+        _state.update { it.copy(tvAlerts = it.tvAlerts.copy(busy = true, errorMessage = null)) }
+        viewModelScope.launch {
+            val disabled = container.disableTvAlerts()
+            _state.update {
+                it.copy(
+                    tvAlerts = it.tvAlerts.copy(
+                        busy = false,
+                        statusMessage = "TV alerts are off".takeIf { disabled },
+                        errorMessage = "Some TV alert data could not be cleared".takeUnless { disabled },
+                    ),
+                )
+            }
+        }
+    }
+
+    fun setTvAlertMode(mode: AlertMode) {
+        if (mode == AlertMode.OFF) {
+            disableTvAlerts()
+            return
+        }
+        mutateTvAlertPolicy { it.copy(mode = mode) }
+    }
+
+    fun setTvAlertPrivacy(privacy: NotificationPrivacy) {
+        if (privacy == NotificationPrivacy.NEVER_NOTIFY) return
+        if (!beginTvAlertMutation()) return
+        val currentPrivacy = _state.value.privacy
+        viewModelScope.launch {
+            try {
+                privacyRepository.setDisclosurePolicy(
+                    ownerRecognition = currentPrivacy.ownerRecognitionDisclosure,
+                    guestRecognition = currentPrivacy.guestRecognitionDisclosure,
+                    globalNotification = privacy.toPrivacyDisclosure(),
+                    guestNotification = currentPrivacy.guestNotificationDisclosure,
+                )
+                mutateTvAlertPolicyNow { it.copy(notificationPrivacy = privacy) }
+            } finally {
+                finishTvAlertMutation()
+            }
+        }
+    }
+
+    fun setTvAlertSignificantMotion(enabled: Boolean) = mutateTvAlertPolicy { policy ->
+        policy.copy(
+            significantMotionEnabled = enabled,
+            customSeverities = if (enabled) {
+                policy.customSeverities + AwarenessReviewSeverity.SIGNIFICANT_MOTION
+            } else {
+                policy.customSeverities - AwarenessReviewSeverity.SIGNIFICANT_MOTION
+            },
+        )
+    }
+
+    fun setTvAlertCustomSeverity(severity: AwarenessReviewSeverity, enabled: Boolean) {
+        if (severity == AwarenessReviewSeverity.UNKNOWN ||
+            severity == AwarenessReviewSeverity.SIGNIFICANT_MOTION
+        ) return
+        mutateTvAlertPolicy { policy ->
+            policy.copy(
+                customSeverities = if (enabled) {
+                    policy.customSeverities + severity
+                } else {
+                    policy.customSeverities - severity
+                },
+            )
+        }
+    }
+
+    fun setTvAlertAllCameras() = mutateTvAlertPolicy { it.copy(cameraIds = emptySet()) }
+
+    fun setTvAlertCamera(cameraId: String, enabled: Boolean) = mutateTvAlertPolicy { policy ->
+        policy.copy(cameraIds = policy.cameraIds.withSelection(cameraId, enabled))
+    }
+
+    fun clearTvAlertLabels() = mutateTvAlertPolicy { it.copy(labels = emptySet()) }
+
+    fun setTvAlertLabel(label: String, enabled: Boolean) = mutateTvAlertPolicy { policy ->
+        policy.copy(labels = policy.labels.withSelection(label, enabled))
+    }
+
+    fun clearTvAlertZones() = mutateTvAlertPolicy { it.copy(zones = emptySet()) }
+
+    fun setTvAlertZone(zone: String, enabled: Boolean) = mutateTvAlertPolicy { policy ->
+        policy.copy(zones = policy.zones.withSelection(zone, enabled))
+    }
+
+    fun clearTvAlertIdentities() = mutateTvAlertPolicy { it.copy(subLabels = emptySet()) }
+
+    fun setTvAlertIdentity(identity: String, enabled: Boolean) = mutateTvAlertPolicy { policy ->
+        policy.copy(subLabels = policy.subLabels.withSelection(identity, enabled))
+    }
+
+    fun clearTvAlertPlates() = mutateTvAlertPolicy { it.copy(plateLabels = emptySet()) }
+
+    fun setTvAlertPlate(plate: String, enabled: Boolean) = mutateTvAlertPolicy { policy ->
+        policy.copy(plateLabels = policy.plateLabels.withSelection(plate, enabled))
+    }
+
+    fun setTvAlertSchedulePreset(preset: TvAlertSchedulePreset) {
+        mutateTvAlertPolicy { policy ->
+            policy.copy(
+                schedules = when (preset) {
+                    TvAlertSchedulePreset.ALWAYS -> emptyList()
+                    TvAlertSchedulePreset.CUSTOM -> policy.schedules.ifEmpty {
+                        listOf(
+                            AlertScheduleWindow(
+                                AlertDayOfWeek.entries.toSet(),
+                                DEFAULT_TV_ALERT_START_MINUTE,
+                                DEFAULT_TV_ALERT_END_MINUTE,
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    fun setTvAlertScheduleWindow(startMinute: Int, endMinute: Int) {
+        if (startMinute !in 0..1_439 || endMinute !in 0..1_439 || startMinute == endMinute) return
+        if (_state.value.tvAlerts.busy) return
+        _state.update {
+            it.copy(
+                tvAlerts = it.tvAlerts.copy(
+                    schedulePreset = TvAlertSchedulePreset.CUSTOM,
+                    scheduleStartMinute = startMinute,
+                    scheduleEndMinute = endMinute,
+                ),
+            )
+        }
+        mutateTvAlertPolicy { policy ->
+            policy.copy(
+                schedules = listOf(
+                    AlertScheduleWindow(AlertDayOfWeek.entries.toSet(), startMinute, endMinute),
+                ),
+            )
+        }
+    }
+
+    fun clearTvAlertModes() = mutateTvAlertPolicy { it.copy(frigateModes = emptySet()) }
+
+    fun setTvAlertModeFilter(mode: String, enabled: Boolean) = mutateTvAlertPolicy { policy ->
+        policy.copy(frigateModes = policy.frigateModes.withSelection(mode, enabled))
+    }
+
+    fun setTvAlertMinimumThreatLevel(level: Int?) {
+        if (level !in setOf(null, 1, 2)) return
+        mutateTvAlertPolicy { policy -> policy.copy(minimumThreatLevel = level) }
+    }
+
+    fun snoozeTvAlerts(minutes: Int) {
+        if (minutes !in setOf(15, 60)) return
+        if (!beginTvAlertMutation()) return
+        viewModelScope.launch {
+            try {
+                val now = System.currentTimeMillis().coerceAtLeast(0L)
+                val duration = minutes * 60_000L
+                val expires = if (now > Long.MAX_VALUE - duration) Long.MAX_VALUE else now + duration
+                saveTvAlertSnooze(
+                    AlertSnooze(
+                        scope = AlertSnoozeScope.ALL,
+                        expiresAtEpochMillis = expires,
+                    ),
+                    if (minutes == 15) "Snoozed for 15 minutes" else "Snoozed for 1 hour",
+                )
+            } finally {
+                finishTvAlertMutation()
+            }
+        }
+    }
+
+    fun snoozeTvAlertsUntilTomorrow() {
+        if (!beginTvAlertMutation()) return
+        viewModelScope.launch {
+            try {
+                val now = System.currentTimeMillis().coerceAtLeast(0L)
+                saveTvAlertSnooze(
+                    AlertSnooze(
+                        scope = AlertSnoozeScope.ALL,
+                        expiresAtEpochMillis = nextLocalDayStartEpochMillis(now, TimeZone.getDefault()),
+                    ),
+                    "Snoozed until tomorrow",
+                )
+            } finally {
+                finishTvAlertMutation()
+            }
+        }
+    }
+
+    fun snoozeTvAlertsUntilModeChanges() {
+        val mode = _state.value.modes.activeMode ?: return
+        if (!beginTvAlertMutation()) return
+        viewModelScope.launch {
+            try {
+                saveTvAlertSnooze(
+                    AlertSnooze(
+                        scope = AlertSnoozeScope.ALL,
+                        untilModeChangesFrom = mode,
+                    ),
+                    "Snoozed until Frigate Mode changes",
+                )
+            } finally {
+                finishTvAlertMutation()
+            }
+        }
+    }
+
+    fun clearTvAlertSnoozes() {
+        if (!beginTvAlertMutation()) return
+        viewModelScope.launch {
+            try {
+                val result = container.clearTvAlertSnoozes()
+                _state.update {
+                    it.copy(
+                        tvAlerts = it.tvAlerts.copy(
+                            statusMessage = "Snooze ended".takeUnless {
+                                result is AlertConfigurationMutationResult.Rejected ||
+                                    result is AlertConfigurationMutationResult.Unavailable
+                            },
+                            errorMessage = "The snooze could not be ended".takeIf {
+                                result is AlertConfigurationMutationResult.Rejected ||
+                                    result is AlertConfigurationMutationResult.Unavailable
+                            },
+                        ),
+                    )
+                }
+            } finally {
+                finishTvAlertMutation()
+            }
+        }
+    }
+
+    private suspend fun saveTvAlertSnooze(snooze: AlertSnooze, successMessage: String) {
+        val cleared = container.clearTvAlertSnoozes()
+        val result = if (
+            cleared is AlertConfigurationMutationResult.Rejected ||
+            cleared is AlertConfigurationMutationResult.Unavailable
+        ) cleared else container.addTvAlertSnooze(snooze)
+        val failed = result is AlertConfigurationMutationResult.Rejected ||
+            result is AlertConfigurationMutationResult.Unavailable
+        _state.update {
+            it.copy(
+                tvAlerts = it.tvAlerts.copy(
+                    statusMessage = successMessage.takeUnless { failed },
+                    errorMessage = "The snooze could not be saved".takeIf { failed },
+                ),
+            )
+        }
+    }
+
+    fun sendLocalTestAlert(includeImage: Boolean) {
+        if (_state.value.tvAlerts.busy) return
+        _state.update {
+            it.copy(tvAlerts = it.tvAlerts.copy(busy = true, statusMessage = null, errorMessage = null))
+        }
+        viewModelScope.launch {
+            val posted = container.postLocalTestAlert(includeImage)
+            val deliveryStatus = container.tvAlertDeliveryStatus()
+            _state.update {
+                it.copy(
+                    tvAlerts = it.tvAlerts.copy(
+                        busy = false,
+                        deliveryStatus = deliveryStatus,
+                        statusMessage =
+                            "Test alert sent"
+                                .takeIf { posted },
+                        errorMessage = if (posted) null else when (deliveryStatus) {
+                            TvAlertDeliveryStatus.NOTIFICATION_PERMISSION_REQUIRED ->
+                                "Allow notifications to use TV alerts"
+                            TvAlertDeliveryStatus.PARTIALLY_BLOCKED,
+                            TvAlertDeliveryStatus.BLOCKED,
+                            -> "Notifications are blocked in Android settings"
+                            TvAlertDeliveryStatus.AVAILABLE -> "The test alert could not be shown"
+                        },
+                    ),
+                )
+            }
+        }
+    }
+
+    fun prepareLocalTestAlert() {
+        _state.update {
+            it.copy(
+                tvAlerts = it.tvAlerts.copy(
+                    busy = false,
+                    statusMessage = null,
+                    errorMessage = null,
+                ),
+            )
+        }
+    }
+
+    fun setTvAlertOverlayVerticalPosition(position: TvAlertOverlayVerticalPosition) =
+        updateTvAlertOverlaySettings { it.copy(verticalPosition = position) }
+
+    fun setTvAlertOverlayHorizontalPosition(position: TvAlertOverlayHorizontalPosition) =
+        updateTvAlertOverlaySettings { it.copy(horizontalPosition = position) }
+
+    fun setTvAlertOverlayImageSize(size: TvAlertOverlayImageSize) =
+        updateTvAlertOverlaySettings { it.copy(imageSize = size) }
+
+    fun setTvAlertOverlayDisplayDurationSeconds(seconds: Int) {
+        if (seconds !in TV_ALERT_OVERLAY_MIN_DISPLAY_SECONDS..TV_ALERT_OVERLAY_MAX_DISPLAY_SECONDS) {
+            return
+        }
+        updateTvAlertOverlaySettings { it.copy(displayDurationSeconds = seconds) }
+    }
+
+    private fun updateTvAlertOverlaySettings(
+        transform: (TvAlertOverlaySettings) -> TvAlertOverlaySettings,
+    ) {
+        val updated = container.setTvAlertOverlaySettings(
+            transform(_state.value.tvAlerts.overlaySettings),
+        )
+        _state.update { current ->
+            current.copy(
+                tvAlerts = current.tvAlerts.copy(
+                    overlaySettings = updated,
+                    statusMessage = "Alert appearance saved",
+                    errorMessage = null,
+                ),
+            )
+        }
+    }
+
+    private fun mutateTvAlertPolicy(transform: (app.opah.tv.notifications.AlertPolicy) ->
+        app.opah.tv.notifications.AlertPolicy
+    ) {
+        if (!beginTvAlertMutation()) return
+        viewModelScope.launch {
+            try {
+                mutateTvAlertPolicyNow(transform)
+            } finally {
+                finishTvAlertMutation()
+            }
+        }
+    }
+
+    private suspend fun mutateTvAlertPolicyNow(
+        transform: (app.opah.tv.notifications.AlertPolicy) -> app.opah.tv.notifications.AlertPolicy,
+    ) {
+        val ready = alertConfigurationRepository.state.value as? AlertConfigurationState.Ready
+            ?: return
+        when (container.setTvAlertPolicy(transform(ready.configuration.policy))) {
+            is AlertConfigurationMutationResult.Updated,
+            is AlertConfigurationMutationResult.Unchanged,
+            -> Unit
+            AlertConfigurationMutationResult.Rejected,
+            AlertConfigurationMutationResult.Unavailable,
+            -> _state.update {
+                it.copy(tvAlerts = it.tvAlerts.copy(errorMessage = "TV alert settings could not be saved"))
+            }
+        }
+    }
+
+    private fun beginTvAlertMutation(): Boolean {
+        if (_state.value.tvAlerts.busy) return false
+        _state.update {
+            it.copy(
+                tvAlerts = it.tvAlerts.copy(
+                    busy = true,
+                    statusMessage = null,
+                    errorMessage = null,
+                ),
+            )
+        }
+        return true
+    }
+
+    private fun finishTvAlertMutation() {
+        _state.update { it.copy(tvAlerts = it.tvAlerts.copy(busy = false)) }
+    }
+
     fun playAutomatic(camera: Camera) {
-        rememberLastViewedTarget(StartupTarget(StartupTargetKind.CAMERA, camera.name))
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
@@ -620,6 +1509,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        if (issuePrivacyGrant(PrivacySurface.LIVE_PLAYBACK, PrivacyTarget.Camera(camera.name)) == null) return
+        rememberLastViewedTarget(StartupTarget(StartupTargetKind.CAMERA, camera.name))
         val current = _state.value
         val profile = current.activeProfile ?: return
         val codecs = current.device?.codecs.orEmpty()
@@ -640,6 +1531,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 it.copy(
                     playback = DocumentationFixtures.historyPlayback(camera, start, end).copy(
                         detail = "30 seconds earlier",
+                        recordingStartTime = start,
+                        recordingEndTime = end,
                         returnToLiveCameraName = camera.name,
                     ),
                     activeCameraName = null,
@@ -648,6 +1541,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        if (issuePrivacyGrant(PrivacySurface.HISTORY, PrivacyTarget.Camera(cameraName)) == null) return
         val profile = current.activeProfile ?: return
         _state.update {
             it.copy(
@@ -679,6 +1573,11 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             snapshot.cameras.none { it.name == cameraName }
         ) return
         val displayName = snapshot.authorizedCameraNames[cameraName] ?: cameraName
+        val privacyGrant = if (BuildConfig.DOCUMENTATION_MODE) {
+            null
+        } else {
+            issuePrivacyGrant(PrivacySurface.LIVE_PLAYBACK, PrivacyTarget.Camera(cameraName)) ?: return
+        }
         viewModelScope.launch {
             _state.update {
                 it.copy(
@@ -703,6 +1602,12 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 cameraImageRepository.refresh(profile, cameraName, 1080, force = true).map(CameraImage::bitmap)
             }
             result.onSuccess { bitmap ->
+                if (privacyGrant != null && !revalidatePrivacyGrant(privacyGrant)) {
+                    _state.update {
+                        it.copy(liveActions = it.liveActions.copy(snapshotCapturing = false))
+                    }
+                    return@onSuccess
+                }
                 val opened = share(bitmap, displayName)
                 _state.update {
                     it.copy(
@@ -751,6 +1656,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        if (
+            issuePrivacyGrant(PrivacySurface.LIVE_PLAYBACK, PrivacyTarget.Camera(cameraName)) == null ||
+            issuePrivacyGrant(
+                PrivacySurface.ACTION,
+                PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE),
+            ) == null
+        ) return
         viewModelScope.launch {
             _state.update {
                 it.copy(liveActions = it.liveActions.copy(recordingBusy = true, message = null, errorMessage = null))
@@ -846,6 +1758,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        if (
+            issuePrivacyGrant(PrivacySurface.LIVE_PLAYBACK, PrivacyTarget.Camera(camera.name)) == null ||
+            issuePrivacyGrant(
+                PrivacySurface.ACTION,
+                PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE),
+            ) == null
+        ) return
         val profile = current.activeProfile ?: return
         _state.update { it.copy(ptz = PtzUiState(cameraName = camera.name)) }
         ptzWebSocketClient.connect(profile)
@@ -855,6 +1774,17 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val current = _state.value
         val cameraName = current.ptz.cameraName ?: return
         if (current.snapshot?.ptzCameras?.get(cameraName)?.hasControls != true) return
+        if (
+            !BuildConfig.DOCUMENTATION_MODE && (
+                issuePrivacyGrant(PrivacySurface.LIVE_PLAYBACK, PrivacyTarget.Camera(cameraName)) == null ||
+                    issuePrivacyGrant(
+                        PrivacySurface.ACTION,
+                        PrivacyTarget.LocalAction(
+                            app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE,
+                        ),
+                    ) == null
+                )
+        ) return
         val profile = current.activeProfile ?: return
         _state.update { it.copy(ptz = it.ptz.copy(errorMessage = null)) }
         ptzWebSocketClient.connect(profile)
@@ -866,6 +1796,16 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val info = current.snapshot?.ptzCameras?.get(cameraName) ?: return
         if (!info.supports(command)) return
         if (BuildConfig.DOCUMENTATION_MODE) return
+        if (
+            issuePrivacyGrant(PrivacySurface.LIVE_PLAYBACK, PrivacyTarget.Camera(cameraName)) == null ||
+            issuePrivacyGrant(
+                PrivacySurface.ACTION,
+                PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE),
+            ) == null
+        ) {
+            closePtzControls()
+            return
+        }
         if (!ptzWebSocketClient.send(cameraName, command)) {
             _state.update {
                 it.copy(ptz = it.ptz.copy(errorMessage = "Camera controls are still connecting"))
@@ -890,6 +1830,161 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         openPendingCamera()
     }
 
+    fun openTvAlert(profileKey: String, reviewId: String, actionNonce: String) {
+        if (BuildConfig.DOCUMENTATION_MODE) return
+        viewModelScope.launch {
+            var attemptsRemaining = TV_ALERT_OPEN_RETRY_ATTEMPTS
+            var resolution: TvAlertOpenResolution
+            do {
+                resolution = container.resolveTvAlertOpen(profileKey, reviewId, actionNonce)
+                if (resolution != TvAlertOpenResolution.RetryLater) break
+                attemptsRemaining -= 1
+                if (attemptsRemaining > 0) delay(TV_ALERT_OPEN_RETRY_DELAY_MILLIS)
+            } while (attemptsRemaining > 0)
+
+            when (resolution) {
+                is TvAlertOpenResolution.LiveCamera -> openCameraByName(resolution.cameraId)
+                is TvAlertOpenResolution.RecordedReview -> {
+                    val item = reviewPlaybackItems(_state.value)
+                        .firstOrNull { it.id == resolution.reviewId }
+                    if (item?.recordingAvailable == true) {
+                        playReview(item)
+                    } else {
+                        showActivityForTvAlert(expired = item?.recordingAvailable == false)
+                    }
+                }
+                is TvAlertOpenResolution.Activity -> showActivityForTvAlert(resolution.expired)
+                TvAlertOpenResolution.PrivacyBlocked -> showTvAlertPrivacyGate(
+                    PendingTvAlertOpen(profileKey, reviewId, actionNonce),
+                )
+                TvAlertOpenResolution.RetryLater,
+                TvAlertOpenResolution.Unavailable,
+                -> _state.update { it.copy(errorMessage = "This alert is no longer available") }
+            }
+        }
+    }
+
+    fun unlockTvAlert(pin: CharArray?) {
+        if (_state.value.privacy.busy) {
+            pin?.fill('\u0000')
+            return
+        }
+        val pending = pendingTvAlertOpen
+        if (pending == null) {
+            pin?.fill('\u0000')
+            cancelTvAlertPrivacyGate()
+            return
+        }
+        updatePrivacyBusy()
+        viewModelScope.launch {
+            val privacy = _state.value.privacy
+            var unlockedScopes = privacy.unlockedScopes
+            if (privacy.pinConfigured) {
+                val submitted = pin ?: run {
+                    publishPinUnlockFailure(PinUnlockResult.Unavailable)
+                    return@launch
+                }
+                when (val verified = pinCredentialService.verify(submitted)) {
+                    is PinUnlockResult.Unlocked -> unlockedScopes = verified.proof.scopes
+                    else -> {
+                        publishPinUnlockFailure(verified)
+                        return@launch
+                    }
+                }
+            } else {
+                pin?.fill('\u0000')
+            }
+
+            _state.update {
+                it.copy(
+                    privacy = it.privacy.copy(
+                        busy = false,
+                        unlockedScopes = unlockedScopes,
+                        pinSelectionsUnlocked = privacy.pinSelectionsUnlocked || privacy.pinConfigured,
+                        statusMessage = "Unlocked",
+                        errorMessage = null,
+                    ),
+                )
+            }
+
+            pendingTvAlertOpen = null
+            _state.update {
+                it.copy(
+                    tvAlertPrivacyGateOpen = false,
+                    privacy = it.privacy.copy(busy = false, errorMessage = null),
+                )
+            }
+            openTvAlert(pending.profileKey, pending.reviewId, pending.actionNonce)
+        }
+    }
+
+    fun cancelTvAlertPrivacyGate() {
+        pendingTvAlertOpen = null
+        _state.update {
+            it.copy(
+                tvAlertPrivacyGateOpen = false,
+                privacy = it.privacy.copy(errorMessage = null),
+            )
+        }
+    }
+
+    fun consumeTvAlertNavigation(requestId: Long) {
+        _state.update { current ->
+            current.copy(
+                tvAlertNavigation = current.tvAlertNavigation?.takeUnless {
+                    it.requestId == requestId
+                },
+            )
+        }
+    }
+
+    fun openLocalTestAlertSettings() {
+        closePtzControls()
+        closePlayback()
+        tvAlertNavigationRequestId = tvAlertNavigationRequestId.nextNavigationRequestId()
+        _state.update {
+            it.copy(
+                cameraGroupView = null,
+                tvAlertNavigation = TvAlertNavigationUiState(
+                    requestId = tvAlertNavigationRequestId,
+                    destination = TvAlertNavigationDestination.TV_ALERT_SETTINGS,
+                ),
+                errorMessage = null,
+            )
+        }
+    }
+
+    private fun showActivityForTvAlert(expired: Boolean) {
+        closePtzControls()
+        closePlayback()
+        tvAlertNavigationRequestId = tvAlertNavigationRequestId.nextNavigationRequestId()
+        _state.update {
+            it.copy(
+                cameraGroupView = null,
+                tvAlertNavigation = TvAlertNavigationUiState(
+                    requestId = tvAlertNavigationRequestId,
+                    destination = TvAlertNavigationDestination.ACTIVITY,
+                    expired = expired,
+                ),
+                errorMessage = if (expired) "That activity is no longer available" else null,
+            )
+        }
+    }
+
+    private fun showTvAlertPrivacyGate(pending: PendingTvAlertOpen) {
+        pendingTvAlertOpen = pending
+        closePtzControls()
+        closePlayback()
+        _state.update {
+            it.copy(
+                cameraGroupView = null,
+                tvAlertPrivacyGateOpen = true,
+                errorMessage = null,
+                privacy = it.privacy.copy(errorMessage = null),
+            )
+        }
+    }
+
     fun playStream(camera: Camera, option: LiveStreamOption) {
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
@@ -903,12 +1998,12 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        if (issuePrivacyGrant(PrivacySurface.LIVE_PLAYBACK, PrivacyTarget.Camera(camera.name)) == null) return
         val profile = _state.value.activeProfile ?: return
         playStream(profile, camera, option, "Explicit Frigate stream selection")
     }
 
     fun playBirdseye() {
-        rememberLastViewedTarget(StartupTarget(StartupTargetKind.BIRDSEYE))
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
@@ -922,6 +2017,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val current = _state.value
         val profile = current.activeProfile ?: return
         val snapshot = current.snapshot ?: return
+        val allCameras = snapshot.user.allowedCameras
+        val privacyGrant = issuePrivacyGrant(
+            PrivacySurface.LIVE_PLAYBACK,
+            PrivacyTarget.CameraCollection("birdseye", allCameras),
+        ) ?: return
+        if (!privacyGrant.grant.visibleCameraIds.containsAll(allCameras)) return
+        rememberLastViewedTarget(StartupTarget(StartupTargetKind.BIRDSEYE))
         val birdseye = snapshot.birdseye
         if (!birdseye.playable) {
             _state.update {
@@ -960,10 +2062,93 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         openReviewPlayback(item, context.itemIds, context.queue)
     }
 
-    fun playNextReviewActivity() {
+    fun playBriefingHighlights() {
+        val entries = _state.value.briefing.summary?.entries.orEmpty()
+        val allowed = visibleCameraNames(PrivacySurface.ACTIVITY)
+        val visible = entries.filter { it.item.camera in allowed }
+        val first = visible.firstOrNull() ?: return
+        val ids = visible.map { it.item.id }
+        _state.update {
+            it.copy(briefing = it.briefing.copy(activeHighlightIds = ids.toSet(), errorMessage = null))
+        }
+        openReviewPlayback(first.item, ids, queueContext = true, briefingHighlight = true)
+    }
+
+    fun openBriefingReviewQueue() {
+        val allowed = visibleCameraNames(PrivacySurface.ACTIVITY)
+        val items = _state.value.briefing.summary?.entries.orEmpty()
+            .map(BriefingEntry::item)
+            .filter { it.camera in allowed }
+        val first = items.firstOrNull() ?: return
+        _state.update { state ->
+            state.copy(
+                review = state.review.copy(
+                    items = items,
+                    loadedOnce = true,
+                    loading = false,
+                    queueItemIds = items.map(ReviewItem::id),
+                    queueIndex = 0,
+                    queueActive = true,
+                    queueCompleted = false,
+                    selectedItemId = null,
+                    errorMessage = null,
+                ),
+            )
+        }
+        selectReviewItem(first)
+    }
+
+    fun dismissBriefing() {
+        val summary = _state.value.briefing.summary ?: return
+        acknowledgeBriefing(
+            entries = summary.entries,
+            reason = BriefingAcknowledgementReason.DISMISSED,
+            dismissalTargets = summary.dismissalTargets,
+        )
+    }
+
+    fun onReviewPlaybackWatchThresholdReached(item: ReviewItem) {
+        val current = _state.value
+        val latestItem = reviewPlaybackItems(current).firstOrNull { it.id == item.id } ?: item
+        if (!latestItem.hasBeenReviewed && current.settings.autoMarkReviewedAfterPlayback) {
+            setReviewReviewed(latestItem, true)
+        }
+    }
+
+    fun onReviewPlaybackCompleted(item: ReviewItem) {
+        onReviewPlaybackWatchThresholdReached(item)
+        val current = _state.value
+        if (current.playback?.briefingHighlight == true && item.id in current.briefing.activeHighlightIds) {
+            acknowledgeBriefing(
+                entries = current.briefing.summary?.entries.orEmpty().filter { it.item.id == item.id },
+                reason = BriefingAcknowledgementReason.HIGHLIGHT_COMPLETED,
+                completedHighlightIds = setOf(item.id),
+            )
+        }
+        // A playback request with activity context represents a queue, whether it
+        // came from highlights or the ordinary Activity list. Finishing an item
+        // should therefore continue to the next available recording automatically.
+        if (current.playback?.activityContextItemIds?.isNotEmpty() == true) {
+            advanceReviewActivity(acknowledgeBriefingSkip = false)
+        }
+    }
+
+    fun playNextReviewActivity() = advanceReviewActivity(acknowledgeBriefingSkip = true)
+
+    private fun advanceReviewActivity(acknowledgeBriefingSkip: Boolean) {
         val current = _state.value
         val request = current.playback ?: return
         val currentItemId = request.activityItemId ?: return
+        if (request.briefingHighlight && acknowledgeBriefingSkip) {
+            val currentEntry = current.briefing.summary?.entries.orEmpty()
+                .firstOrNull { it.item.id == currentItemId }
+            if (currentEntry != null) {
+                acknowledgeBriefing(
+                    entries = listOf(currentEntry),
+                    reason = BriefingAcknowledgementReason.EXPLICIT_SKIP,
+                )
+            }
+        }
         val contextItemIds = request.activityContextItemIds
         if (contextItemIds.isEmpty() || current.review.advancingPlayback) return
         val firstCandidate = nextReviewPlaybackItem(
@@ -972,7 +2157,12 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             availableItems = reviewPlaybackItems(current),
         ) ?: return
         if (BuildConfig.DOCUMENTATION_MODE) {
-            openReviewPlayback(firstCandidate, contextItemIds, request.activityQueueContext)
+            openReviewPlayback(
+                firstCandidate,
+                contextItemIds,
+                request.activityQueueContext,
+                request.briefingHighlight,
+            )
             return
         }
         val profile = current.activeProfile ?: return
@@ -1007,7 +2197,12 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     return@launch
                 }
                 if (availability.getOrDefault(false)) {
-                    openReviewPlayback(candidate, contextItemIds, request.activityQueueContext)
+                    openReviewPlayback(
+                        candidate,
+                        contextItemIds,
+                        request.activityQueueContext,
+                        request.briefingHighlight,
+                    )
                     return@launch
                 }
                 val unavailableId = candidate.id
@@ -1047,6 +2242,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         reviewPlaybackNavigationJob = null
         _state.update { state ->
             val returningFromActivity = state.playback?.activityItemId != null
+            val returningFromBriefing = state.playback?.briefingHighlight == true
             state.copy(
                 playback = null,
                 activeCameraName = null,
@@ -1067,6 +2263,11 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 } else {
                     state.review
                 },
+                briefing = if (returningFromBriefing) {
+                    state.briefing.copy(activeHighlightIds = emptySet())
+                } else {
+                    state.briefing
+                },
             )
         }
     }
@@ -1075,12 +2276,23 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         item: ReviewItem,
         contextItemIds: List<String>,
         queueContext: Boolean,
+        briefingHighlight: Boolean = false,
     ) {
+        if (
+            !BuildConfig.DOCUMENTATION_MODE &&
+            issuePrivacyGrant(
+                PrivacySurface.ACTIVITY,
+                PrivacyTarget.Review(item.id, item.camera, item.subLabels.isNotEmpty()),
+            ) == null
+        ) return
         val current = _state.value
         val request = if (BuildConfig.DOCUMENTATION_MODE) {
             DocumentationFixtures.recordedPlayback(item).copy(
                 activityContextItemIds = contextItemIds,
                 activityQueueContext = queueContext,
+                briefingHighlight = briefingHighlight,
+                recordingStartTime = item.startTime,
+                recordingEndTime = item.endTime,
             )
         } else {
             val profile = current.activeProfile ?: return
@@ -1098,6 +2310,9 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 activityItemId = item.id,
                 activityContextItemIds = contextItemIds,
                 activityQueueContext = queueContext,
+                briefingHighlight = briefingHighlight,
+                recordingStartTime = item.startTime,
+                recordingEndTime = item.endTime,
             )
         }
         _state.update { state ->
@@ -1127,7 +2342,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     private fun reviewPlaybackItems(state: Phase0UiState): List<ReviewItem> =
         (listOfNotNull(state.review.playbackItem) +
             state.review.items +
-            state.snapshot?.recentReviewItems.orEmpty())
+            state.snapshot?.recentReviewItems.orEmpty() +
+            state.briefing.summary?.entries.orEmpty().map(BriefingEntry::item))
             .distinctBy(ReviewItem::id)
 
     fun openCameraGroup(title: String, cameraNames: List<String>) {
@@ -1137,6 +2353,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (selectedNames.size !in MIN_CAMERAS_PER_GROUP_VIEW..MAX_CAMERAS_PER_GROUP_VIEW) {
             _state.update { it.copy(errorMessage = "Choose two to four different cameras") }
             return
+        }
+        if (!BuildConfig.DOCUMENTATION_MODE) {
+            val grant = issuePrivacyGrant(
+                PrivacySurface.VIEW,
+                PrivacyTarget.CameraCollection("camera-group", selectedNames.toSet()),
+            ) ?: return
+            if (!grant.grant.visibleCameraIds.containsAll(selectedNames)) return
         }
         val cameras = selectedNames.mapNotNull { name -> snapshot.cameras.firstOrNull { it.name == name } }
         if (cameras.size != selectedNames.size) {
@@ -1182,6 +2405,335 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
 
     fun closeCameraGroup() {
         _state.update { it.copy(cameraGroupView = null, playback = null, activeCameraName = null) }
+    }
+
+    fun startMonitorMode(preset: MonitorPreset = MonitorPreset.CALM) {
+        if (_state.value.monitorMode != null) return
+        val current = _state.value
+        val group = current.cameraGroupView ?: return
+        val cameras = group.streams.map(CameraGroupStream::camera).distinctBy(Camera::name)
+        startMonitorMode(group.title, cameras, preset)
+    }
+
+    fun startMonitorModeForView(
+        title: String,
+        cameraNames: List<String>,
+        preset: MonitorPreset = MonitorPreset.CALM,
+    ) {
+        if (_state.value.monitorMode != null) return
+        val current = _state.value
+        val snapshot = current.snapshot ?: return
+        val selectedNames = cameraNames.distinct()
+        if (selectedNames.size !in MIN_CAMERAS_PER_GROUP_VIEW..MAX_CAMERAS_PER_GROUP_VIEW) {
+            _state.update { it.copy(errorMessage = "Choose two to four different cameras") }
+            return
+        }
+        val cameras = selectedNames.mapNotNull { cameraName ->
+            snapshot.cameras.firstOrNull { it.name == cameraName }
+        }
+        if (cameras.size != selectedNames.size) {
+            _state.update { it.copy(errorMessage = "One of those cameras is not available") }
+            return
+        }
+        startMonitorMode(title, cameras, preset)
+    }
+
+    private fun startMonitorMode(
+        title: String,
+        cameras: List<Camera>,
+        preset: MonitorPreset,
+    ) {
+        if (_state.value.monitorMode != null) return
+        val current = _state.value
+        if (cameras.isEmpty()) return
+        val monitorTitle = title.trim().take(CAMERA_GROUP_VIEW_TITLE_LENGTH).ifEmpty { "View" }
+        val cameraIds = cameras.mapTo(linkedSetOf(), Camera::name)
+        val grant = if (BuildConfig.DOCUMENTATION_MODE) {
+            cameraIds
+        } else {
+            issuePrivacyGrant(
+                PrivacySurface.MONITOR,
+                PrivacyTarget.CameraCollection("monitor-$monitorTitle", cameraIds),
+            )?.grant?.visibleCameraIds.orEmpty()
+        }
+        if (grant.isEmpty()) {
+            _state.update { it.copy(errorMessage = "This View is hidden by the current privacy settings") }
+            return
+        }
+        val now = System.currentTimeMillis().coerceAtLeast(0L)
+        val privacyEpoch = current.privacy.epoch.coerceAtLeast(0L)
+        _state.update {
+            it.copy(
+                monitorMode = MonitorModeUiState(
+                    title = monitorTitle,
+                    cameras = cameras,
+                    preset = preset,
+                    visibleCameraIds = grant,
+                    arbitration = monitorArbiter.initialState(privacyEpoch, now),
+                ),
+                errorMessage = null,
+            )
+        }
+        if (BuildConfig.DOCUMENTATION_MODE) return
+        container.startMonitorAwareness()
+        monitorJob?.cancel()
+        monitorJob = viewModelScope.launch(Dispatchers.Default) {
+            while (isActive && _state.value.monitorMode != null) {
+                val monitor = _state.value.monitorMode ?: break
+                val now = System.currentTimeMillis().coerceAtLeast(0L)
+                if (monitor.exitAtEpochMillis?.let { now >= it } == true) {
+                    withContext(Dispatchers.Main.immediate) { closeMonitorMode() }
+                    break
+                }
+                advanceMonitor(MonitorAction.Tick)
+                delay(MONITOR_TICK_MILLIS)
+            }
+        }
+    }
+
+    fun setMonitorPreset(preset: MonitorPreset) {
+        val monitor = _state.value.monitorMode ?: return
+        container.revokeSingleLivePlayback()
+        container.updateMonitorPresentedReview(null)
+        val now = System.currentTimeMillis().coerceAtLeast(0L)
+        _state.update {
+            it.copy(
+                monitorMode = monitor.copy(
+                    preset = preset,
+                    arbitration = monitorArbiter.initialState(it.privacy.epoch, now),
+                    liveCompatibilityRequestId = null,
+                    statusMessage = null,
+                ),
+            )
+        }
+    }
+
+    fun selectMonitorCamera(cameraId: String) {
+        viewModelScope.launch(Dispatchers.Default) {
+            advanceMonitor(MonitorAction.ManualSelect(cameraId))
+        }
+    }
+
+    fun monitorPlaybackReady() {
+        viewModelScope.launch(Dispatchers.Default) { advanceMonitor(MonitorAction.PlaybackReady) }
+    }
+
+    fun monitorPlaybackFailed() {
+        viewModelScope.launch(Dispatchers.Default) {
+            advanceMonitor(MonitorAction.PlaybackFailed)
+        }
+    }
+
+    fun setMonitorKeepScreenAwake(enabled: Boolean) {
+        _state.update { state ->
+            state.copy(monitorMode = state.monitorMode?.copy(keepScreenAwake = enabled))
+        }
+    }
+
+    fun setMonitorAudioEnabled(enabled: Boolean) {
+        if (enabled && _state.value.privacy.guestModeActive) return
+        _state.update { state ->
+            state.copy(monitorMode = state.monitorMode?.copy(audioEnabled = enabled))
+        }
+    }
+
+    fun setMonitorExitMinutes(minutes: Int?) {
+        if (minutes != null && minutes !in setOf(30, 60, 120)) return
+        val now = System.currentTimeMillis().coerceAtLeast(0L)
+        val deadline = minutes?.let { safeMonitorDeadline(now, it * 60_000L) }
+        _state.update { state ->
+            state.copy(
+                monitorMode = state.monitorMode?.copy(
+                    exitAtEpochMillis = deadline,
+                    exitAfterMinutes = minutes,
+                ),
+            )
+        }
+    }
+
+    fun closeMonitorMode() {
+        val monitor = _state.value.monitorMode ?: return
+        monitorJob?.cancel()
+        monitorJob = null
+        val now = System.currentTimeMillis().coerceAtLeast(0L)
+        val transition = monitorArbiter.reduce(
+            monitor.arbitration,
+            monitorInput(monitor, MonitorAction.Exit, now),
+        )
+        if (transition.commands.any { it is MonitorCommand.ReleasePromotion }) {
+            container.revokeSingleLivePlayback()
+        }
+        container.stopMonitorAwareness()
+        _state.update { it.copy(monitorMode = null) }
+    }
+
+    private suspend fun advanceMonitor(action: MonitorAction) = monitorMutex.withLock {
+        val monitor = _state.value.monitorMode ?: return@withLock
+        val now = System.currentTimeMillis().coerceAtLeast(0L)
+        val input = monitorInput(monitor, action, now)
+        if (input.visibleCameraIds.isEmpty()) {
+            container.revokeSingleLivePlayback()
+            container.updateMonitorPresentedReview(null)
+            container.stopMonitorAwareness()
+            _state.update { it.copy(monitorMode = null) }
+            return@withLock
+        }
+        val transition = monitorArbiter.reduce(
+            monitor.arbitration,
+            input,
+        )
+        container.updateMonitorPresentedReview(transition.state.promotion?.reviewId)
+        _state.update { state ->
+            state.copy(
+                monitorMode = state.monitorMode?.copy(
+                    arbitration = transition.state,
+                    visibleCameraIds = input.visibleCameraIds,
+                    statusMessage = if (action == MonitorAction.PlaybackReady) {
+                        null
+                    } else {
+                        state.monitorMode.statusMessage
+                    },
+                    audioEnabled = state.monitorMode.audioEnabled &&
+                        !state.privacy.guestModeActive,
+                ),
+            )
+        }
+        transition.commands.forEach { command ->
+            when (command) {
+                is MonitorCommand.BeginPromotion -> prepareMonitorPromotion(command.promotion.cameraId)
+                is MonitorCommand.ReleasePromotion -> {
+                    container.revokeSingleLivePlayback()
+                    _state.update { state ->
+                        state.copy(
+                            monitorMode = state.monitorMode?.copy(
+                                liveCompatibilityRequestId = null,
+                            ),
+                        )
+                    }
+                }
+                MonitorCommand.ShowBaseline,
+                is MonitorCommand.ShowPatrolCamera,
+                -> _state.update { state ->
+                    state.copy(
+                        monitorMode = state.monitorMode?.copy(
+                            liveCompatibilityRequestId = null,
+                            statusMessage = null,
+                        ),
+                    )
+                }
+                MonitorCommand.ShowConnectionProblem -> _state.update { state ->
+                    state.copy(
+                        monitorMode = state.monitorMode?.copy(
+                            statusMessage = "Reconnecting to Frigate",
+                        ),
+                    )
+                }
+                MonitorCommand.EndSession -> Unit
+            }
+        }
+    }
+
+    private fun monitorInput(
+        monitor: MonitorModeUiState,
+        action: MonitorAction,
+        now: Long,
+    ): app.opah.tv.monitor.MonitorInput {
+        val cameraIds = monitor.cameras.mapTo(linkedSetOf(), Camera::name)
+        val privacyVisible = if (BuildConfig.DOCUMENTATION_MODE) {
+            cameraIds
+        } else {
+            issuePrivacyGrant(
+                PrivacySurface.MONITOR,
+                PrivacyTarget.CameraCollection("active-monitor", cameraIds),
+            )?.grant?.visibleCameraIds.orEmpty()
+        }
+        val transport = if (BuildConfig.DOCUMENTATION_MODE) {
+            null
+        } else {
+            container.monitorTransportState.value
+        }
+        val visible = when (val scope = transport?.cameraScope) {
+            is CameraScopeState.Fresh -> privacyVisible.intersect(scope.evidence.allowedCameraIds)
+            is CameraScopeState.Stale -> privacyVisible.intersect(scope.evidence.allowedCameraIds)
+            CameraScopeState.Unknown,
+            null,
+            -> privacyVisible
+        }
+        return app.opah.tv.monitor.MonitorInput(
+            configuration = MonitorConfiguration(
+                preset = monitor.preset,
+                viewCameraIds = monitor.cameras.map(Camera::name),
+                significantMotionEnabled = _state.value.tvAlerts.significantMotionEnabled,
+            ),
+            visibleCameraIds = visible,
+            privacyEpoch = _state.value.privacy.epoch.coerceAtLeast(0L),
+            reviews = if (BuildConfig.DOCUMENTATION_MODE) {
+                emptyList()
+            } else {
+                container.monitorAwarenessState.value.ledger.reviewsById.values
+            },
+            networkAvailable = BuildConfig.DOCUMENTATION_MODE || (
+                transport?.networkAvailable == true &&
+                    transport.authenticationState == RealtimeAuthenticationState.AUTHENTICATED
+                ),
+            nowEpochMillis = now,
+            action = action,
+        )
+    }
+
+    private fun prepareMonitorPromotion(cameraId: String) {
+        val current = _state.value
+        val monitor = current.monitorMode ?: return
+        val profile = current.activeProfile ?: return degradeMonitorPromotion()
+        val snapshot = current.snapshot ?: return degradeMonitorPromotion()
+        val device = current.device ?: return degradeMonitorPromotion()
+        val camera = monitor.cameras.firstOrNull { it.name == cameraId }
+            ?: return degradeMonitorPromotion()
+        runCatching {
+            val option = streamSelector.select(
+                camera,
+                device.codecs,
+                StreamPreference.LOW_BANDWIDTH,
+            ).getOrThrow().option
+            container.singleLivePlaybackCoordinator.prepare(
+                profile = profile,
+                snapshot = snapshot,
+                camera = camera,
+                preferredStreamName = option.streamName,
+                device = device,
+                preferRtpTcp = current.settings.preferRtpTcp,
+                purpose = PlaybackPurpose.MONITOR,
+            )
+        }.onSuccess { requestId ->
+            _state.update { state ->
+                state.copy(
+                    monitorMode = state.monitorMode?.copy(
+                        liveCompatibilityRequestId = requestId.value,
+                        statusMessage = "Opening ${camera.displayName}",
+                    ),
+                )
+            }
+        }.onFailure {
+            degradeMonitorPromotion()
+        }
+    }
+
+    private fun degradeMonitorPromotion() {
+        val monitor = _state.value.monitorMode ?: return
+        val now = System.currentTimeMillis().coerceAtLeast(0L)
+        val transition = monitorArbiter.reduce(
+            monitor.arbitration,
+            monitorInput(monitor, MonitorAction.PlaybackFailed, now),
+        )
+        _state.update { state ->
+            state.copy(
+                monitorMode = state.monitorMode?.copy(
+                    arbitration = transition.state,
+                    liveCompatibilityRequestId = null,
+                    statusMessage = "Live video is unavailable; showing snapshots",
+                ),
+            )
+        }
     }
 
     fun saveCameraView(name: String, cameraNames: List<String>) {
@@ -1463,12 +3015,19 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     fun updateAppearance(mode: AppearanceMode) = updateSettings { it.copy(appearanceMode = mode) }
 
     fun updateCustomTheme(colors: CustomThemeColors) = updateSettings {
-        it.copy(customThemeColors = ThemeColorPolicy.sanitize(colors))
+        it.copy(
+            appearanceMode = AppearanceMode.CUSTOM,
+            customThemeColors = ThemeColorPolicy.sanitize(colors),
+        )
     }
 
     fun updateReducedMotion(enabled: Boolean) = updateSettings { it.copy(reducedMotion = enabled) }
 
     fun updateHighContrast(enabled: Boolean) = updateSettings { it.copy(highContrast = enabled) }
+
+    fun updateSubtleRoundedCorners(enabled: Boolean) = updateSettings {
+        it.copy(subtleRoundedCorners = enabled)
+    }
 
     fun updateAutomaticUpdateChecks(enabled: Boolean) =
         updateSettings { it.copy(automaticUpdateChecksEnabled = enabled) }
@@ -1530,6 +3089,175 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
 
     fun updatePreferRtpTcp(enabled: Boolean) = updateSettings { it.copy(preferRtpTcp = enabled) }
 
+    fun loadCameraPlaybackCompatibilityChoices() {
+        if (BuildConfig.DOCUMENTATION_MODE) return
+        val current = _state.value
+        val profile = current.activeProfile ?: return
+        val snapshot = current.snapshot ?: return
+        val device = current.device ?: return
+        viewModelScope.launch {
+            val choices = buildMap {
+                snapshot.cameras.forEach { camera ->
+                    val preferred = streamSelector.select(
+                        camera = camera,
+                        deviceCodecs = device.codecs,
+                        preference = current.settings.streamPreference,
+                    ).getOrNull()?.option ?: return@forEach
+                    val requestId = runCatching {
+                        container.singleLivePlaybackCoordinator.prepare(
+                            profile = profile,
+                            snapshot = snapshot,
+                            camera = camera,
+                            preferredStreamName = preferred.streamName,
+                            device = device,
+                            preferRtpTcp = current.settings.preferRtpTcp,
+                        )
+                    }.getOrNull() ?: return@forEach
+                    val saved = runCatching {
+                        container.singleLivePlaybackCoordinator.loadSavedStrategy(requestId)
+                    }.getOrNull() ?: return@forEach
+                    put(camera.name, savedPlaybackChoiceLabel(
+                        audioMode = saved.record.audioMode,
+                        transportMode = saved.record.transportMode,
+                        decoderMode = saved.record.decoderMode,
+                    ))
+                }
+            }
+            if (_state.value.activeProfile == profile && _state.value.snapshot == snapshot) {
+                _state.update { it.copy(playbackCompatibilityChoices = choices) }
+            }
+        }
+    }
+
+    fun testCameraPlayback(
+        cameraName: String,
+        mode: PlaybackCompatibilityTestMode = PlaybackCompatibilityTestMode.AUTOMATIC,
+    ) {
+        val current = _state.value
+        val camera = current.snapshot?.cameras?.firstOrNull { it.name == cameraName } ?: return
+        if (
+            !BuildConfig.DOCUMENTATION_MODE &&
+            issuePrivacyGrant(
+                PrivacySurface.LIVE_PLAYBACK,
+                PrivacyTarget.Camera(camera.name),
+            ) == null
+        ) {
+            _state.update {
+                it.copy(
+                    playbackCompatibilityMessage =
+                        "${camera.displayName} is not available with the current privacy settings",
+                )
+            }
+            return
+        }
+        _state.update {
+            it.copy(
+                playbackCompatibilityMessage =
+                    "Starting ${camera.displayName}. Video may restart while Opah tries a few safe choices",
+            )
+        }
+        if (BuildConfig.DOCUMENTATION_MODE) {
+            _state.update {
+                it.copy(
+                    playback = DocumentationFixtures.compatibilityPlayback(camera),
+                    activeCameraName = camera.name,
+                    errorMessage = null,
+                )
+            }
+            return
+        }
+        val profile = current.activeProfile ?: return
+        streamSelector.select(
+            camera = camera,
+            deviceCodecs = current.device?.codecs.orEmpty(),
+            preference = current.settings.streamPreference,
+        )
+            .onSuccess { selection ->
+                val preferRtpTcp = when (mode) {
+                    PlaybackCompatibilityTestMode.STANDARD_CONNECTION -> false
+                    PlaybackCompatibilityTestMode.RELIABLE_CONNECTION,
+                    PlaybackCompatibilityTestMode.RELIABLE_VIDEO_ONLY,
+                    -> true
+                    PlaybackCompatibilityTestMode.AUTOMATIC,
+                    PlaybackCompatibilityTestMode.VIDEO_ONLY,
+                    -> current.settings.preferRtpTcp
+                }
+                playStream(
+                    profile = profile,
+                    camera = camera,
+                    option = selection.option,
+                    reason = "Compatibility test",
+                    compatibilityTest = true,
+                    compatibilityTestVideoOnly = mode == PlaybackCompatibilityTestMode.VIDEO_ONLY ||
+                        mode == PlaybackCompatibilityTestMode.RELIABLE_VIDEO_ONLY,
+                    compatibilityTestUseSavedStrategyFirst =
+                        mode == PlaybackCompatibilityTestMode.AUTOMATIC,
+                    preferRtpTcpOverride = preferRtpTcp,
+                )
+            }
+            .onFailure {
+                _state.update { state ->
+                    state.copy(errorMessage = "This camera has no live stream to test")
+                }
+            }
+    }
+
+    fun reportPlaybackCompatibilityStatus(message: String) {
+        _state.update { it.copy(playbackCompatibilityMessage = message) }
+    }
+
+    fun resetCameraPlaybackCompatibility(cameraName: String) {
+        val current = _state.value
+        val profile = current.activeProfile ?: return
+        val snapshot = current.snapshot ?: return
+        val device = current.device ?: return
+        val camera = snapshot.cameras.firstOrNull { it.name == cameraName } ?: return
+        val preferred = streamSelector.select(
+            camera = camera,
+            deviceCodecs = device.codecs,
+            preference = current.settings.streamPreference,
+        ).getOrNull()?.option ?: run {
+            _state.update {
+                it.copy(playbackCompatibilityMessage = "This camera has no live stream to reset")
+            }
+            return
+        }
+        val requestId = runCatching {
+            container.singleLivePlaybackCoordinator.prepare(
+                profile = profile,
+                snapshot = snapshot,
+                camera = camera,
+                preferredStreamName = preferred.streamName,
+                device = device,
+                preferRtpTcp = current.settings.preferRtpTcp,
+            )
+        }.getOrElse {
+            _state.update {
+                it.copy(playbackCompatibilityMessage = "The saved choice could not be reset")
+            }
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                container.singleLivePlaybackCoordinator.reset(requestId)
+            }
+                .onSuccess {
+                    _state.update {
+                        it.copy(
+                            playbackCompatibilityMessage =
+                                "Saved choice removed. Opah will choose automatically next time ${camera.displayName} opens",
+                            playbackCompatibilityChoices = it.playbackCompatibilityChoices - camera.name,
+                        )
+                    }
+                }
+                .onFailure {
+                    _state.update {
+                        it.copy(playbackCompatibilityMessage = "The saved choice could not be reset")
+                    }
+                }
+        }
+    }
+
     fun updateStartLiveMuted(enabled: Boolean) =
         updateSettings { it.copy(startLiveMuted = enabled) }
 
@@ -1580,7 +3308,9 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     fun cachedCameraImage(cameraName: String): CameraImage? = if (BuildConfig.DOCUMENTATION_MODE) {
         documentationImages.camera(cameraName)
     } else {
-        _state.value.activeProfile?.let { cameraImageRepository.cached(it, cameraName) }
+        issuePrivacyGrant(PrivacySurface.HOME, PrivacyTarget.Camera(cameraName))
+            ?.let { _state.value.activeProfile }
+            ?.let { cameraImageRepository.cached(it, cameraName) }
     }
 
     suspend fun refreshCameraImage(cameraName: String, height: Int = 360): Result<CameraImage> {
@@ -1590,7 +3320,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         }
         val profile = _state.value.activeProfile
             ?: return Result.failure(IllegalStateException("No active Frigate connection"))
-        return cameraImageRepository.refresh(profile, cameraName, height).also { result ->
+        val privacyGrant = issuePrivacyGrant(PrivacySurface.HOME, PrivacyTarget.Camera(cameraName))
+            ?: return Result.failure(IllegalStateException("This camera is unavailable"))
+        val refreshResult = cameraImageRepository.refresh(profile, cameraName, height)
+        if (refreshResult.isSuccess && !revalidatePrivacyGrant(privacyGrant)) {
+            return Result.failure(IllegalStateException("This camera is unavailable"))
+        }
+        return refreshResult.also { result ->
             if (result.isSuccess) {
                 cameraImageFailureCounts.remove(cameraName)
                 _state.update { state ->
@@ -1664,7 +3400,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         }
         val current = _state.value
         val profile = current.activeProfile ?: return
-        val allowedCameras = current.snapshot?.user?.allowedCameras.orEmpty()
+        val allowedCameras = visibleCameraNames(PrivacySurface.ACTIVITY)
         if (allowedCameras.isEmpty()) return
         val filters = current.review.filters
         reviewLoadJob?.cancel()
@@ -1981,7 +3717,19 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         }
         viewModelScope.launch {
             runCatching { repository.setReviewReviewed(profile, item, reviewed) }
-                .onSuccess { publishReviewStatus(item.id, reviewed) }
+                .onSuccess {
+                    publishReviewStatus(item.id, reviewed)
+                    if (reviewed) {
+                        val briefingEntry = _state.value.briefing.summary?.entries.orEmpty()
+                            .firstOrNull { entry -> entry.item.id == item.id }
+                        if (briefingEntry != null) {
+                            acknowledgeBriefing(
+                                entries = listOf(briefingEntry),
+                                reason = BriefingAcknowledgementReason.MARKED_REVIEWED,
+                            )
+                        }
+                    }
+                }
                 .onFailure { error ->
                     if (error is AuthenticationExpiredException) {
                         handleConnectedFailure(error)
@@ -2014,7 +3762,18 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         }
         viewModelScope.launch {
             runCatching { repository.setReviewsReviewed(profile, items, reviewed = true) }
-                .onSuccess { publishReviewStatuses(items.map(ReviewItem::id).toSet(), reviewed = true) }
+                .onSuccess {
+                    val ids = items.map(ReviewItem::id).toSet()
+                    publishReviewStatuses(ids, reviewed = true)
+                    val briefingEntries = _state.value.briefing.summary?.entries.orEmpty()
+                        .filter { entry -> entry.item.id in ids }
+                    if (briefingEntries.isNotEmpty()) {
+                        acknowledgeBriefing(
+                            entries = briefingEntries,
+                            reason = BriefingAcknowledgementReason.MARKED_REVIEWED,
+                        )
+                    }
+                }
                 .onFailure { error ->
                     if (error is AuthenticationExpiredException) {
                         handleConnectedFailure(error)
@@ -2044,6 +3803,14 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        val reviewPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTIVITY,
+            PrivacyTarget.Review(item.id, item.camera, item.subLabels.isNotEmpty()),
+        ) ?: return
+        val actionPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTION,
+            PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE),
+        ) ?: return
         val profile = current.activeProfile ?: return
         val allowed = current.snapshot?.user?.allowedCameras.orEmpty()
         val cameraName = current.snapshot?.authorizedCameraNames?.get(item.camera)
@@ -2062,8 +3829,26 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
         viewModelScope.launch {
+            if (
+                !revalidatePrivacyGrant(reviewPrivacyGrant) ||
+                !revalidatePrivacyGrant(actionPrivacyGrant)
+            ) {
+                _state.update { state ->
+                    state.copy(review = state.review.copy(savingClipItemId = null))
+                }
+                return@launch
+            }
             runCatching { repository.saveReviewClip(profile, allowed, item, clipName) }
                 .onSuccess {
+                    if (
+                        !revalidatePrivacyGrant(reviewPrivacyGrant) ||
+                        !revalidatePrivacyGrant(actionPrivacyGrant)
+                    ) {
+                        _state.update { state ->
+                            state.copy(review = state.review.copy(savingClipItemId = null))
+                        }
+                        return@onSuccess
+                    }
                     _state.update { state ->
                         state.copy(
                             review = state.review.afterClipSaved(item.id),
@@ -2118,6 +3903,18 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        val reviewPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTIVITY,
+            PrivacyTarget.Review(item.id, item.camera, item.subLabels.isNotEmpty()),
+        ) ?: return
+        val cameraPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTIVITY,
+            PrivacyTarget.CameraCollection("save-all-angles-${item.id}", selected),
+        )?.takeIf { it.grant.visibleCameraIds.containsAll(selected) } ?: return
+        val actionPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTION,
+            PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE),
+        ) ?: return
         val profile = current.activeProfile ?: return
         val end = ((item.endTime ?: (item.startTime + 30.0)) + 2.0)
             .coerceAtMost(System.currentTimeMillis() / 1_000.0)
@@ -2148,6 +3945,16 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
         viewModelScope.launch {
+            if (
+                !revalidatePrivacyGrant(reviewPrivacyGrant) ||
+                !revalidatePrivacyGrant(cameraPrivacyGrant) ||
+                !revalidatePrivacyGrant(actionPrivacyGrant)
+            ) {
+                _state.update { state ->
+                    state.copy(review = state.review.copy(savingClipItemId = null))
+                }
+                return@launch
+            }
             runCatching {
                 operationsRepository.startBatchExport(
                     profile,
@@ -2156,6 +3963,16 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     request,
                 )
             }.onSuccess { result ->
+                if (
+                    !revalidatePrivacyGrant(reviewPrivacyGrant) ||
+                    !revalidatePrivacyGrant(cameraPrivacyGrant) ||
+                    !revalidatePrivacyGrant(actionPrivacyGrant)
+                ) {
+                    _state.update { state ->
+                        state.copy(review = state.review.copy(savingClipItemId = null))
+                    }
+                    return@onSuccess
+                }
                 val savedCount = result.results.count { it.success && it.exportId != null }
                 val failedCount = result.results.size - savedCount
                 _state.update { state ->
@@ -2199,8 +4016,24 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) return
         val profile = current.activeProfile ?: return
         val snapshot = current.snapshot ?: return
-        val allowed = snapshot.user.allowedCameras
+        val allowed = visibleCameraNames(PrivacySurface.CLIP)
         if (current.exports.loading || (!force && current.exports.loadedOnce)) return
+        if (allowed.isEmpty()) {
+            _state.update {
+                it.copy(
+                    exports = it.exports.copy(
+                        loading = false,
+                        loadedOnce = true,
+                        items = emptyList(),
+                        incidents = emptyList(),
+                        incidentsLoaded = true,
+                        errorMessage = null,
+                        incidentsErrorMessage = null,
+                    ),
+                )
+            }
+            return
+        }
         exportsLoadJob?.cancel()
         exportsLoadJob = viewModelScope.launch {
             _state.update { it.copy(exports = it.exports.copy(loading = true, errorMessage = null)) }
@@ -2258,6 +4091,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val current = _state.value
         val profile = current.activeProfile ?: return
         if (export.camera !in current.snapshot?.user?.allowedCameras.orEmpty()) return
+        if (
+            !BuildConfig.DOCUMENTATION_MODE &&
+            issuePrivacyGrant(
+                PrivacySurface.CLIP,
+                PrivacyTarget.ClipOrIncident(export.id, export.camera),
+            ) == null
+        ) return
         val url = if (BuildConfig.DOCUMENTATION_MODE) {
             "$DOCUMENTATION_URI_PREFIX${export.camera}?export=${export.id}"
         } else {
@@ -2275,6 +4115,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     kind = PlaybackKind.RECORDED,
                     cameraName = export.camera,
                     detail = "Saved clip",
+                    savedClipId = export.id,
+                    recordingStartTime = export.createdAt,
                 ),
                 activeCameraName = null,
                 errorMessage = null,
@@ -2315,8 +4157,16 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        val clipPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.CLIP,
+            PrivacyTarget.ClipOrIncident(export.id, export.camera),
+        ) ?: return
+        val deletePrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTION,
+            PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.DESTRUCTIVE_OPERATION),
+        ) ?: return
         val profile = current.activeProfile ?: return
-        val allowed = current.snapshot.user.allowedCameras
+        val allowed = visibleCameraNames(PrivacySurface.CLIP)
         val frigateVersion = current.snapshot.frigateVersion
         _state.update {
             it.copy(
@@ -2328,6 +4178,15 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
         viewModelScope.launch {
+            if (
+                !revalidatePrivacyGrant(clipPrivacyGrant) ||
+                !revalidatePrivacyGrant(deletePrivacyGrant)
+            ) {
+                _state.update { state ->
+                    state.copy(exports = state.exports.copy(deletingItemId = null))
+                }
+                return@launch
+            }
             val deleteFailure = runCatching {
                 repository.deleteExport(profile, allowed, export, frigateVersion)
             }.exceptionOrNull()
@@ -2405,9 +4264,19 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        val clipPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.CLIP,
+            PrivacyTarget.ClipOrIncident(export.id, export.camera),
+        ) ?: return
+        val actionPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTION,
+            PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE),
+        ) ?: return
         val profile = current.activeProfile ?: return
         val snapshot = current.snapshot ?: return
         runExportOperation("Renaming the clip failed") {
+            check(revalidatePrivacyGrant(clipPrivacyGrant)) { "This clip is no longer available" }
+            check(revalidatePrivacyGrant(actionPrivacyGrant)) { "This action is locked" }
             operationsRepository.renameExport(
                 profile,
                 snapshot.user,
@@ -2448,9 +4317,19 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        val clipPrivacyGrant = issueCompleteCameraCollectionGrant(
+            PrivacySurface.CLIP,
+            "create-incident",
+        ) ?: return
+        val actionPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTION,
+            PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE),
+        ) ?: return
         val profile = current.activeProfile ?: return
         val snapshot = current.snapshot ?: return
         runExportOperation("Creating the Incident failed") {
+            check(revalidatePrivacyGrant(clipPrivacyGrant)) { "Incidents are no longer available" }
+            check(revalidatePrivacyGrant(actionPrivacyGrant)) { "This action is locked" }
             val id = operationsRepository.createIncident(
                 profile,
                 snapshot.user,
@@ -2492,9 +4371,16 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        val incidentPrivacyGrant = issueIncidentPrivacyGrant(incident) ?: return
+        val actionPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTION,
+            PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE),
+        ) ?: return
         val profile = current.activeProfile ?: return
         val snapshot = current.snapshot ?: return
         runExportOperation("Updating the Incident failed") {
+            check(revalidatePrivacyGrant(incidentPrivacyGrant)) { "This Incident is no longer available" }
+            check(revalidatePrivacyGrant(actionPrivacyGrant)) { "This action is locked" }
             operationsRepository.updateIncident(
                 profile,
                 snapshot.user,
@@ -2526,9 +4412,19 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        val clipPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.CLIP,
+            PrivacyTarget.ClipOrIncident(export.id, export.camera),
+        ) ?: return
+        val actionPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTION,
+            PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE),
+        ) ?: return
         val profile = current.activeProfile ?: return
         val snapshot = current.snapshot ?: return
         runExportOperation("Moving the clip failed") {
+            check(revalidatePrivacyGrant(clipPrivacyGrant)) { "This clip is no longer available" }
+            check(revalidatePrivacyGrant(actionPrivacyGrant)) { "This action is locked" }
             operationsRepository.reassignExports(
                 profile,
                 snapshot.user,
@@ -2563,9 +4459,35 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        val incidentCameraIds = current.exports.items.asSequence()
+            .filter { it.incidentId == incident.id }
+            .map { it.camera }
+            .toSet()
+        val incidentPrivacyGrant = if (incidentCameraIds.isEmpty()) {
+            val cameraIds = current.snapshot?.user?.allowedCameras.orEmpty()
+            issuePrivacyGrant(
+                PrivacySurface.INCIDENT,
+                PrivacyTarget.CameraCollection("incident-${incident.id}", cameraIds),
+            )?.takeIf { it.grant.visibleCameraIds.containsAll(cameraIds) }
+        } else {
+            issuePrivacyGrant(
+                PrivacySurface.INCIDENT,
+                PrivacyTarget.ClipOrIncident(
+                    itemId = incident.id,
+                    cameraId = incidentCameraIds.first(),
+                    additionalCameraIds = incidentCameraIds.drop(1).toSet(),
+                ),
+            )
+        } ?: return
+        val deletePrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTION,
+            PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.DESTRUCTIVE_OPERATION),
+        ) ?: return
         val profile = current.activeProfile ?: return
         val snapshot = current.snapshot ?: return
         runExportOperation("Deleting the Incident failed") {
+            check(revalidatePrivacyGrant(incidentPrivacyGrant)) { "This Incident is no longer available" }
+            check(revalidatePrivacyGrant(deletePrivacyGrant)) { "This action is locked" }
             operationsRepository.deleteIncident(
                 profile,
                 snapshot.user,
@@ -2615,32 +4537,64 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     fun cachedReviewImage(item: ReviewItem) = if (BuildConfig.DOCUMENTATION_MODE) {
         documentationImages.review(item)
     } else {
-        _state.value.activeProfile?.let { reviewImageRepository.cached(it, item) }
+        issuePrivacyGrant(
+            PrivacySurface.ACTIVITY,
+            PrivacyTarget.Review(item.id, item.camera),
+        )?.let { _state.value.activeProfile }
+            ?.let { reviewImageRepository.cached(it, item) }
     }
 
-    suspend fun refreshReviewImage(item: ReviewItem, height: Int = 360) =
-        if (BuildConfig.DOCUMENTATION_MODE) {
+    suspend fun refreshReviewImage(item: ReviewItem, height: Int = 360): Result<ReviewImage> {
+        return if (BuildConfig.DOCUMENTATION_MODE) {
             documentationImages.review(item)?.let(Result.Companion::success)
                 ?: Result.failure(IllegalStateException("Documentation image is unavailable"))
         } else {
-            _state.value.activeProfile?.let { reviewImageRepository.refresh(it, item, height) }
-                ?: Result.failure(IllegalStateException("No active Frigate connection"))
+            val profile = _state.value.activeProfile
+                ?: return Result.failure(IllegalStateException("No active Frigate connection"))
+            val privacyGrant = issuePrivacyGrant(
+                PrivacySurface.ACTIVITY,
+                PrivacyTarget.Review(item.id, item.camera),
+            ) ?: return Result.failure(IllegalStateException("This activity is unavailable"))
+            reviewImageRepository.refresh(profile, item, height).let { result ->
+                if (result.isSuccess && !revalidatePrivacyGrant(privacyGrant)) {
+                    Result.failure(IllegalStateException("This activity is unavailable"))
+                } else {
+                    result
+                }
+            }
         }
+    }
 
     fun cachedExportImage(export: RecordingExport) = if (BuildConfig.DOCUMENTATION_MODE) {
         documentationImages.export(export)
     } else {
-        _state.value.activeProfile?.let { reviewImageRepository.cached(it, export) }
+        issuePrivacyGrant(
+            PrivacySurface.CLIP,
+            PrivacyTarget.ClipOrIncident(export.id, export.camera),
+        )?.let { _state.value.activeProfile }
+            ?.let { reviewImageRepository.cached(it, export) }
     }
 
-    suspend fun refreshExportImage(export: RecordingExport, height: Int = 360) =
-        if (BuildConfig.DOCUMENTATION_MODE) {
+    suspend fun refreshExportImage(export: RecordingExport, height: Int = 360): Result<ReviewImage> {
+        return if (BuildConfig.DOCUMENTATION_MODE) {
             documentationImages.export(export)?.let(Result.Companion::success)
                 ?: Result.failure(IllegalStateException("Documentation image is unavailable"))
         } else {
-            _state.value.activeProfile?.let { reviewImageRepository.refresh(it, export, height) }
-                ?: Result.failure(IllegalStateException("No active Frigate connection"))
+            val profile = _state.value.activeProfile
+                ?: return Result.failure(IllegalStateException("No active Frigate connection"))
+            val privacyGrant = issuePrivacyGrant(
+                PrivacySurface.CLIP,
+                PrivacyTarget.ClipOrIncident(export.id, export.camera),
+            ) ?: return Result.failure(IllegalStateException("This clip is unavailable"))
+            reviewImageRepository.refresh(profile, export, height).let { result ->
+                if (result.isSuccess && !revalidatePrivacyGrant(privacyGrant)) {
+                    Result.failure(IllegalStateException("This clip is unavailable"))
+                } else {
+                    result
+                }
+            }
         }
+    }
 
     suspend fun prepareClipShare(export: RecordingExport): Result<File> {
         val current = _state.value
@@ -2649,6 +4603,10 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (export.inProgress || export.camera !in current.snapshot?.user?.allowedCameras.orEmpty()) {
             return Result.failure(IllegalArgumentException("This clip is not ready to share"))
         }
+        val privacyGrant = issuePrivacyGrant(
+            PrivacySurface.CLIP,
+            PrivacyTarget.ClipOrIncident(export.id, export.camera),
+        ) ?: return Result.failure(IllegalArgumentException("This clip is not ready to share"))
         val url = repository.exportPlaybackUrl(profile, export)
             ?: return Result.failure(IllegalArgumentException("This clip is not ready to share"))
         _state.update {
@@ -2696,6 +4654,10 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     check(!target.exists() || target.delete()) { "The previous shared copy could not be replaced" }
                     check(partial.renameTo(target)) { "The downloaded clip could not be prepared for sharing" }
+                    if (!revalidatePrivacyGrant(privacyGrant)) {
+                        target.delete()
+                        error("This clip is no longer available")
+                    }
                     target
                 } finally {
                     partial.delete()
@@ -2724,6 +4686,10 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     fun chooseMotionSearchCamera(cameraName: String) {
         val cameras = _state.value.snapshot?.cameras.orEmpty()
         if (cameras.none { it.name == cameraName } || _state.value.motionReview.searching) return
+        if (
+            !BuildConfig.DOCUMENTATION_MODE &&
+            issuePrivacyGrant(PrivacySurface.SEARCH, PrivacyTarget.Camera(cameraName)) == null
+        ) return
         motionSearchRequestId += 1
         _state.update {
             it.copy(motionReview = it.motionReview.withMotionSearchSelection(cameraName = cameraName))
@@ -2767,6 +4733,10 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        val privacyGrant = issuePrivacyGrant(
+            PrivacySurface.SEARCH,
+            PrivacyTarget.Camera(selectedCamera),
+        ) ?: return
         val profile = current.activeProfile ?: return
         val request = MotionSearchRequest(
             camera = selectedCamera,
@@ -2781,6 +4751,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         }
         motionSearchJob = viewModelScope.launch {
             try {
+                check(revalidatePrivacyGrant(privacyGrant)) { "This camera is no longer available" }
                 val jobId = operationsRepository.startMotionSearch(
                     profile,
                     snapshot.user,
@@ -2795,6 +4766,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 val pollingStartedAt = System.currentTimeMillis()
                 var unknownPolls = 0
                 while (true) {
+                    check(revalidatePrivacyGrant(privacyGrant)) { "This camera is no longer available" }
                     val status = operationsRepository.loadMotionSearch(
                         profile,
                         snapshot.user,
@@ -2802,6 +4774,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                         selectedCamera,
                         jobId,
                     )
+                    if (!revalidatePrivacyGrant(privacyGrant)) return@launch
                     _state.update {
                         if (requestId != motionSearchRequestId) it else {
                             it.copy(
@@ -2922,7 +4895,12 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         requestedHourStartSeconds: Double? = null,
     ) {
         val current = _state.value
-        val cameras = current.snapshot?.cameras.orEmpty()
+        val cameras = if (BuildConfig.DOCUMENTATION_MODE) {
+            current.snapshot?.cameras.orEmpty()
+        } else {
+            val visibleCameraNames = visibleCameraNames(PrivacySurface.HISTORY)
+            current.snapshot?.cameras.orEmpty().filter { it.name in visibleCameraNames }
+        }
         val selectedCamera = cameraName
             ?: current.history.cameraName?.takeIf { selected -> cameras.any { it.name == selected } }
             ?: cameras.firstOrNull()?.name
@@ -2955,7 +4933,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         val profile = current.activeProfile ?: return
-        val allowedCameras = current.snapshot?.user?.allowedCameras.orEmpty()
+        val allowedCameras = cameras.mapTo(mutableSetOf()) { it.name }
         historyLoadJob?.cancel()
         historyLoadJob = viewModelScope.launch {
             _state.update {
@@ -3080,6 +5058,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val request = if (BuildConfig.DOCUMENTATION_MODE) {
             DocumentationFixtures.historyPlayback(camera, rangeStart, rangeEnd)
         } else {
+            issuePrivacyGrant(PrivacySurface.HISTORY, PrivacyTarget.Camera(cameraName)) ?: return null
             val profile = current.activeProfile ?: return null
             PlaybackRequest(
                 title = camera.displayName,
@@ -3113,6 +5092,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        issuePrivacyGrant(PrivacySurface.HISTORY, PrivacyTarget.Camera(cameraName)) ?: return
         val profile = current.activeProfile ?: return
         _state.update {
             it.copy(
@@ -3153,8 +5133,17 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+        val historyPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.HISTORY,
+            PrivacyTarget.Camera(camera),
+        ) ?: return
+        val actionPrivacyGrant = issuePrivacyGrant(
+            PrivacySurface.ACTION,
+            PrivacyTarget.LocalAction(app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE),
+        ) ?: return
         val profile = current.activeProfile ?: return
-        val allowed = current.snapshot?.user?.allowedCameras.orEmpty()
+        val allowed = visibleCameraNames(PrivacySurface.HISTORY)
+        if (camera !in allowed) return
         val displayName = current.snapshot?.authorizedCameraNames?.get(camera)
             ?: camera.replace('_', ' ')
         val started = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
@@ -3166,6 +5155,15 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             runCatching { repository.saveRecordingClip(profile, allowed, camera, start, end, name) }
                 .onSuccess {
+                    if (
+                        !revalidatePrivacyGrant(historyPrivacyGrant) ||
+                        !revalidatePrivacyGrant(actionPrivacyGrant)
+                    ) {
+                        _state.update { state ->
+                            state.copy(history = state.history.copy(savingSlotStartTime = null))
+                        }
+                        return@onSuccess
+                    }
                     _state.update { state ->
                         state.copy(
                             history = state.history.copy(
@@ -3197,6 +5195,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
 
     fun searchActivity(text: String, filters: ActivitySearchFilters) {
         val normalized = text.trim()
+        if (!BuildConfig.DOCUMENTATION_MODE && visibleCameraNames(PrivacySurface.SEARCH).isEmpty()) return
         if (normalized.isNotEmpty()) {
             updateSettings { settings ->
                 settings.copy(
@@ -3244,8 +5243,17 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val current = _state.value
         val snapshot = current.snapshot ?: return
         if (!snapshot.capabilities.supports(FrigateFeature.SEMANTIC_SEARCH)) return
-        val allowedCameras = snapshot.user.allowedCameras
-        val cameras = filters.cameraName?.let(::setOf) ?: allowedCameras
+        val allowedCameras = if (BuildConfig.DOCUMENTATION_MODE) {
+            snapshot.user.allowedCameras
+        } else {
+            visibleCameraNames(PrivacySurface.SEARCH)
+        }
+        if (allowedCameras.isEmpty()) return
+        val cameras = filters.cameraName
+            ?.takeIf { it in allowedCameras }
+            ?.let(::setOf)
+            ?: allowedCameras.takeIf { filters.cameraName == null }
+            ?: return
         val page = if (append) current.activitySearch.page + 1 else 1
         val now = System.currentTimeMillis() / 1000.0
         val bounds = activitySearchBounds(filters.timeRange, now)
@@ -3381,12 +5389,16 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
-                    playback = DocumentationFixtures.searchPlayback(camera, event),
+                    playback = DocumentationFixtures.searchPlayback(camera, event).copy(
+                        recordingStartTime = start,
+                        recordingEndTime = end,
+                    ),
                     activeCameraName = null,
                 )
             }
             return
         }
+        issuePrivacyGrant(PrivacySurface.SEARCH, PrivacyTarget.Camera(event.camera)) ?: return
         val profile = current.activeProfile ?: return
         _state.update {
             it.copy(
@@ -3396,6 +5408,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     kind = PlaybackKind.RECORDED,
                     cameraName = event.camera,
                     detail = "Search result",
+                    recordingStartTime = start,
+                    recordingEndTime = end,
                 ),
                 activeCameraName = null,
                 errorMessage = null,
@@ -3406,18 +5420,32 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     fun cachedSearchImage(event: SearchEvent) = if (BuildConfig.DOCUMENTATION_MODE) {
         DocumentationFixtures.reviewItemForEvent(event)?.let(documentationImages::review)
     } else {
-        _state.value.activeProfile?.let { reviewImageRepository.cached(it, event) }
+        issuePrivacyGrant(PrivacySurface.SEARCH, PrivacyTarget.Camera(event.camera))
+            ?.let { _state.value.activeProfile }
+            ?.let { reviewImageRepository.cached(it, event) }
     }
 
-    suspend fun refreshSearchImage(event: SearchEvent, height: Int = 360) =
-        if (BuildConfig.DOCUMENTATION_MODE) {
+    suspend fun refreshSearchImage(event: SearchEvent, height: Int = 360): Result<ReviewImage> {
+        return if (BuildConfig.DOCUMENTATION_MODE) {
             DocumentationFixtures.reviewItemForEvent(event)?.let(documentationImages::review)
                 ?.let(Result.Companion::success)
                 ?: Result.failure(IllegalStateException("Documentation image is unavailable"))
         } else {
-            _state.value.activeProfile?.let { reviewImageRepository.refresh(it, event, height) }
-                ?: Result.failure(IllegalStateException("No active Frigate connection"))
+            val profile = _state.value.activeProfile
+                ?: return Result.failure(IllegalStateException("No active Frigate connection"))
+            val privacyGrant = issuePrivacyGrant(
+                PrivacySurface.SEARCH,
+                PrivacyTarget.Camera(event.camera),
+            ) ?: return Result.failure(IllegalStateException("This search result is unavailable"))
+            reviewImageRepository.refresh(profile, event, height).let { result ->
+                if (result.isSuccess && !revalidatePrivacyGrant(privacyGrant)) {
+                    Result.failure(IllegalStateException("This search result is unavailable"))
+                } else {
+                    result
+                }
+            }
         }
+    }
 
     fun clearError() {
         _state.update { it.copy(errorMessage = null) }
@@ -3431,6 +5459,9 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
 
     fun showConnectionSetup() {
         if (_state.value.loading) return
+        if (_state.value.monitorMode != null) closeMonitorMode()
+        briefingRefreshJob?.cancel()
+        container.onSignedOut()
         ptzWebSocketClient.disconnect()
         sessionManager.expireSession()
         _state.update {
@@ -3445,6 +5476,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 activeCameraName = null,
                 ptz = PtzUiState(),
                 health = HealthUiState(),
+                briefing = BriefingUiState(),
                 savedSessionRecoveryAvailable = false,
             )
         }
@@ -3452,6 +5484,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun sessionExpired(message: String = "The Frigate session expired. Sign in again.") {
+        container.onSignedOut()
         sessionManager.expireSession()
         val profile = _state.value.activeProfile ?: _state.value.savedProfile
         if (profile == null) {
@@ -3499,7 +5532,56 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         camera: Camera,
         option: LiveStreamOption,
         reason: String,
+        compatibilityTest: Boolean = false,
+        compatibilityTestVideoOnly: Boolean = false,
+        compatibilityTestUseSavedStrategyFirst: Boolean = true,
+        preferRtpTcpOverride: Boolean? = null,
     ) {
+        if (!BuildConfig.DOCUMENTATION_MODE) {
+            val current = _state.value
+            val snapshot = current.snapshot
+            val device = current.device
+            if (snapshot == null || device == null) {
+                _state.update { it.copy(errorMessage = "Live playback is still getting ready") }
+                return
+            }
+            runCatching {
+                container.singleLivePlaybackCoordinator.prepare(
+                    profile = profile,
+                    snapshot = snapshot,
+                    camera = camera,
+                    preferredStreamName = option.streamName,
+                    device = device,
+                    preferRtpTcp = preferRtpTcpOverride ?: current.settings.preferRtpTcp,
+                    useSavedStrategyFirst = compatibilityTestUseSavedStrategyFirst,
+                )
+            }
+                .onSuccess { requestId ->
+                    _state.update {
+                        it.copy(
+                            playback = PlaybackRequest(
+                                title = camera.displayName,
+                                uri = "",
+                                kind = PlaybackKind.LIVE,
+                                cameraName = camera.name,
+                                detail = "${option.label} • $reason",
+                                liveCompatibilityRequestId = requestId.value,
+                                compatibilityTest = compatibilityTest,
+                                compatibilityTestVideoOnly = compatibilityTestVideoOnly,
+                            ),
+                            activeCameraName = camera.name,
+                            errorMessage = null,
+                        )
+                    }
+                }
+                .onFailure {
+                    _state.update { state ->
+                        state.copy(errorMessage = "This camera could not be prepared for live playback")
+                    }
+                }
+            return
+        }
+
         runCatching { StreamUriFactory.rtsp(profile, option.streamName) }
             .onSuccess { uri ->
                 val fallbackOption = if (
@@ -3617,6 +5699,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         "$cameraName:${hourStartSeconds.toLong()}"
 
     private fun publishConnected(profile: ConnectionProfile, bootstrap: DiscoveryBootstrap) {
+        container.onAuthenticatedConnection(profile, bootstrap.snapshot.frigateVersion)
         historyPrefetchJob?.cancel()
         historyRangeCache.clear()
         cameraImageFailureCounts.clear()
@@ -3631,7 +5714,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 snapshot = bootstrap.snapshot,
                 recentActivityLoaded = false,
                 cameraGroupView = null,
-                review = ReviewBrowserState(),
+                review = ReviewBrowserState(countsLoading = true),
                 history = HistoryBrowserState(),
                 activitySearch = ActivitySearchState(),
                 information = InformationUiState(),
@@ -3640,10 +5723,12 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 liveActions = LiveActionsUiState(),
                 motionReview = MotionReviewUiState(),
                 health = HealthUiState(),
+                briefing = BriefingUiState(),
                 savedSessionRecoveryAvailable = false,
             )
         }
         openPendingCamera()
+        loadBriefing(refreshFromFrigate = false)
     }
 
     private fun openPendingCamera() {
@@ -3666,29 +5751,40 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         enrichmentJob = viewModelScope.launch {
             runCatching {
                 coroutineScope {
-                    val snapshot = async { repository.enrich(profile, bootstrap) }
+                    val snapshot = async { runCatching { repository.enrich(profile, bootstrap) } }
                     val counts = async {
                         runCatching {
                             repository.loadReviewCounts(profile, bootstrap.snapshot.user.allowedCameras)
                         }
                     }
-                    snapshot.await() to counts.await()
-                }
-            }
-                .onSuccess { (snapshot, counts) ->
+                    val countResult = counts.await()
                     _state.update { current ->
                         if (current.activeProfile == profile) {
                             current.copy(
-                                snapshot = snapshot,
-                                recentActivityLoaded = true,
                                 review = current.review.copy(
-                                    counts = counts.getOrDefault(current.review.counts),
+                                    counts = countResult.getOrDefault(current.review.counts),
+                                    countsLoading = false,
                                 ),
                             )
                         } else {
                             current
                         }
                     }
+                    snapshot.await().getOrThrow()
+                }
+            }
+                .onSuccess { snapshot ->
+                    _state.update { current ->
+                        if (current.activeProfile == profile) {
+                            current.copy(
+                                snapshot = snapshot,
+                                recentActivityLoaded = true,
+                            )
+                        } else {
+                            current
+                        }
+                    }
+                    loadBriefing(refreshFromFrigate = true)
                 }
                 .onFailure { error ->
                     if (error is CancellationException) return@onFailure
@@ -3700,6 +5796,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                         _state.update { current ->
                             val snapshot = current.snapshot ?: return@update current
                             current.copy(
+                                review = current.review.copy(countsLoading = false),
                                 snapshot = snapshot.copy(
                                     warnings = snapshot.warnings +
                                         "Some Frigate details are still unavailable. Refresh to retry.",
@@ -3711,11 +5808,613 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun loadBriefing(refreshFromFrigate: Boolean) {
+        if (BuildConfig.DOCUMENTATION_MODE) return
+        val current = _state.value
+        val identity = current.briefingIdentity() ?: run {
+            _state.update { it.copy(briefing = BriefingUiState()) }
+            return
+        }
+        val allowedCameras = visibleCameraNames(PrivacySurface.ACTIVITY)
+        briefingRefreshJob?.cancel()
+        _state.update { it.copy(briefing = it.briefing.copy(loading = true, errorMessage = null)) }
+        briefingRefreshJob = viewModelScope.launch {
+            runCatching {
+                if (refreshFromFrigate) {
+                    briefingCoordinator.refresh(
+                        BriefingRefreshRequest(
+                            profile = identity.profile,
+                            profileKey = identity.profileKey,
+                            scopeKey = identity.scopeKey,
+                            allowedCameraIds = allowedCameras,
+                            privacySchemaVersion = BRIEFING_PRIVACY_SCHEMA_VERSION,
+                            privacyEpoch = identity.privacyEpoch,
+                            recognitionDisclosure = current.effectiveBriefingRecognitionDisclosure(),
+                            nowEpochMillis = System.currentTimeMillis().coerceAtLeast(0L),
+                        ),
+                    )
+                } else {
+                    briefingCoordinator.readAuthorized(
+                        identity.profileKey,
+                        identity.scopeKey,
+                        allowedCameras,
+                        current.effectiveBriefingRecognitionDisclosure(),
+                    )
+                }
+            }.onSuccess { summary ->
+                _state.update { state ->
+                    if (!state.matchesBriefingIdentity(identity)) return@update state
+                    state.copy(
+                        briefing = state.briefing.copy(
+                            loading = false,
+                            summary = summary,
+                            errorMessage = null,
+                            audience = identity.audience,
+                            privacyEpoch = identity.privacyEpoch,
+                        ),
+                    )
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                if (error is AuthenticationExpiredException) {
+                    handleConnectedFailure(error)
+                } else {
+                    logger.warning("Since-you-last-watched briefing failed", error)
+                    _state.update { state ->
+                        if (!state.matchesBriefingIdentity(identity)) return@update state
+                        state.copy(
+                            briefing = state.briefing.copy(
+                                loading = false,
+                                errorMessage = "Your briefing couldn't be refreshed",
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun acknowledgeBriefing(
+        entries: Collection<BriefingEntry>,
+        reason: BriefingAcknowledgementReason,
+        completedHighlightIds: Set<String> = emptySet(),
+        dismissalTargets: Collection<BriefingDismissalTarget> = emptyList(),
+    ) {
+        if (
+            BuildConfig.DOCUMENTATION_MODE ||
+            (entries.isEmpty() && dismissalTargets.isEmpty())
+        ) return
+        val identity = _state.value.briefingIdentity() ?: return
+        val acknowledgedReviewIds = entries.mapTo(linkedSetOf()) { it.item.id }
+        val dismissingSummary = reason == BriefingAcknowledgementReason.DISMISSED
+        _state.update { it.copy(briefing = it.briefing.copy(loading = true, errorMessage = null)) }
+        viewModelScope.launch {
+            runCatching {
+                val latest = _state.value
+                if (!latest.matchesBriefingIdentity(identity)) return@runCatching null
+                val currentlyAllowed = visibleCameraNames(PrivacySurface.ACTIVITY)
+                if (reason == BriefingAcknowledgementReason.DISMISSED) {
+                    briefingCoordinator.dismissSummary(
+                        profileKey = identity.profileKey,
+                        scopeKey = identity.scopeKey,
+                        targets = dismissalTargets,
+                        currentlyAllowedCameraIds = currentlyAllowed,
+                        recognitionDisclosure = latest.effectiveBriefingRecognitionDisclosure(),
+                        nowEpochMillis = System.currentTimeMillis().coerceAtLeast(0L),
+                    )
+                } else {
+                    briefingCoordinator.acknowledgeVisible(
+                        profileKey = identity.profileKey,
+                        scopeKey = identity.scopeKey,
+                        entries = entries,
+                        currentlyAllowedCameraIds = currentlyAllowed,
+                        recognitionDisclosure = latest.effectiveBriefingRecognitionDisclosure(),
+                        reason = reason,
+                        completedHighlightIds = completedHighlightIds,
+                        nowEpochMillis = System.currentTimeMillis().coerceAtLeast(0L),
+                    )
+                }
+            }.onSuccess {
+                _state.update { state ->
+                    if (!state.matchesBriefingIdentity(identity)) return@update state
+                    state.copy(
+                        briefing = state.briefing.copy(
+                            loading = false,
+                            summary = if (dismissingSummary) {
+                                null
+                            } else {
+                                state.briefing.summary
+                                    ?.afterPresentedEntriesAcknowledged(acknowledgedReviewIds)
+                            },
+                            activeHighlightIds = state.briefing.activeHighlightIds - acknowledgedReviewIds,
+                            errorMessage = null,
+                            audience = identity.audience,
+                            privacyEpoch = identity.privacyEpoch,
+                        ),
+                    )
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                logger.warning("Saving briefing progress failed", error)
+                _state.update { state ->
+                    if (!state.matchesBriefingIdentity(identity)) return@update state
+                    state.copy(
+                        briefing = state.briefing.copy(
+                            loading = false,
+                            errorMessage = "Briefing progress couldn't be saved",
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    private fun Phase0UiState.briefingIdentity(): ActiveBriefingIdentity? {
+        val profile = activeProfile ?: return null
+        if (snapshot == null || !privacy.available) return null
+        val profileKey = container.compatibilityIdentityFactory.derive(
+            CompatibilityIdentityDomain.PROFILE,
+            profile.compatibilityIdentityComponents(),
+        ).value
+        val audience = if (privacy.guestModeActive) BriefingAudience.GUEST else BriefingAudience.OWNER
+        return ActiveBriefingIdentity(
+            profile = profile,
+            profileKey = profileKey,
+            scopeKey = briefingScopeFactory.derive(
+                profileKey,
+                audience,
+                BRIEFING_PRIVACY_SCHEMA_VERSION,
+            ),
+            privacyEpoch = privacy.epoch.coerceAtLeast(0L),
+            audience = audience,
+        )
+    }
+
+    private fun Phase0UiState.matchesBriefingIdentity(expected: ActiveBriefingIdentity): Boolean {
+        val current = briefingIdentity() ?: return false
+        return current.profile == expected.profile &&
+            current.profileKey == expected.profileKey &&
+            current.scopeKey == expected.scopeKey &&
+            current.privacyEpoch == expected.privacyEpoch &&
+            current.audience == expected.audience
+    }
+
+    private fun Phase0UiState.effectiveBriefingRecognitionDisclosure(): RecognitionDisclosure {
+        if (!privacy.guestModeActive) return privacy.ownerRecognitionDisclosure
+        val owner = privacy.ownerRecognitionDisclosure
+        val guest = privacy.guestRecognitionDisclosure
+        return when {
+            owner == RecognitionDisclosure.HIDE_ALL || guest == RecognitionDisclosure.HIDE_ALL ->
+                RecognitionDisclosure.HIDE_ALL
+            owner == RecognitionDisclosure.SHOW_ALL -> guest
+            guest == RecognitionDisclosure.SHOW_ALL -> owner
+            owner == guest -> owner
+            else -> RecognitionDisclosure.HIDE_ALL
+        }
+    }
+
     private fun updateSettings(transform: (AppSettings) -> AppSettings) {
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update { it.copy(settings = transform(it.settings)) }
         } else {
             viewModelScope.launch { settingsRepository.update(transform) }
+        }
+    }
+
+    fun setupLocalPin(
+        pin: CharArray,
+        confirmation: CharArray,
+        protectedScopes: Set<PinScope>,
+    ) {
+        if (_state.value.privacy.busy) {
+            pin.fill('\u0000')
+            confirmation.fill('\u0000')
+            return
+        }
+        updatePrivacyBusy()
+        viewModelScope.launch {
+            val result = pinCredentialService.setup(
+                pin = pin,
+                confirmation = confirmation,
+                protectedScopes = protectedScopes,
+            )
+            val (status, error) = when (result) {
+                PinSetupResult.Created -> "PIN is ready" to null
+                PinSetupResult.AlreadyConfigured -> null to "A PIN is already set"
+                PinSetupResult.ConfirmationMismatch -> null to "PINs don't match"
+                PinSetupResult.Malformed -> null to "Use 4 to 8 numbers"
+                PinSetupResult.Trivial -> null to "Choose a less predictable PIN"
+                PinSetupResult.Unavailable -> null to "PIN couldn't be saved"
+            }
+            _state.update {
+                it.copy(privacy = it.privacy.copy(busy = false, statusMessage = status, errorMessage = error))
+            }
+        }
+    }
+
+    fun setPinScope(scope: PinScope, enabled: Boolean) {
+        if (scope == PinScope.EXIT_GUEST_MODE || _state.value.privacy.busy) return
+        val currentScopes = _state.value.privacy.protectedScopes
+        val updatedScopes = if (enabled) currentScopes + scope else currentScopes - scope
+        updatePrivacyBusy()
+        viewModelScope.launch {
+            val (status, error) = when (
+                pinCredentialService.updateProtectedScopes(updatedScopes)
+            ) {
+                PinProtectionChangeResult.Updated -> "PIN locks updated" to null
+                PinProtectionChangeResult.Unchanged -> null to null
+                PinProtectionChangeResult.Locked -> null to "Enter the PIN before changing locks"
+                PinProtectionChangeResult.Removed,
+                PinProtectionChangeResult.Unavailable,
+                -> null to "PIN locks couldn't be updated"
+            }
+            _state.update {
+                it.copy(
+                    privacy = it.privacy.copy(
+                        busy = false,
+                        statusMessage = status,
+                        errorMessage = error,
+                    ),
+                )
+            }
+        }
+    }
+
+    fun removeLocalPin(pin: CharArray) {
+        if (_state.value.privacy.busy) {
+            pin.fill('\u0000')
+            return
+        }
+        updatePrivacyBusy()
+        viewModelScope.launch {
+            when (val verification = pinCredentialService.verify(pin)) {
+                is PinUnlockResult.Unlocked -> {
+                    val removed = pinCredentialService.removeVerified()
+                    _state.update {
+                        it.copy(
+                            privacy = it.privacy.copy(
+                                busy = false,
+                                statusMessage = "PIN removed".takeIf {
+                                    removed == PinProtectionChangeResult.Removed
+                                },
+                                errorMessage = "PIN couldn't be removed".takeUnless {
+                                    removed == PinProtectionChangeResult.Removed
+                                },
+                            ),
+                        )
+                    }
+                }
+                else -> publishPinUnlockFailure(verification)
+            }
+        }
+    }
+
+    fun unlockPrivacy(pin: CharArray) {
+        if (_state.value.privacy.busy) {
+            pin.fill('\u0000')
+            return
+        }
+        updatePrivacyBusy()
+        viewModelScope.launch {
+            when (val result = pinCredentialService.verify(pin)) {
+                is PinUnlockResult.Unlocked -> _state.update {
+                    it.copy(
+                        privacy = it.privacy.copy(
+                            busy = false,
+                            unlockedScopes = result.proof.scopes,
+                            pinSelectionsUnlocked = true,
+                            statusMessage = "Unlocked",
+                            errorMessage = null,
+                        ),
+                    )
+                }
+                else -> publishPinUnlockFailure(result)
+            }
+        }
+    }
+
+    fun setCameraPrivate(cameraId: String, private: Boolean) {
+        val current = _state.value.privacy.privateCameraIds
+        val updated = if (private) current + cameraId else current - cameraId
+        launchPrivacyMutation(
+            successMessage = if (private) "Camera is private" else "Camera is visible",
+        ) { privacyRepository.setPrivateCameras(updated) }
+    }
+
+    fun lockPrivacyNow() {
+        launchPrivacyMutation("Locked") { privacyRepository.relock(PinRelockReason.MANUAL) }
+    }
+
+    fun refreshPrivacyUnlockState() {
+        val privacy = _state.value.privacy
+        if (!privacy.available) return
+        val proof = container.pinUnlockSessionOwner.currentProof(
+            privacy.epoch,
+            SystemClock.elapsedRealtime(),
+        )
+        _state.update {
+            it.copy(
+                privacy = it.privacy.copy(
+                    unlockedScopes = proof?.scopes.orEmpty(),
+                    pinSelectionsUnlocked = proof != null,
+                ),
+            )
+        }
+    }
+
+    private fun issuePrivacyGrant(
+        surface: PrivacySurface,
+        target: PrivacyTarget,
+    ): BoundPrivacyGrant? {
+        if (BuildConfig.DOCUMENTATION_MODE) return null
+        val current = _state.value
+        val discovery = current.snapshot ?: return null
+        val privacySnapshot = privacyRepository.snapshot(
+            session = PrivacySessionEvidence(
+                authenticated = current.activeProfile != null,
+                authorizationFreshness = AuthorizationFreshness.FRESH,
+                allowedCameraIds = discovery.user.allowedCameras,
+            ),
+            nowMonotonicMillis = SystemClock.elapsedRealtime(),
+        )
+        val request = PrivacyRequest(
+            surface = surface,
+            target = target,
+            expectedPrivacyEpoch = privacySnapshot.epoch,
+        )
+        val grant = when (val decision = privacyDecisionEngine.decide(request, privacySnapshot)) {
+            is PrivacyDecision.Allow -> decision.grant
+            is PrivacyDecision.AllowRedacted -> decision.grant
+            is PrivacyDecision.RequirePin,
+            is PrivacyDecision.Deny,
+            -> null
+        } ?: return null
+        return BoundPrivacyGrant(request, grant)
+    }
+
+    private fun revalidatePrivacyGrant(bound: BoundPrivacyGrant): Boolean {
+        val current = _state.value
+        val discovery = current.snapshot ?: return false
+        val privacySnapshot = privacyRepository.snapshot(
+            session = PrivacySessionEvidence(
+                authenticated = current.activeProfile != null,
+                authorizationFreshness = AuthorizationFreshness.FRESH,
+                allowedCameraIds = discovery.user.allowedCameras,
+            ),
+            nowMonotonicMillis = SystemClock.elapsedRealtime(),
+        )
+        return when (
+            privacyDecisionEngine.revalidate(bound.grant, bound.request, privacySnapshot)
+        ) {
+            is PrivacyDecision.Allow,
+            is PrivacyDecision.AllowRedacted,
+            -> true
+            is PrivacyDecision.RequirePin,
+            is PrivacyDecision.Deny,
+            -> false
+        }
+    }
+
+    private fun visibleCameraNames(surface: PrivacySurface): Set<String> {
+        val cameraNames = _state.value.snapshot?.user?.allowedCameras.orEmpty()
+        if (cameraNames.isEmpty()) return emptySet()
+        if (BuildConfig.DOCUMENTATION_MODE) return cameraNames
+        return issuePrivacyGrant(
+            surface = surface,
+            target = PrivacyTarget.CameraCollection("ui-camera-scope", cameraNames),
+        )?.grant?.visibleCameraIds.orEmpty()
+    }
+
+    private fun issueCompleteCameraCollectionGrant(
+        surface: PrivacySurface,
+        collectionId: String,
+    ): BoundPrivacyGrant? {
+        val cameraIds = _state.value.snapshot?.user?.allowedCameras.orEmpty()
+        if (cameraIds.isEmpty()) return null
+        return issuePrivacyGrant(
+            surface,
+            PrivacyTarget.CameraCollection(collectionId, cameraIds),
+        )?.takeIf { it.grant.visibleCameraIds.containsAll(cameraIds) }
+    }
+
+    private fun issueIncidentPrivacyGrant(incident: ExportIncident): BoundPrivacyGrant? {
+        val cameraIds = _state.value.exports.items.asSequence()
+            .filter { it.incidentId == incident.id }
+            .map { it.camera }
+            .toSet()
+        return if (cameraIds.isEmpty()) {
+            issueCompleteCameraCollectionGrant(PrivacySurface.INCIDENT, "incident-${incident.id}")
+        } else {
+            issuePrivacyGrant(
+                PrivacySurface.INCIDENT,
+                PrivacyTarget.ClipOrIncident(
+                    itemId = incident.id,
+                    cameraId = cameraIds.first(),
+                    additionalCameraIds = cameraIds.drop(1).toSet(),
+                ),
+            )
+        }
+    }
+
+    private fun enforceCurrentPrivacyState() {
+        if (BuildConfig.DOCUMENTATION_MODE) return
+        clearImageCaches()
+
+        val activityCameras = visibleCameraNames(PrivacySurface.ACTIVITY)
+        val historyCameras = visibleCameraNames(PrivacySurface.HISTORY)
+        val searchCameras = visibleCameraNames(PrivacySurface.SEARCH)
+        val clipCameras = visibleCameraNames(PrivacySurface.CLIP)
+        val current = _state.value
+
+        if (activityCameras.isEmpty()) {
+            reviewLoadJob?.cancel()
+            reviewDetailJob?.cancel()
+            reviewPlaybackNavigationJob?.cancel()
+        }
+        if (historyCameras.isEmpty()) historyLoadJob?.cancel()
+        if (searchCameras.isEmpty()) {
+            activitySearchJob?.cancel()
+            activitySearchRequestId += 1
+            motionSearchJob?.cancel()
+            motionSearchRequestId += 1
+        }
+
+        val playbackAllowed = current.playback?.let(::privacyAllowsPlayback) ?: true
+        val groupAllowed = current.cameraGroupView?.let { group ->
+            val cameraNames = group.streams.mapTo(mutableSetOf()) { it.camera.name }
+            val grant = issuePrivacyGrant(
+                PrivacySurface.VIEW,
+                PrivacyTarget.CameraCollection("active-camera-group", cameraNames),
+            )
+            grant != null && grant.grant.visibleCameraIds.containsAll(cameraNames)
+        } ?: true
+        val ptzAllowed = current.ptz.cameraName?.let { cameraName ->
+            issuePrivacyGrant(PrivacySurface.LIVE_PLAYBACK, PrivacyTarget.Camera(cameraName)) != null &&
+                issuePrivacyGrant(
+                    PrivacySurface.ACTION,
+                    PrivacyTarget.LocalAction(
+                        app.opah.tv.privacy.PrivacyLocalAction.ADMINISTRATIVE_CHANGE,
+                    ),
+                ) != null
+        } ?: true
+
+        if (!playbackAllowed || !groupAllowed) container.revokeSingleLivePlayback()
+        if (!ptzAllowed) ptzWebSocketClient.disconnect()
+
+        _state.update { state ->
+            val historyAllowed = state.history.cameraName == null || state.history.cameraName in historyCameras
+            state.copy(
+                playback = state.playback.takeIf { playbackAllowed },
+                cameraGroupView = state.cameraGroupView.takeIf { groupAllowed },
+                activeCameraName = state.activeCameraName?.takeIf { cameraName ->
+                    issuePrivacyGrant(
+                        PrivacySurface.LIVE_PLAYBACK,
+                        PrivacyTarget.Camera(cameraName),
+                    ) != null
+                },
+                ptz = state.ptz.takeIf { ptzAllowed } ?: PtzUiState(),
+                review = state.review.copy(
+                    items = state.review.items.filter { it.camera in activityCameras },
+                    playbackItem = state.review.playbackItem?.takeIf { it.camera in activityCameras },
+                    selectedItemId = state.review.selectedItemId?.takeIf { selected ->
+                        state.review.items.any { it.id == selected && it.camera in activityCameras }
+                    },
+                ),
+                history = state.history.takeIf { historyAllowed } ?: HistoryBrowserState(),
+                activitySearch = state.activitySearch.copy(
+                    results = state.activitySearch.results.filter { it.camera in searchCameras },
+                ),
+                exports = if (clipCameras.isEmpty()) {
+                    ExportsUiState(loadedOnce = state.exports.loadedOnce, incidentsLoaded = true)
+                } else {
+                    state.exports.copy(items = state.exports.items.filter { it.camera in clipCameras })
+                },
+            )
+        }
+    }
+
+    private fun privacyAllowsPlayback(playback: PlaybackRequest): Boolean {
+        val cameraName = playback.cameraName
+        if (cameraName == null) {
+            if (playback.kind != PlaybackKind.LIVE) return false
+            val cameraNames = _state.value.snapshot?.user?.allowedCameras.orEmpty()
+            val grant = issuePrivacyGrant(
+                PrivacySurface.VIEW,
+                PrivacyTarget.CameraCollection("active-composite", cameraNames),
+            ) ?: return false
+            return grant.grant.visibleCameraIds.containsAll(cameraNames)
+        }
+        val request = when {
+            playback.activityItemId != null -> PrivacySurface.ACTIVITY to PrivacyTarget.Review(
+                playback.activityItemId,
+                cameraName,
+            )
+            playback.savedClipId != null -> PrivacySurface.CLIP to PrivacyTarget.ClipOrIncident(
+                playback.savedClipId,
+                cameraName,
+            )
+            playback.detail == "Search result" -> PrivacySurface.SEARCH to PrivacyTarget.Camera(cameraName)
+            playback.kind == PlaybackKind.RECORDED -> PrivacySurface.HISTORY to PrivacyTarget.Camera(cameraName)
+            else -> PrivacySurface.LIVE_PLAYBACK to PrivacyTarget.Camera(cameraName)
+        }
+        return issuePrivacyGrant(request.first, request.second) != null
+    }
+
+    private fun launchPrivacyMutation(
+        successMessage: String,
+        operation: suspend () -> PrivacyPolicyMutationResult,
+    ) {
+        if (_state.value.privacy.busy) return
+        val privacy = _state.value.privacy
+        container.pinUnlockSessionOwner.recordActivity(
+            privacyEpoch = privacy.epoch,
+            nowMonotonicMillis = SystemClock.elapsedRealtime(),
+        )
+        updatePrivacyBusy()
+        viewModelScope.launch {
+            publishPrivacyMutation(operation(), successMessage)
+        }
+    }
+
+    private fun publishPrivacyMutation(
+        result: PrivacyPolicyMutationResult,
+        successMessage: String,
+    ) {
+        val error = when (result) {
+            is PrivacyPolicyMutationResult.Updated,
+            is PrivacyPolicyMutationResult.Unchanged,
+            -> null
+            PrivacyPolicyMutationResult.Rejected -> "That privacy choice isn't valid"
+            PrivacyPolicyMutationResult.Unavailable -> "Privacy controls are unavailable"
+        }
+        _state.update {
+            it.copy(
+                privacy = it.privacy.copy(
+                    busy = false,
+                    statusMessage = successMessage.takeIf { error == null },
+                    errorMessage = error,
+                ),
+            )
+        }
+    }
+
+    private fun publishPinUnlockFailure(result: PinUnlockResult) {
+        val message = when (result) {
+            is PinUnlockResult.WrongPin -> retryMessage("PIN isn't correct", result.retryAfterMillis)
+            is PinUnlockResult.Cooldown -> retryMessage("Try again", result.retryAfterMillis)
+            PinUnlockResult.NotConfigured -> "No PIN is set"
+            PinUnlockResult.CorruptRecord -> "PIN protection needs recovery"
+            PinUnlockResult.Unavailable -> "PIN couldn't be checked"
+            is PinUnlockResult.Unlocked -> return
+        }
+        _state.update {
+            it.copy(
+                privacy = it.privacy.copy(
+                    busy = false,
+                    statusMessage = null,
+                    errorMessage = message,
+                ),
+            )
+        }
+    }
+
+    private fun retryMessage(prefix: String, retryAfterMillis: Long): String =
+        if (retryAfterMillis < 1_000L) {
+            "$prefix • wait a moment"
+        } else {
+            val seconds = (retryAfterMillis + 999L) / 1_000L
+            "$prefix • wait $seconds seconds"
+        }
+
+    private fun updatePrivacyBusy() {
+        _state.update {
+            it.copy(
+                privacy = it.privacy.copy(
+                    busy = true,
+                    statusMessage = null,
+                    errorMessage = null,
+                ),
+            )
         }
     }
 
@@ -3855,6 +6554,9 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun finishSignedOut(message: String) {
+        if (_state.value.monitorMode != null) closeMonitorMode()
+        container.revokeSingleLivePlayback()
+        container.onSignedOut()
         reviewLoadJob?.cancel()
         reviewDetailJob?.cancel()
         reviewPlaybackNavigationJob?.cancel()
@@ -3864,6 +6566,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         motionSearchJob?.cancel()
         motionSearchRequestId += 1
         enrichmentJob?.cancel()
+        briefingRefreshJob?.cancel()
         ptzWebSocketClient.disconnect()
         sessionManager.expireSession()
         clearImageCaches()
@@ -3884,12 +6587,14 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 information = InformationUiState(),
                 ptz = PtzUiState(),
                 health = HealthUiState(),
+                briefing = BriefingUiState(),
                 savedSessionRecoveryAvailable = false,
             )
         }
     }
 
     private fun showSavedSessionRecovery(error: Throwable) {
+        if (_state.value.monitorMode != null) closeMonitorMode()
         reviewLoadJob?.cancel()
         reviewDetailJob?.cancel()
         reviewPlaybackNavigationJob?.cancel()
@@ -3899,6 +6604,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         motionSearchJob?.cancel()
         motionSearchRequestId += 1
         enrichmentJob?.cancel()
+        briefingRefreshJob?.cancel()
         ptzWebSocketClient.disconnect()
         _state.update {
             it.copy(
@@ -3917,6 +6623,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 information = InformationUiState(),
                 ptz = PtzUiState(),
                 health = HealthUiState(),
+                briefing = BriefingUiState(),
                 savedSessionRecoveryAvailable = it.savedProfile != null,
             )
         }
@@ -3929,6 +6636,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
+        if (_state.value.monitorMode != null) closeMonitorMode()
         ptzWebSocketClient.disconnect()
         super.onCleared()
     }
@@ -3952,7 +6660,10 @@ private fun ReviewCounts.afterReviewStatusChanged(
         ReviewSeverity.DETECTION -> copy(
             reviewedDetections = (reviewedDetections + delta).coerceIn(0, totalDetections),
         )
-        ReviewSeverity.UNKNOWN, null -> this
+        ReviewSeverity.SIGNIFICANT_MOTION,
+        ReviewSeverity.UNKNOWN,
+        null,
+        -> this
     }
 }
 
@@ -4008,6 +6719,9 @@ internal fun cameraHealthMessage(cameraLabel: String, consecutiveFailures: Int):
 
 private const val CAMERA_HEALTH_FAILURE_THRESHOLD = 3
 
+private fun safeMonitorDeadline(now: Long, duration: Long): Long =
+    if (now > Long.MAX_VALUE - duration) Long.MAX_VALUE else now + duration
+
 internal fun <T> moveOrderedItem(items: List<T>, item: T, direction: Int): List<T> {
     val from = items.indexOf(item)
     if (from < 0 || direction == 0) return items
@@ -4030,6 +6744,7 @@ private const val ON_DEMAND_SAFETY_DURATION_SECONDS = 5 * 60
 private const val MOTION_SEARCH_WINDOW_SECONDS = 60 * 60.0
 private const val MOTION_SEARCH_CONTEXT_SECONDS = 15 * 60.0
 private const val MOTION_SEARCH_POLL_MILLIS = 500L
+private const val MONITOR_TICK_MILLIS = 250L
 private const val MAX_BATCH_EXPORT_ITEMS = 50
 private const val MOTION_SEARCH_TIMEOUT_MILLIS = 2 * 60 * 1_000L
 private const val MOTION_SEARCH_MAX_UNKNOWN_POLLS = 3

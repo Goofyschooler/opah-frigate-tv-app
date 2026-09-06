@@ -64,6 +64,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
@@ -93,7 +94,18 @@ import app.opah.tv.playback.LivePlaybackOptions
 import app.opah.tv.playback.PlaybackKind
 import app.opah.tv.playback.PlaybackRequest
 import app.opah.tv.playback.RecordedPlayerFactory
+import app.opah.tv.playback.compatibility.PlaybackCompatibilityState
+import app.opah.tv.playback.compatibility.PlaybackResult
+import app.opah.tv.playback.compatibility.AudioMode
+import app.opah.tv.playback.compatibility.DecoderMode
+import app.opah.tv.playback.compatibility.PlaybackCandidate
+import app.opah.tv.playback.compatibility.TransportMode
+import app.opah.tv.playback.media3.PlayerViewMedia3VideoOutputTarget
+import app.opah.tv.playback.media3.SingleLivePlaybackRequestId
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -251,6 +263,8 @@ fun PlaybackScreen(
     savingActivityRecording: Boolean = false,
     activityRecordingSaved: Boolean = false,
     activityRecordingMessage: String? = null,
+    activityQueueProgress: String? = null,
+    onCompatibilityTestStatus: (String) -> Unit = {},
     onSaveActivityRecording: (() -> Unit)? = null,
     nextActivityLabel: String? = null,
     nextActivityEnabled: Boolean = false,
@@ -286,6 +300,7 @@ fun PlaybackScreen(
             savingActivityRecording = savingActivityRecording,
             activityRecordingSaved = activityRecordingSaved,
             activityRecordingMessage = activityRecordingMessage,
+            activityQueueProgress = activityQueueProgress,
             onSaveActivityRecording = onSaveActivityRecording,
             nextActivityLabel = nextActivityLabel,
             nextActivityEnabled = nextActivityEnabled,
@@ -296,33 +311,45 @@ fun PlaybackScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val application = context.applicationContext as OpahApplication
-    var startupFallbackActive by rememberSaveable(request.uri) { mutableStateOf(false) }
-    var softwareDecoderActive by rememberSaveable(request.uri) { mutableStateOf(false) }
+    val liveCompatibilityRequestId = request.liveCompatibilityRequestId
+        ?.let(::SingleLivePlaybackRequestId)
+    val compatibilityLive = request.kind == PlaybackKind.LIVE && liveCompatibilityRequestId != null
+    val playbackStateKey = liveCompatibilityRequestId?.value ?: request.uri
+    var startupFallbackActive by rememberSaveable(playbackStateKey) { mutableStateOf(false) }
+    var softwareDecoderActive by rememberSaveable(playbackStateKey) { mutableStateOf(false) }
     val activeUri = if (startupFallbackActive) request.startupFallbackUri ?: request.uri else request.uri
-    val activeDetail = playbackContextLabel(request.kind, startupFallbackActive)
-    var forceTcp by rememberSaveable(request.uri, request.kind) {
+    val activeDetail = if (request.compatibilityTest) {
+        "Testing camera compatibility"
+    } else {
+        playbackContextLabel(request.kind, startupFallbackActive)
+    }
+    var forceTcp by rememberSaveable(playbackStateKey, request.kind) {
         mutableStateOf(request.kind == PlaybackKind.LIVE && preferRtpTcp)
     }
-    var automaticTcpFallback by rememberSaveable(request.uri) { mutableStateOf(false) }
-    var muted by rememberSaveable(request.uri) { mutableStateOf(startMuted) }
-    var videoOnly by rememberSaveable(request.uri) { mutableStateOf(false) }
-    var diagnosticsVisible by rememberSaveable(request.uri) { mutableStateOf(false) }
-    var controlsVisible by rememberSaveable(request.uri) { mutableStateOf(true) }
+    var automaticTcpFallback by rememberSaveable(playbackStateKey) { mutableStateOf(false) }
+    var muted by rememberSaveable(playbackStateKey) { mutableStateOf(startMuted) }
+    var videoOnly by rememberSaveable(playbackStateKey) {
+        mutableStateOf(request.compatibilityTestVideoOnly)
+    }
+    var diagnosticsVisible by rememberSaveable(playbackStateKey) { mutableStateOf(false) }
+    var controlsVisible by rememberSaveable(playbackStateKey) { mutableStateOf(true) }
     var controlsInteractionToken by remember { mutableIntStateOf(0) }
     var overlayRenderPass by remember { mutableIntStateOf(0) }
     var consumeRevealKeyUp by remember { mutableStateOf(false) }
-    val hiddenControlsFocusRequester = remember(request.uri) { FocusRequester() }
-    val playButtonFocusRequester = remember(request.uri) { FocusRequester() }
+    val hiddenControlsFocusRequester = remember(playbackStateKey) { FocusRequester() }
+    val playButtonFocusRequester = remember(playbackStateKey) { FocusRequester() }
     var retryToken by remember { mutableIntStateOf(0) }
-    var automaticRetryAttempts by rememberSaveable(request.uri) { mutableIntStateOf(0) }
-    var pendingAutomaticRetryMs by remember(request.uri) { mutableStateOf<Long?>(null) }
-    var pipRequested by remember(request.uri) { mutableStateOf(false) }
-    var pipError by remember(request.uri) { mutableStateOf<String?>(null) }
-    var recordedPositionMs by rememberSaveable(request.uri) { mutableLongStateOf(0L) }
-    var resumeWhenStarted by rememberSaveable(request.uri) { mutableStateOf(true) }
-    var session by remember(request.uri) { mutableStateOf<PlayerSession?>(null) }
-    var playerView by remember(request.uri) { mutableStateOf<PlayerView?>(null) }
-    var completionReported by remember(request.uri) { mutableStateOf(false) }
+    var automaticRetryAttempts by rememberSaveable(playbackStateKey) { mutableIntStateOf(0) }
+    var pendingAutomaticRetryMs by remember(playbackStateKey) { mutableStateOf<Long?>(null) }
+    var pipRequested by remember(playbackStateKey) { mutableStateOf(false) }
+    var pipError by remember(playbackStateKey) { mutableStateOf<String?>(null) }
+    var compatibilityMessage by remember(playbackStateKey) { mutableStateOf<String?>(null) }
+    var compatibilityTestComplete by remember(playbackStateKey) { mutableStateOf(false) }
+    var recordedPositionMs by rememberSaveable(playbackStateKey) { mutableLongStateOf(0L) }
+    var resumeWhenStarted by rememberSaveable(playbackStateKey) { mutableStateOf(true) }
+    var session by remember(playbackStateKey) { mutableStateOf<PlayerSession?>(null) }
+    var playerView by remember(playbackStateKey) { mutableStateOf<PlayerView?>(null) }
+    var completionReported by remember(playbackStateKey) { mutableStateOf(false) }
     val lastVideoFrameAtMs = remember(session) { AtomicLong(0L) }
 
     DisposableEffect(
@@ -333,7 +360,10 @@ fun PlaybackScreen(
         videoOnly,
         softwareDecoderActive,
         retryToken,
+        compatibilityLive,
     ) {
+        if (compatibilityLive) return@DisposableEffect onDispose { }
+
         fun startPlayback() {
             if (session != null) return
             session = createPlayerSession(
@@ -378,10 +408,117 @@ fun PlaybackScreen(
         mutableStateOf(PlaybackTelemetry(playWhenReady = session?.player?.playWhenReady ?: resumeWhenStarted))
     }
 
+    LaunchedEffect(
+        lifecycleOwner,
+        liveCompatibilityRequestId,
+        playerView,
+        videoOnly,
+    ) {
+        val requestId = liveCompatibilityRequestId ?: return@LaunchedEffect
+        val outputView = playerView ?: return@LaunchedEffect
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            compatibilityMessage = null
+            val target = PlayerViewMedia3VideoOutputTarget(
+                playerView = outputView,
+                onAttached = { player ->
+                    session = PlayerSession(
+                        player = player,
+                        startedAtMs = SystemClock.elapsedRealtime(),
+                        videoOnly = videoOnly,
+                        releaseAction = { },
+                    )
+                },
+                onDetached = { player ->
+                    if (session?.player === player) session = null
+                },
+            )
+            val liveSession = try {
+                application.container.singleLivePlaybackCoordinator.open(
+                    requestId = requestId,
+                    output = target,
+                    videoOnly = videoOnly,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                telemetry = telemetry.copy(
+                    state = "Playback failed",
+                    safeError = "Live video could not start. Go back and try the camera again.",
+                )
+                controlsVisible = true
+                return@repeatOnLifecycle
+            }
+            try {
+                liveSession.snapshots.collect { snapshot ->
+                    liveSession.downgradeExplanation(snapshot)?.let { explanation ->
+                        compatibilityMessage = explanation
+                    }
+                    when (val state = snapshot.state) {
+                        is PlaybackCompatibilityState.Attempting -> {
+                            telemetry = telemetry.copy(state = "Finding a compatible stream", safeError = null)
+                        }
+                        is PlaybackCompatibilityState.Recovering -> {
+                            telemetry = telemetry.copy(state = "Reconnecting", safeError = null)
+                        }
+                        is PlaybackCompatibilityState.Verified,
+                        is PlaybackCompatibilityState.UnpersistedLive,
+                        is PlaybackCompatibilityState.Persisting,
+                        -> telemetry = telemetry.copy(state = "Ready", safeError = null)
+
+                        is PlaybackCompatibilityState.Finished -> when (state.result) {
+                            is PlaybackResult.Cancelled -> Unit
+                            is PlaybackResult.VerifiedLive,
+                            is PlaybackResult.UnpersistedLive,
+                            -> telemetry = telemetry.copy(state = "Ready", safeError = null)
+
+                            else -> {
+                                telemetry = telemetry.copy(
+                                    state = "Playback failed",
+                                    safeError = "Live video is unavailable. Check the camera, server, and network.",
+                                )
+                                controlsVisible = true
+                            }
+                        }
+
+                        is PlaybackCompatibilityState.Idle -> Unit
+                        is PlaybackCompatibilityState.Releasing -> Unit
+                        is PlaybackCompatibilityState.ReleasedAwaitingPersistence -> Unit
+                        is PlaybackCompatibilityState.PresentingSnapshot -> Unit
+                    }
+                    if (request.compatibilityTest) {
+                        compatibilityTestStatus(request.title, snapshot.state)?.let { message ->
+                            compatibilityMessage = message
+                            onCompatibilityTestStatus(message)
+                        }
+                        compatibilityTestComplete = when (val state = snapshot.state) {
+                            is PlaybackCompatibilityState.Verified,
+                            is PlaybackCompatibilityState.UnpersistedLive,
+                            -> true
+
+                            is PlaybackCompatibilityState.Finished ->
+                                state.result !is PlaybackResult.Cancelled
+
+                            else -> false
+                        }
+                    }
+                }
+            } finally {
+                withContext(NonCancellable) { liveSession.close() }
+                session = null
+            }
+        }
+    }
+
     LaunchedEffect(telemetry.ended, telemetry.playWhenReady, onReturnToLive) {
         if (telemetry.ended && telemetry.playWhenReady && onReturnToLive != null) {
             delay(500)
             onReturnToLive()
+        }
+    }
+    LaunchedEffect(request.compatibilityTest, compatibilityTestComplete) {
+        if (request.compatibilityTest && compatibilityTestComplete) {
+            delay(COMPATIBILITY_TEST_RESULT_DISPLAY_MILLIS)
+            onBack()
         }
     }
     LaunchedEffect(telemetry.ended, onPlaybackCompleted) {
@@ -392,6 +529,7 @@ fun PlaybackScreen(
     }
 
     LaunchedEffect(session, activeUri, startupFallbackActive, request.kind) {
+        if (compatibilityLive) return@LaunchedEffect
         val watchedSession = session ?: return@LaunchedEffect
         if (startupFallbackActive || request.startupFallbackUri == null) return@LaunchedEffect
         delay(LIVE_FIRST_FRAME_FALLBACK_MS)
@@ -413,6 +551,7 @@ fun PlaybackScreen(
     }
 
     LaunchedEffect(pendingAutomaticRetryMs, automaticRetryAttempts, activeUri) {
+        if (compatibilityLive) return@LaunchedEffect
         val retryDelayMs = pendingAutomaticRetryMs ?: return@LaunchedEffect
         delay(retryDelayMs)
         pendingAutomaticRetryMs = null
@@ -420,6 +559,7 @@ fun PlaybackScreen(
     }
 
     LaunchedEffect(session, telemetry.firstFrameMs, telemetry.safeError, request.kind) {
+        if (compatibilityLive) return@LaunchedEffect
         val stableSession = session ?: return@LaunchedEffect
         if (
             request.kind != PlaybackKind.LIVE ||
@@ -432,6 +572,7 @@ fun PlaybackScreen(
     }
 
     LaunchedEffect(session, request.kind, telemetry.playWhenReady, telemetry.safeError) {
+        if (compatibilityLive) return@LaunchedEffect
         val watchedSession = session ?: return@LaunchedEffect
         if (
             request.kind != PlaybackKind.LIVE ||
@@ -542,12 +683,12 @@ fun PlaybackScreen(
     }
 
     LaunchedEffect(
-        request.uri,
+        playbackStateKey,
         controlsInteractionToken,
         telemetry.safeError,
         diagnosticsVisible,
     ) {
-        if (telemetry.safeError == null && !diagnosticsVisible) {
+        if (telemetry.safeError == null && !diagnosticsVisible && !request.compatibilityTest) {
             delay(PLAYBACK_CONTROLS_TIMEOUT_MS)
             controlsVisible = false
         }
@@ -592,6 +733,7 @@ fun PlaybackScreen(
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                if (compatibilityLive) return
                 when (
                     decoderRecoveryAction(
                         kind = request.kind,
@@ -701,7 +843,9 @@ fun PlaybackScreen(
     }
 
     BackHandler {
-        when (playbackBackAction(controlsVisible, diagnosticsVisible, pictureInPictureActive)) {
+        if (request.compatibilityTest) {
+            onBack()
+        } else when (playbackBackAction(controlsVisible, diagnosticsVisible, pictureInPictureActive)) {
             PlaybackBackAction.HIDE_OVERLAY -> {
                 diagnosticsVisible = false
                 controlsVisible = false
@@ -740,7 +884,29 @@ fun PlaybackScreen(
             .focusRequester(hiddenControlsFocusRequester)
             .focusable(enabled = !controlsVisible),
     ) {
-        session?.let { activeSession ->
+        if (compatibilityLive) {
+            key(playbackStateKey) {
+                AndroidView(
+                    factory = { viewContext ->
+                        PlayerView(viewContext).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            )
+                            useController = false
+                            keepScreenOn = true
+                            resizeMode = videoResizeMode(stretchVideo)
+                            playerView = this
+                        }
+                    },
+                    update = {
+                        it.resizeMode = videoResizeMode(stretchVideo)
+                        playerView = it
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        } else session?.let { activeSession ->
             key(activeSession) {
                 AndroidView(
                     factory = { viewContext ->
@@ -818,6 +984,14 @@ fun PlaybackScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+                activityQueueProgress?.let {
+                    Text(
+                        text = it,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
                 nextActivityLabel?.takeIf { !nextActivityEnabled }?.let {
                     Text(
                         text = it,
@@ -832,7 +1006,28 @@ fun PlaybackScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+                compatibilityMessage?.let {
+                    Text(
+                        text = it,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
+        }
+
+        if (!pictureInPictureActive && !controlsVisible && activityQueueProgress != null) {
+            Text(
+                text = activityQueueProgress,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(22.dp)
+                    .background(Color.Black.copy(alpha = 0.68f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                color = MaterialTheme.colorScheme.onSurface,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+            )
         }
 
         if (!pictureInPictureActive && diagnosticsVisible) {
@@ -938,6 +1133,50 @@ fun PlaybackScreen(
     }
 }
 
+private fun compatibilityTestStatus(
+    cameraName: String,
+    state: PlaybackCompatibilityState,
+): String? = when (state) {
+    is PlaybackCompatibilityState.Attempting ->
+        "$cameraName: trying choice ${state.run.attemptsStarted.coerceAtLeast(1)} of " +
+            "${state.plan.budget.maxAttempts + state.plan.budget.maxRecoveryCycles} • " +
+            compatibilityChoiceLabel(state.attempt.candidate)
+    is PlaybackCompatibilityState.Recovering ->
+        "$cameraName: reconnecting before the next safe choice"
+    is PlaybackCompatibilityState.Verified ->
+        "$cameraName: choice saved • ${compatibilityChoiceLabel(state.result.strategy.candidate)}"
+    is PlaybackCompatibilityState.UnpersistedLive ->
+        "$cameraName: video works for now, but the choice could not be saved"
+    is PlaybackCompatibilityState.Persisting ->
+        "$cameraName: video works • saving ${compatibilityChoiceLabel(state.strategy.candidate)}"
+    is PlaybackCompatibilityState.Finished -> when (val result = state.result) {
+        is PlaybackResult.VerifiedLive ->
+            "$cameraName: choice saved • ${compatibilityChoiceLabel(result.strategy.candidate)}"
+        is PlaybackResult.UnpersistedLive ->
+            "$cameraName: video works for now, but the choice could not be saved"
+        is PlaybackResult.Cancelled -> null
+        else -> "$cameraName: Opah couldn't confirm a new choice. Existing playback settings were not changed"
+    }
+    is PlaybackCompatibilityState.Idle -> "$cameraName: preparing the first safe choice"
+    is PlaybackCompatibilityState.Releasing -> "$cameraName: moving to the next safe choice"
+    is PlaybackCompatibilityState.ReleasedAwaitingPersistence -> "$cameraName: saving the working choice"
+    is PlaybackCompatibilityState.PresentingSnapshot -> "$cameraName: preparing video"
+}
+
+private fun compatibilityChoiceLabel(candidate: PlaybackCandidate): String = buildList {
+    add(if (candidate.transportMode == TransportMode.FORCE_RTP_TCP) "more reliable connection" else "standard connection")
+    add(if (candidate.audioMode == AudioMode.VIDEO_ONLY) "video only" else "video and sound")
+    add(
+        when (candidate.decoderMode) {
+            DecoderMode.PLATFORM_DEFAULT -> "automatic video decoder"
+            DecoderMode.PREFER_HARDWARE -> "TV video decoder"
+            DecoderMode.ALLOW_SOFTWARE -> "compatibility video decoder"
+        },
+    )
+}.joinToString(" • ")
+
+private const val COMPATIBILITY_TEST_RESULT_DISPLAY_MILLIS = 1_200L
+
 @UnstableApi
 @Composable
 private fun DocumentationPlaybackScreen(
@@ -969,6 +1208,7 @@ private fun DocumentationPlaybackScreen(
     savingActivityRecording: Boolean,
     activityRecordingSaved: Boolean,
     activityRecordingMessage: String?,
+    activityQueueProgress: String?,
     onSaveActivityRecording: (() -> Unit)?,
     nextActivityLabel: String?,
     nextActivityEnabled: Boolean,
@@ -1037,14 +1277,16 @@ private fun DocumentationPlaybackScreen(
     }
 
     LaunchedEffect(request.uri, controlsInteractionToken, diagnosticsVisible) {
-        if (!diagnosticsVisible) {
+        if (!diagnosticsVisible && !request.compatibilityTest) {
             delay(PLAYBACK_CONTROLS_TIMEOUT_MS)
             controlsVisible = false
         }
     }
 
     BackHandler {
-        when (playbackBackAction(controlsVisible, diagnosticsVisible, pictureInPictureActive)) {
+        if (request.compatibilityTest) {
+            onBack()
+        } else when (playbackBackAction(controlsVisible, diagnosticsVisible, pictureInPictureActive)) {
             PlaybackBackAction.HIDE_OVERLAY -> {
                 diagnosticsVisible = false
                 controlsVisible = false
@@ -1107,7 +1349,13 @@ private fun DocumentationPlaybackScreen(
                 )
                 Text(
                     text = buildString {
-                        append(playbackContextLabel(request.kind, startupFallbackActive = false))
+                        append(
+                            if (request.compatibilityTest) {
+                                "Testing camera compatibility"
+                            } else {
+                                playbackContextLabel(request.kind, startupFallbackActive = false)
+                            },
+                        )
                         if (!documentationPlaying) append(" • Paused")
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1119,6 +1367,14 @@ private fun DocumentationPlaybackScreen(
                 activityRecordingMessage?.let {
                     Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 }
+                activityQueueProgress?.let {
+                    Text(
+                        text = it,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
                 nextActivityLabel?.takeIf { !nextActivityEnabled }?.let {
                     Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 }
@@ -1126,6 +1382,20 @@ private fun DocumentationPlaybackScreen(
                     Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 }
             }
+        }
+
+        if (!pictureInPictureActive && !controlsVisible && activityQueueProgress != null) {
+            Text(
+                text = activityQueueProgress,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(22.dp)
+                    .background(Color.Black.copy(alpha = 0.68f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                color = MaterialTheme.colorScheme.onSurface,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+            )
         }
 
         if (!pictureInPictureActive && diagnosticsVisible) {

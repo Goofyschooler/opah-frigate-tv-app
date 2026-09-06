@@ -100,6 +100,7 @@ import app.opah.tv.data.model.CameraGroup
 import app.opah.tv.data.model.CameraPtzInfo
 import app.opah.tv.data.model.CameraStorageUsage
 import app.opah.tv.data.model.CustomThemeColors
+import app.opah.tv.data.model.DiscoverySnapshot
 import app.opah.tv.data.model.FrigateFeature
 import app.opah.tv.data.model.FrigateMode
 import app.opah.tv.data.model.FrigatePerformanceSummary
@@ -120,6 +121,8 @@ import java.util.Date
 import java.util.Locale
 
 internal enum class InformationTab(val label: String) {
+    CONNECTION("Connection"),
+    CONFIG("Config"),
     PERFORMANCE("Performance"),
     STORAGE("Storage"),
 }
@@ -150,6 +153,25 @@ internal const val OPAH_TRADEMARK_NOTICE =
 internal const val OPAH_PRIVACY_NOTICE =
     "Opah has no ads and does not track how you use the app. Your saved sign-in is encrypted " +
         "on this device."
+
+internal fun aboutOpahText(versionName: String, connectedServerVersion: String?): String = buildString {
+    append("Opah $versionName is an independent community TV app for viewing cameras and activity ")
+    append("from the Frigate server you choose. ")
+    appendLine(OPAH_PRIVACY_NOTICE)
+    appendLine()
+    append(OPAH_INDEPENDENCE_NOTICE)
+    append(' ')
+    appendLine(OPAH_TRADEMARK_NOTICE)
+    appendLine()
+    if (connectedServerVersion == null) {
+        append("This TV is not currently connected to a Frigate server. ")
+    } else {
+        append("This TV is connected to Frigate $connectedServerVersion. ")
+    }
+    append("Source code, documentation, and support are available through the project link below. ")
+    append("Opah is licensed under the Apache License 2.0 and is provided as-is, without warranty. ")
+    append("Copyright © 2026 Opah contributors")
+}
 
 @Composable
 internal fun StartupLoadingScreen(message: String) {
@@ -530,6 +552,7 @@ private fun HomeHeroPreview(
     restoreFocusKey: String?,
     onFocusRestored: () -> Unit,
     initialCameraFocusRequester: FocusRequester,
+    onMoveUp: (() -> Unit)?,
     onMoveDown: () -> Unit,
     onFocusKeyChanged: (String) -> Unit,
     onPlayCamera: (Camera, String) -> Unit,
@@ -556,7 +579,13 @@ private fun HomeHeroPreview(
             }
             onFocusKeyChanged(it)
         },
-        modifier = modifier.redirectDirectionalFocus(Key.DirectionDown, onMoveDown),
+        modifier = modifier
+            .then(
+                onMoveUp?.let { action ->
+                    Modifier.redirectDirectionalFocus(Key.DirectionUp, action)
+                } ?: Modifier,
+            )
+            .redirectDirectionalFocus(Key.DirectionDown, onMoveDown),
     ) {
         CameraSnapshot(
             cameraName = previewCamera.name,
@@ -579,8 +608,13 @@ internal fun HomeScreen(
     onFocusKeyChanged: (String) -> Unit,
     initialCameraFocusRequester: FocusRequester,
     onOpenReview: () -> Unit,
+    onPlayBriefing: () -> Unit,
+    onReviewBriefing: () -> Unit,
+    onDismissBriefing: () -> Unit,
+    onOpenCameras: (String) -> Unit,
     onOpenBirdseye: (String) -> Unit,
     onOpenCameraGroup: (String, List<String>, String) -> Unit,
+    onStartMonitor: (String, List<String>, String) -> Unit,
     onToggleFavoriteCamera: (String) -> Unit,
     onMoveFavoriteCamera: (String, Int) -> Unit,
     onHideCamera: (String) -> Unit,
@@ -605,12 +639,8 @@ internal fun HomeScreen(
         favoriteCameraNames = state.settings.favoriteCameraNames,
         hiddenCameraNames = state.settings.hiddenHomeCameraNames,
     )
-    val alerts = snapshot.recentReviewItems
-        .filter { it.severity == ReviewSeverity.ALERT }
-        .take(HOME_ROW_ITEM_LIMIT)
-    val detections = snapshot.recentReviewItems
-        .filter { it.severity == ReviewSeverity.DETECTION }
-        .take(HOME_ROW_ITEM_LIMIT)
+    val alerts = homeNewAlerts(snapshot.recentReviewItems)
+    val recentActivity = homeRecentActivity(snapshot.recentReviewItems)
     val previewState = rememberSaveable(cameras, saver = HomePreviewState.Saver) {
         HomePreviewState(cameras.firstOrNull()?.name)
     }
@@ -620,10 +650,7 @@ internal fun HomeScreen(
     val savedViews = state.settings.savedCameraViews.filter { view ->
         view.cameraNames.all { cameraName -> snapshot.cameras.any { it.name == cameraName } }
     }
-    val frigateViews = snapshot.cameraGroups.filter { group ->
-        group.cameraNames.size in MIN_CAMERA_GROUP_SIZE..MAX_CAMERA_GROUP_SIZE &&
-            group.cameraNames.all { cameraName -> snapshot.cameras.any { it.name == cameraName } }
-    }
+    val frigateViews = availableHomeCameraGroups(snapshot.cameraGroups, snapshot.cameras)
     val views = buildList {
         savedViews.forEach { view ->
             add(
@@ -640,7 +667,11 @@ internal fun HomeScreen(
                 HomeViewChoice(
                     key = "group:${group.name}",
                     title = group.displayName,
-                    detail = "Frigate group • ${group.cameraNames.size} cameras",
+                    detail = if (group.cameraNames.size <= MAX_CAMERA_GROUP_SIZE) {
+                        "Frigate group • ${group.cameraNames.size} cameras"
+                    } else {
+                        "Frigate group • ${group.cameraNames.size} cameras • Choose up to four"
+                    },
                     cameraNames = group.cameraNames,
                 ),
             )
@@ -653,6 +684,7 @@ internal fun HomeScreen(
     val firstViewFocusRequester = remember(views.firstOrNull()?.key) { FocusRequester() }
     var cameraActionsName by rememberSaveable { mutableStateOf<String?>(null) }
     var viewActionsKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var cameraGroupChoice by remember { mutableStateOf<CameraGroupChoice?>(null) }
     var modeChooserVisible by rememberSaveable { mutableStateOf(false) }
     var pendingMode by remember { mutableStateOf<PendingMode?>(null) }
     val modesAvailable = snapshot.capabilities.supports(FrigateFeature.PROFILE_MODES)
@@ -662,15 +694,17 @@ internal fun HomeScreen(
     }
     val homeHeroMaxHeight = homeHeroMaxHeightDp(viewportHeightDp).dp
     val homeListState = rememberLazyListState()
+    val briefingFocusRequester = remember { FocusRequester() }
     val focusNavigationScope = rememberCoroutineScope()
     val leadingMessageItemCount = listOf(
         state.modes.errorMessage,
         state.modes.statusMessage,
         state.health.messages.takeIf(List<String>::isNotEmpty),
     ).count { it != null }
-    val heroItemIndex = leadingMessageItemCount
-    val cameraRowItemIndex = leadingMessageItemCount + 1
-    val viewsRowItemIndex = leadingMessageItemCount + 3
+    val briefingItemCount = if (state.briefing.summary != null) 1 else 0
+    val heroItemIndex = leadingMessageItemCount + briefingItemCount
+    val cameraRowItemIndex = leadingMessageItemCount + briefingItemCount + 2
+    val viewsRowItemIndex = leadingMessageItemCount + briefingItemCount + 4
     val focusFirstView = {
         if (hasViews) {
             focusNavigationScope.launch {
@@ -692,6 +726,14 @@ internal fun HomeScreen(
             }
         }
     }
+    val focusBriefing = state.briefing.summary?.let {
+        {
+            focusNavigationScope.launch {
+                scrollThenFocus(homeListState, leadingMessageItemCount, briefingFocusRequester)
+            }
+            Unit
+        }
+    }
     LaunchedEffect(modesAvailable, state.modes.loadedOnce) {
         if (modesAvailable && !state.modes.loadedOnce) onLoadModes()
     }
@@ -704,6 +746,18 @@ internal fun HomeScreen(
     LaunchedEffect(restoreFocusKey, hasViews, viewsRowItemIndex) {
         if (hasViews && restoreFocusKey?.startsWith("home:view:") == true) {
             homeListState.scrollToItem(viewsRowItemIndex)
+        }
+    }
+    val briefingKey = state.briefing.summary?.entries?.joinToString(separator = ":") {
+        it.item.id
+    }
+    LaunchedEffect(briefingKey) {
+        if (briefingKey != null && homeListState.firstVisibleItemIndex <= heroItemIndex) {
+            scrollThenFocus(
+                homeListState,
+                leadingMessageItemCount,
+                briefingFocusRequester,
+            )
         }
     }
 
@@ -753,6 +807,61 @@ internal fun HomeScreen(
                 }
             }
         }
+        state.briefing.summary?.let { briefing ->
+            item(key = "home-briefing") {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+                            RoundedCornerShape(OpahDesignTokens.MediaCornerRadius),
+                        )
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        briefing.headline,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        briefing.detail,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        PrimaryAction(
+                            focusKey = "home:briefing-play",
+                            label = "Play highlights",
+                            onClick = onPlayBriefing,
+                            enabled = !state.briefing.loading,
+                            externalFocusRequester = briefingFocusRequester,
+                            onFocused = { onFocusKeyChanged("home:briefing-play") },
+                        )
+                        SecondaryAction(
+                            focusKey = "home:briefing-review",
+                            label = "Open Activity",
+                            onClick = onReviewBriefing,
+                            enabled = !state.briefing.loading,
+                            onFocused = { onFocusKeyChanged("home:briefing-review") },
+                        )
+                        SecondaryAction(
+                            focusKey = "home:briefing-dismiss",
+                            label = if (state.briefing.loading) "Saving" else "Dismiss",
+                            onClick = onDismissBriefing,
+                            enabled = !state.briefing.loading,
+                            onFocused = { onFocusKeyChanged("home:briefing-dismiss") },
+                        )
+                    }
+                    state.briefing.errorMessage?.let { message ->
+                        Text(message, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        }
         if (cameras.isNotEmpty()) {
             item(key = "home-preview") {
                 Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -763,6 +872,7 @@ internal fun HomeScreen(
                         restoreFocusKey = restoreFocusKey,
                         onFocusRestored = onFocusRestored,
                         initialCameraFocusRequester = initialCameraFocusRequester,
+                        onMoveUp = focusBriefing,
                         onMoveDown = focusFirstCamera,
                         onFocusKeyChanged = onFocusKeyChanged,
                         onPlayCamera = onPlayCamera,
@@ -806,6 +916,21 @@ internal fun HomeScreen(
                         onClick = onRestoreHomeDefaults,
                     )
                 }
+            }
+        }
+        item(key = "home-cameras-title") {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Cameras", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                SecondaryAction(
+                    focusKey = "home:cameras:view-all",
+                    label = "View all",
+                    onClick = { onOpenCameras("home:cameras:view-all") },
+                    onFocused = { onFocusKeyChanged("home:cameras:view-all") },
+                )
             }
         }
         item(key = "home-camera-row") {
@@ -872,7 +997,18 @@ internal fun HomeScreen(
         }
         if (hasViews) {
             item(key = "home-views-title") {
-                Text("Views", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(
+                        "Views and camera groups",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        "Start Monitor Mode to keep a View open and follow important activity",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
             item(key = "home-views-row") {
                 LazyRow(
@@ -887,27 +1023,58 @@ internal fun HomeScreen(
                 ) {
                     itemsIndexed(views, key = { _, view -> view.key }) { index, view ->
                         val key = "home:view:${view.key}"
-                        HomeViewTile(
-                            title = view.title,
-                            detail = view.detail,
-                            focusKey = key,
-                            cameraName = view.cameraNames.firstOrNull() ?: cameras.firstOrNull()?.name,
-                            onClick = {
-                                if (view.birdseye) {
-                                    onOpenBirdseye(key)
-                                } else {
-                                    onOpenCameraGroup(view.title, view.cameraNames, key)
-                                }
-                            },
-                            onLongClick = { viewActionsKey = view.key },
-                            onFocused = onFocusKeyChanged,
-                            restoreFocusKey = restoreFocusKey,
-                            onFocusRestored = onFocusRestored,
-                            externalFocusRequester = firstViewFocusRequester.takeIf { index == 0 },
-                            onMoveUp = focusFirstCamera,
-                            cachedBitmap = cachedBitmap,
-                            refreshBitmap = refreshBitmap,
-                        )
+                        Column(
+                            modifier = Modifier.width(270.dp),
+                            verticalArrangement = Arrangement.spacedBy(7.dp),
+                        ) {
+                            HomeViewTile(
+                                title = view.title,
+                                detail = view.detail,
+                                focusKey = key,
+                                cameraName = view.cameraNames.firstOrNull() ?: cameras.firstOrNull()?.name,
+                                onClick = {
+                                    when {
+                                        view.birdseye -> onOpenBirdseye(key)
+                                        view.cameraNames.size <= MAX_CAMERA_GROUP_SIZE ->
+                                            onOpenCameraGroup(view.title, view.cameraNames, key)
+                                        else -> cameraGroupChoice = CameraGroupChoice(
+                                            view.title,
+                                            view.cameraNames.toSet(),
+                                            key,
+                                        )
+                                    }
+                                },
+                                onLongClick = { viewActionsKey = view.key },
+                                onFocused = onFocusKeyChanged,
+                                restoreFocusKey = restoreFocusKey,
+                                onFocusRestored = onFocusRestored,
+                                externalFocusRequester = firstViewFocusRequester.takeIf { index == 0 },
+                                onMoveUp = focusFirstCamera,
+                                cachedBitmap = cachedBitmap,
+                                refreshBitmap = refreshBitmap,
+                            )
+                            if (!view.birdseye) {
+                                CameraAction(
+                                    label = "Start Monitor Mode",
+                                    focusKey = "$key:monitor",
+                                    restoreFocusKey = restoreFocusKey,
+                                    onFocusRestored = onFocusRestored,
+                                    onClick = {
+                                        if (view.cameraNames.size <= MAX_CAMERA_GROUP_SIZE) {
+                                            onStartMonitor(view.title, view.cameraNames, "$key:monitor")
+                                        } else {
+                                            cameraGroupChoice = CameraGroupChoice(
+                                                view.title,
+                                                view.cameraNames.toSet(),
+                                                "$key:monitor",
+                                            )
+                                        }
+                                    },
+                                    accessibilityLabel = "Start Monitor Mode with ${view.title}",
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -919,10 +1086,10 @@ internal fun HomeScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Needs attention", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("New alerts", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     SecondaryAction(
                         focusKey = "home:open-alerts",
-                        label = "${alerts.size} new",
+                        label = "View all",
                         onClick = onOpenReview,
                     )
                 }
@@ -940,14 +1107,14 @@ internal fun HomeScreen(
                 )
             }
         }
-        if (detections.isNotEmpty()) {
+        if (recentActivity.isNotEmpty()) {
             item {
                 Text("Recent activity", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             }
             item {
                 ReviewRow(
                     prefix = "home:detection",
-                    items = detections,
+                    items = recentActivity,
                     restoreFocusKey = restoreFocusKey,
                     onFocusRestored = onFocusRestored,
                     onFocused = onFocusKeyChanged,
@@ -957,12 +1124,28 @@ internal fun HomeScreen(
                 )
             }
         }
-        if (shouldShowHomeRecentActivityEmptyState(state.recentActivityLoaded, alerts.size + detections.size)) {
+        if (shouldShowHomeRecentActivityEmptyState(state.recentActivityLoaded, alerts.size + recentActivity.size)) {
             item { ScreenMessage("No recent activity yet", isError = false) }
         }
         }
     }
 
+    cameraGroupChoice?.let { choice ->
+        CameraGroupChooserDialog(
+            title = choice.title,
+            cameras = snapshot.cameras.filter { it.name in choice.cameraNames },
+            onDismiss = { cameraGroupChoice = null },
+            onWatch = { selected ->
+                cameraGroupChoice = null
+                onOpenCameraGroup(choice.title, selected, choice.returnFocusKey)
+            },
+            onMonitor = { selected ->
+                cameraGroupChoice = null
+                onStartMonitor(choice.title, selected, choice.returnFocusKey)
+            },
+            onSave = null,
+        )
+    }
     cameraActionsName?.let { cameraName ->
         val camera = snapshot.cameras.firstOrNull { it.name == cameraName }
         if (camera == null) {
@@ -1114,6 +1297,32 @@ private data class HomeViewChoice(
     val cameraNames: List<String>,
     val birdseye: Boolean = false,
 )
+
+internal fun homeNewAlerts(items: List<ReviewItem>): List<ReviewItem> =
+    items.asSequence()
+        .filter { item -> item.severity == ReviewSeverity.ALERT && !item.hasBeenReviewed }
+        .take(HOME_ROW_ITEM_LIMIT)
+        .toList()
+
+internal fun homeRecentActivity(items: List<ReviewItem>): List<ReviewItem> =
+    items.asSequence()
+        .filter { item ->
+            item.severity == ReviewSeverity.DETECTION ||
+                (item.severity == ReviewSeverity.ALERT && item.hasBeenReviewed)
+        }
+        .take(HOME_ROW_ITEM_LIMIT)
+        .toList()
+
+internal fun availableHomeCameraGroups(
+    groups: List<CameraGroup>,
+    cameras: List<Camera>,
+): List<CameraGroup> {
+    val availableCameraNames = cameras.mapTo(hashSetOf(), Camera::name)
+    return groups.filter { group ->
+        group.cameraNames.size >= MIN_CAMERA_GROUP_SIZE &&
+            group.cameraNames.all(availableCameraNames::contains)
+    }
+}
 
 internal fun orderedHomeCameras(
     cameras: List<Camera>,
@@ -1340,6 +1549,7 @@ internal fun CamerasScreen(
     onCloseControls: () -> Unit,
     onPtzCommand: (PtzCommand) -> Unit,
     onOpenCameraGroup: (String, List<String>, String) -> Unit,
+    onStartMonitor: (String, List<String>, String) -> Unit,
     onSaveCameraView: (String, List<String>) -> Unit,
     onDeleteCameraView: (String) -> Unit,
     cachedBitmap: (String) -> Bitmap?,
@@ -1366,18 +1576,27 @@ internal fun CamerasScreen(
             }
         }
         if (cameras.size >= MIN_CAMERA_GROUP_SIZE) {
-            Text(
-                text = "Camera groups",
-                modifier = Modifier.padding(horizontal = 24.dp),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-            )
+            Column(modifier = Modifier.padding(horizontal = 24.dp)) {
+                Text(
+                    text = "Camera groups",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "Watch cameras together or start Monitor Mode to follow important activity",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             CameraGroupRow(
                 cameras = cameras,
                 frigateGroups = snapshot.cameraGroups,
                 savedViews = state.settings.savedCameraViews,
+                restoreFocusKey = restoreFocusKey,
+                onFocusRestored = onFocusRestored,
                 onChoose = { chooser = it },
                 onOpen = onOpenCameraGroup,
+                onMonitor = onStartMonitor,
                 onDelete = { deleteView = it },
             )
         }
@@ -1409,6 +1628,10 @@ internal fun CamerasScreen(
             onWatch = { selected ->
                 chooser = null
                 onOpenCameraGroup(choice.title, selected, choice.returnFocusKey)
+            },
+            onMonitor = { selected ->
+                chooser = null
+                onStartMonitor(choice.title, selected, choice.returnFocusKey)
             },
             onSave = { selected ->
                 chooser = null
@@ -1468,8 +1691,11 @@ private fun CameraGroupRow(
     cameras: List<Camera>,
     frigateGroups: List<CameraGroup>,
     savedViews: List<SavedCameraView>,
+    restoreFocusKey: String?,
+    onFocusRestored: () -> Unit,
     onChoose: (CameraGroupChoice) -> Unit,
     onOpen: (String, List<String>, String) -> Unit,
+    onMonitor: (String, List<String>, String) -> Unit,
     onDelete: (SavedCameraView) -> Unit,
 ) {
     val availableNames = cameras.mapTo(mutableSetOf(), Camera::name)
@@ -1478,7 +1704,7 @@ private fun CameraGroupRow(
     LazyRow(
         modifier = Modifier
             .fillMaxWidth()
-            .height(132.dp),
+            .height(160.dp),
         contentPadding = PaddingValues(horizontal = 24.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -1487,6 +1713,8 @@ private fun CameraGroupRow(
                 focusKey = "dual:create",
                 title = "Watch cameras together",
                 subtitle = "Choose two to four",
+                restoreFocusKey = restoreFocusKey,
+                onFocusRestored = onFocusRestored,
                 onClick = {
                     onChoose(CameraGroupChoice("Camera group", availableNames, "dual:create"))
                 },
@@ -1498,44 +1726,91 @@ private fun CameraGroupRow(
                     focusKey = "dual:saved:${view.id}",
                     title = view.name,
                     subtitle = view.cameraNames.joinToString(" • ") { cameraLabels[it] ?: it },
+                    restoreFocusKey = restoreFocusKey,
+                    onFocusRestored = onFocusRestored,
                     onClick = { onOpen(view.name, view.cameraNames, "dual:saved:${view.id}") },
                 )
-                CameraAction(
-                    label = "Remove",
-                    focusKey = "dual:remove:${view.id}",
-                    restoreFocusKey = null,
-                    onFocusRestored = {},
-                    onClick = { onDelete(view) },
-                    accessibilityLabel = "Remove ${view.name}",
+                Row(
                     modifier = Modifier.width(CAMERA_GROUP_CARD_WIDTH),
-                )
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    CameraAction(
+                        label = "Monitor Mode",
+                        focusKey = "dual:monitor:${view.id}",
+                        restoreFocusKey = restoreFocusKey,
+                        onFocusRestored = onFocusRestored,
+                        onClick = {
+                            onMonitor(view.name, view.cameraNames, "dual:monitor:${view.id}")
+                        },
+                        accessibilityLabel = "Start Monitor Mode with ${view.name}",
+                        modifier = Modifier.weight(1f),
+                    )
+                    CameraAction(
+                        label = "Remove",
+                        focusKey = "dual:remove:${view.id}",
+                        restoreFocusKey = restoreFocusKey,
+                        onFocusRestored = onFocusRestored,
+                        onClick = { onDelete(view) },
+                        accessibilityLabel = "Remove ${view.name}",
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
         }
         items(frigateGroups, key = { "dual:frigate:${it.name}" }) { group ->
             val names = group.cameraNames.filter { it in availableNames }
             if (names.size >= MIN_CAMERA_GROUP_SIZE) {
-                CameraGroupCard(
-                    focusKey = "dual:frigate:${group.name}",
-                    title = group.displayName,
-                    subtitle = if (names.size <= MAX_CAMERA_GROUP_SIZE) {
-                        names.joinToString(" • ") { cameraLabels[it] ?: it }
-                    } else {
-                        "${names.size} cameras • Choose up to four"
-                    },
-                    onClick = {
-                        if (names.size <= MAX_CAMERA_GROUP_SIZE) {
-                            onOpen(group.displayName, names, "dual:frigate:${group.name}")
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    CameraGroupCard(
+                        focusKey = "dual:frigate:${group.name}",
+                        title = group.displayName,
+                        subtitle = if (names.size <= MAX_CAMERA_GROUP_SIZE) {
+                            names.joinToString(" • ") { cameraLabels[it] ?: it }
                         } else {
-                            onChoose(
-                                CameraGroupChoice(
+                            "${names.size} cameras • Choose up to four"
+                        },
+                        restoreFocusKey = restoreFocusKey,
+                        onFocusRestored = onFocusRestored,
+                        onClick = {
+                            if (names.size <= MAX_CAMERA_GROUP_SIZE) {
+                                onOpen(group.displayName, names, "dual:frigate:${group.name}")
+                            } else {
+                                onChoose(
+                                    CameraGroupChoice(
+                                        group.displayName,
+                                        names.toSet(),
+                                        "dual:frigate:${group.name}",
+                                    ),
+                                )
+                            }
+                        },
+                    )
+                    CameraAction(
+                        label = "Start Monitor Mode",
+                        focusKey = "dual:monitor:${group.name}",
+                        restoreFocusKey = restoreFocusKey,
+                        onFocusRestored = onFocusRestored,
+                        onClick = {
+                            if (names.size <= MAX_CAMERA_GROUP_SIZE) {
+                                onMonitor(
                                     group.displayName,
-                                    names.toSet(),
-                                    "dual:frigate:${group.name}",
-                                ),
-                            )
-                        }
-                    },
-                )
+                                    names,
+                                    "dual:monitor:${group.name}",
+                                )
+                            } else {
+                                onChoose(
+                                    CameraGroupChoice(
+                                        group.displayName,
+                                        names.toSet(),
+                                        "dual:monitor:${group.name}",
+                                    ),
+                                )
+                            }
+                        },
+                        accessibilityLabel = "Start Monitor Mode with ${group.displayName}",
+                        modifier = Modifier.width(CAMERA_GROUP_CARD_WIDTH),
+                    )
+                }
             }
         }
     }
@@ -1546,12 +1821,14 @@ private fun CameraGroupCard(
     focusKey: String,
     title: String,
     subtitle: String,
+    restoreFocusKey: String?,
+    onFocusRestored: () -> Unit,
     onClick: () -> Unit,
 ) {
     FocusCard(
         focusKey = focusKey,
-        restoreFocusKey = null,
-        onFocusRestored = {},
+        restoreFocusKey = restoreFocusKey,
+        onFocusRestored = onFocusRestored,
         onClick = onClick,
         accessibilityLabel = "$title, $subtitle",
         modifier = Modifier
@@ -1580,7 +1857,8 @@ private fun CameraGroupChooserDialog(
     cameras: List<Camera>,
     onDismiss: () -> Unit,
     onWatch: (List<String>) -> Unit,
-    onSave: (List<String>) -> Unit,
+    onMonitor: (List<String>) -> Unit,
+    onSave: ((List<String>) -> Unit)?,
 ) {
     var selected by remember(title, cameras) { mutableStateOf(emptyList<String>()) }
     Dialog(
@@ -1641,9 +1919,15 @@ private fun CameraGroupChooserDialog(
                     enabled = selected.size in MIN_CAMERA_GROUP_SIZE..MAX_CAMERA_GROUP_SIZE,
                 ) { Text("Watch") }
                 Button(
-                    onClick = { onSave(selected) },
+                    onClick = { onMonitor(selected) },
                     enabled = selected.size in MIN_CAMERA_GROUP_SIZE..MAX_CAMERA_GROUP_SIZE,
-                ) { Text("Save view") }
+                ) { Text("Start Monitor Mode") }
+                onSave?.let { save ->
+                    Button(
+                        onClick = { save(selected) },
+                        enabled = selected.size in MIN_CAMERA_GROUP_SIZE..MAX_CAMERA_GROUP_SIZE,
+                    ) { Text("Save view") }
+                }
             }
         }
     }
@@ -2180,6 +2464,7 @@ private fun ReviewRow(
                     Column {
                         ReviewThumbnail(
                             item = item,
+                            imageRevision = 0L,
                             cachedBitmap = { cachedBitmap(item) },
                             refreshBitmap = { refreshBitmap(item, 240) },
                             modifier = Modifier
@@ -2389,10 +2674,10 @@ internal fun SettingsScreen(
 
 @Composable
 internal fun AboutScreen(
+    connectedServerVersion: String? = null,
     onBack: (() -> Unit)? = null,
     initialFocusRequester: FocusRequester? = null,
 ) {
-    onBack?.let { BackHandler(onBack = it) }
     val uriHandler = LocalUriHandler.current
     var repositoryButtonFocused by remember { mutableStateOf(false) }
     var repositoryButtonArmed by remember { mutableStateOf(false) }
@@ -2405,88 +2690,29 @@ internal fun AboutScreen(
             repositoryButtonArmed = true
         }
     }
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 34.dp, vertical = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+    FlatSettingsDetailColumn(
+        title = "About Opah",
+        subtitle = "Independent community TV app",
+        onBack = onBack,
     ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(18.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Image(
-                painter = painterResource(R.drawable.opah_brand_mark),
-                contentDescription = null,
-                modifier = Modifier.size(72.dp),
+        item(key = "about:text") {
+            Text(
+                aboutOpahText(installedAppVersionLabel(), connectedServerVersion),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("Opah", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-                Text(
-                    "Version ${installedAppVersionLabel()}",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.titleMedium,
-                )
-            }
         }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                SettingsSection(
-                    "Independent project",
-                    "Frigate names are used only to describe compatibility",
-                    isFocusable = true,
-                    initialFocusRequester = initialFocusRequester,
-                ) {
-                    Text(OPAH_INDEPENDENCE_NOTICE, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                SettingsSection(
-                    "Privacy",
-                    "Opah connects this device directly to the Frigate server you choose",
-                ) {
-                    Text(
-                        OPAH_PRIVACY_NOTICE,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                SettingsSection("Project and support", "Opah uses the Apache License 2.0") {
-                    Text(
-                        OPAH_REPOSITORY_URL,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Button(
-                        onClick = {
-                            if (repositoryButtonArmed) {
-                                runCatching { uriHandler.openUri(OPAH_REPOSITORY_URL) }
-                            }
-                        },
-                        modifier = Modifier.onFocusChanged {
-                            repositoryButtonFocused = it.isFocused
-                        },
-                    ) {
-                        Text("Open project on GitHub")
-                    }
-                }
-                SettingsSection("Trademarks and warranty") {
-                    Text(OPAH_TRADEMARK_NOTICE, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        "Copyright © 2026 Opah contributors. Opah is provided as-is, without warranty.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+        item(key = "about:open-project") {
+            FlatSettingsRow(
+                focusKey = "settings:about:open-project",
+                title = "Open project on GitHub",
+                value = null,
+                enabled = repositoryButtonArmed,
+                focusable = true,
+                externalFocusRequester = initialFocusRequester,
+                onFocusStateChanged = { repositoryButtonFocused = it },
+                onClick = { runCatching { uriHandler.openUri(OPAH_REPOSITORY_URL) } },
+            )
         }
     }
 }
@@ -2498,91 +2724,29 @@ internal fun DiagnosticsScreen(
     onBack: (() -> Unit)? = null,
     initialFocusRequester: FocusRequester? = null,
 ) {
-    onBack?.let { BackHandler(onBack = it) }
     val snapshot = state.snapshot ?: return
     val device = state.device
-    val birdseye = snapshot.birdseye
-    val birdseyeMetadata = birdseye.streamName?.let(snapshot.streamMetadata::get)
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+    FlatSettingsDetailColumn(
+        title = "Device Info",
+        subtitle = "TV and decoder details for troubleshooting",
+        onBack = onBack,
     ) {
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column {
-                    Text("Diagnostics", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                    Text("Connection, authorization, and decoder evidence", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = onRefresh,
-                        enabled = !state.loading,
-                    ) {
-                        Text(if (state.loading) "Refreshing…" else "Refresh")
-                    }
-                }
-            }
+        item(key = "diagnostics-refresh") {
+            FlatSettingsRow(
+                focusKey = "settings:advanced:refresh",
+                title = if (state.loading) "Refreshing…" else "Refresh device data",
+                value = null,
+                enabled = !state.loading,
+                focusable = true,
+                externalFocusRequester = initialFocusRequester,
+                onClick = onRefresh,
+            )
         }
-        item {
+        item(key = "diagnostics-device") {
             SettingsSection(
-                "Frigate",
-                isFocusable = true,
-                initialFocusRequester = initialFocusRequester,
-            ) {
-                ReadOnlyValue("Version", snapshot.frigateVersion)
-                ReadOnlyValue("Compatibility", snapshot.versionCompatibility.name.replace('_', ' '))
-                ReadOnlyValue("Role", snapshot.user.role)
-                ReadOnlyValue("Authorized cameras", snapshot.cameras.size.toString())
-                ReadOnlyValue("Visible streams", snapshot.streamMetadata.size.toString())
-            }
-        }
-        item {
-            SettingsSection(
-                "Birdseye",
-                "Frigate's server-composed multi-camera live view",
+                "Device",
                 isFocusable = true,
             ) {
-                ReadOnlyValue(
-                    "Availability",
-                    when {
-                        birdseye.playable -> "Ready"
-                        !birdseye.enabled -> "Disabled in Frigate"
-                        !birdseye.restreamConfigured -> "RTSP restream is not enabled"
-                        birdseye.streamName == null -> "RTSP source was not discovered"
-                        else -> "RTSP source is unavailable"
-                    },
-                )
-                ReadOnlyValue("Birdseye enabled", if (birdseye.enabled) "Yes" else "No")
-                ReadOnlyValue("RTSP restream", if (birdseye.restreamConfigured) "Configured" else "Not configured")
-                ReadOnlyValue("Stream", birdseye.streamName ?: "Not discovered")
-                birdseyeMetadata?.let { metadata ->
-                    val video = buildString {
-                        append(metadata.videoCodec.displayName)
-                        if (metadata.width != null && metadata.height != null) {
-                            append(" ${metadata.width}×${metadata.height}")
-                        }
-                    }
-                    ReadOnlyValue("Server-reported video", video)
-                    ReadOnlyValue("Server-reported audio", metadata.audioCodec.displayName)
-                }
-                Text(
-                    if (birdseye.playable) {
-                        "Home and Cameras use one composite decoder instead of opening every camera feed"
-                    } else {
-                        "Normal camera viewing remains available while Birdseye is not ready"
-                    },
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
-        item {
-            SettingsSection("Device", isFocusable = true) {
                 if (device == null) {
                     Text("Device inspection is still loading", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
@@ -2601,37 +2765,6 @@ internal fun DiagnosticsScreen(
                 }
             }
         }
-        item(key = "diagnostics-streams-header") {
-            SettingsSection(
-                "Discovered live streams",
-                "Move down to inspect each permitted camera",
-                isFocusable = true,
-            ) {}
-        }
-        items(
-            items = snapshot.cameras,
-            key = { camera -> "diagnostics-stream:${camera.name}" },
-        ) { camera ->
-            SettingsSection(camera.displayName, isFocusable = true) {
-                camera.streams.forEach { option ->
-                    val metadata = option.metadata ?: snapshot.streamMetadata[option.streamName]
-                    val description = buildString {
-                        append(option.label)
-                        append(" — ")
-                        append(metadata?.videoCodec?.displayName ?: "codec unknown")
-                        metadata?.let { details ->
-                            if (details.width != null && details.height != null) append(" ${details.width}×${details.height}")
-                            append(if (details.available) " • available" else " • unavailable")
-                        }
-                    }
-                    Text(
-                        description,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-        }
         if (snapshot.warnings.isNotEmpty()) {
             item(key = "diagnostics-warnings") {
                 SettingsSection("Warnings", isFocusable = true) {
@@ -2647,44 +2780,42 @@ internal fun InformationScreen(
     state: Phase0UiState,
     onLoad: () -> Unit,
     onRefresh: () -> Unit,
+    onUpdateLiveRoute: (String, String) -> Unit,
+    onSignOut: () -> Unit,
+    onForgetServer: () -> Unit,
     onBack: (() -> Unit)? = null,
     initialFocusRequester: FocusRequester? = null,
     initialTabName: String? = null,
 ) {
-    onBack?.let { BackHandler(onBack = it) }
-    LaunchedEffect(state.activeProfile) {
-        onLoad()
-    }
     val information = state.information
     val summary = information.summary
     var tabName by rememberSaveable(initialTabName) {
         mutableStateOf(initialTabName ?: InformationTab.PERFORMANCE.name)
     }
     val tab = runCatching { InformationTab.valueOf(tabName) }.getOrDefault(InformationTab.PERFORMANCE)
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+    val profile = state.activeProfile
+    var liveHost by rememberSaveable(profile) { mutableStateOf(profile?.rtspHostOverride.orEmpty()) }
+    var livePort by rememberSaveable(profile) { mutableStateOf(profile?.rtspPort?.toString() ?: "8554") }
+    val inputFocusCoordinator = remember { TvInputFocusCoordinator() }
+    val saveFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(state.activeProfile, tab) {
+        if (tab != InformationTab.CONNECTION) onLoad()
+    }
+    FlatSettingsDetailColumn(
+        title = "Server",
+        subtitle = "Connection, configuration, performance, and recording space",
+        onBack = onBack,
     ) {
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column {
-                    Text("System", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                    Text(
-                        "Performance and recording space",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Button(
-                    onClick = onRefresh,
+        if (tab != InformationTab.CONNECTION) {
+            item(key = "information-refresh") {
+                FlatSettingsRow(
+                    focusKey = "settings:server:refresh",
+                    title = if (information.loading) "Refreshing…" else "Refresh server data",
+                    value = null,
                     enabled = !information.loading,
-                ) {
-                    Text(if (information.loading) "Refreshing…" else "Refresh")
-                }
+                    focusable = true,
+                    onClick = onRefresh,
+                )
             }
         }
         item(key = "information-tabs") {
@@ -2714,6 +2845,84 @@ internal fun InformationScreen(
             }
         }
         when (tab) {
+            InformationTab.CONNECTION -> {
+                if (profile == null) {
+                    item(key = "server-connection-unavailable") {
+                        SettingsSection("Connection", isFocusable = true) {
+                            ScreenMessage("No active server connection", isError = false)
+                        }
+                    }
+                } else {
+                    item(key = "server-connection-account") {
+                        SettingsSection("Account", "The server and account Opah uses on this device") {
+                            ReadOnlyValue("Server", profile.apiBaseUrl)
+                            ReadOnlyValue("Account", profile.username)
+                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                SecondaryAction(
+                                    focusKey = "settings:server:connection:sign-out",
+                                    label = "Sign out",
+                                    onClick = onSignOut,
+                                )
+                                SecondaryAction(
+                                    focusKey = "settings:server:connection:forget",
+                                    label = "Forget connection",
+                                    onClick = onForgetServer,
+                                )
+                            }
+                        }
+                    }
+                    item(key = "server-connection-live-route") {
+                        SettingsSection("Live video route", "Only change this if live video cannot connect") {
+                            ProductionTvInput(
+                                label = "Live video host (optional)",
+                                value = liveHost,
+                                onValueChange = { liveHost = it },
+                                placeholder = "Use the same server",
+                                enabled = true,
+                                inputKey = "settings:server:live-host",
+                                focusCoordinator = inputFocusCoordinator,
+                                nextInputKey = "settings:server:live-port",
+                            )
+                            ProductionTvInput(
+                                label = "Live video port",
+                                value = livePort,
+                                onValueChange = { livePort = it.filter(Char::isDigit) },
+                                placeholder = "8554",
+                                enabled = true,
+                                keyboardType = KeyboardType.Number,
+                                imeAction = ImeAction.Done,
+                                inputKey = "settings:server:live-port",
+                                focusCoordinator = inputFocusCoordinator,
+                                previousInputKey = "settings:server:live-host",
+                                nextFocusRequester = saveFocusRequester,
+                            )
+                            Button(
+                                onClick = { onUpdateLiveRoute(liveHost, livePort) },
+                                modifier = Modifier.focusRequester(saveFocusRequester),
+                            ) { Text("Save live video route") }
+                        }
+                    }
+                }
+            }
+
+            InformationTab.CONFIG -> {
+                val configSnapshot = state.snapshot
+                if (configSnapshot == null) {
+                    item(key = "server-config-unavailable") {
+                        SettingsSection("Config", isFocusable = true) {
+                            ScreenMessage("Server configuration is not available", isError = false)
+                        }
+                    }
+                } else {
+                    item(key = "server-config-frigate") {
+                        ServerFrigateConfig(configSnapshot)
+                    }
+                    item(key = "server-config-birdseye") {
+                        ServerBirdseyeConfig(configSnapshot)
+                    }
+                }
+            }
+
             InformationTab.PERFORMANCE -> {
                 item(key = "performance-overview") {
                     PerformanceOverview(
@@ -2760,6 +2969,60 @@ internal fun InformationScreen(
             }
 
         }
+    }
+}
+
+@Composable
+private fun ServerFrigateConfig(snapshot: DiscoverySnapshot) {
+    SettingsSection("Frigate", isFocusable = true) {
+        ReadOnlyValue("Version", snapshot.frigateVersion)
+        ReadOnlyValue("Compatibility", snapshot.versionCompatibility.name.replace('_', ' '))
+        ReadOnlyValue("Role", snapshot.user.role)
+        ReadOnlyValue("Authorized cameras", snapshot.cameras.size.toString())
+    }
+}
+
+@Composable
+private fun ServerBirdseyeConfig(snapshot: DiscoverySnapshot) {
+    val birdseye = snapshot.birdseye
+    val birdseyeMetadata = birdseye.streamName?.let(snapshot.streamMetadata::get)
+    SettingsSection(
+        "Birdseye",
+        "Frigate's server-composed multi-camera live view",
+        isFocusable = true,
+    ) {
+        ReadOnlyValue(
+            "Availability",
+            when {
+                birdseye.playable -> "Ready"
+                !birdseye.enabled -> "Disabled in Frigate"
+                !birdseye.restreamConfigured -> "RTSP restream is not enabled"
+                birdseye.streamName == null -> "RTSP source was not discovered"
+                else -> "RTSP source is unavailable"
+            },
+        )
+        ReadOnlyValue("Birdseye enabled", if (birdseye.enabled) "Yes" else "No")
+        ReadOnlyValue("RTSP restream", if (birdseye.restreamConfigured) "Configured" else "Not configured")
+        ReadOnlyValue("Stream", birdseye.streamName ?: "Not discovered")
+        birdseyeMetadata?.let { metadata ->
+            val video = buildString {
+                append(metadata.videoCodec.displayName)
+                if (metadata.width != null && metadata.height != null) {
+                    append(" ${metadata.width}×${metadata.height}")
+                }
+            }
+            ReadOnlyValue("Server-reported video", video)
+            ReadOnlyValue("Server-reported audio", metadata.audioCodec.displayName)
+        }
+        Text(
+            if (birdseye.playable) {
+                "Home and Cameras use one composite decoder instead of opening every camera feed"
+            } else {
+                "Normal camera viewing remains available while Birdseye is not ready"
+            },
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 
@@ -3423,7 +3686,6 @@ internal fun SettingsSection(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(12.dp)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -3443,21 +3705,19 @@ internal fun SettingsSection(
                     Modifier
                 },
             )
-            .background(MaterialTheme.colorScheme.surface, shape)
-            .border(
-                if (focused) 3.dp else 1.dp,
-                if (focused) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
-                shape,
-            )
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .background(
+                if (focused) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.11f)
+                else Color.Transparent,
+                RoundedCornerShape(8.dp),
+            ),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        subtitle?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        content()
+        FlatSettingsSectionHeader(title = title, subtitle = subtitle)
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+            content = content,
+        )
     }
 }
 
@@ -3470,19 +3730,16 @@ internal fun <T> ChoiceRow(
     onSelect: (T) -> Unit,
     externalFocusRequester: FocusRequester? = null,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         values.forEachIndexed { index, value ->
-            FocusCard(
+            app.opah.tv.ui.ChoiceRow(
                 focusKey = "$keyPrefix:$value",
-                restoreFocusKey = null,
-                onFocusRestored = {},
-                onClick = { onSelect(value) },
+                title = label(value),
                 selected = value == selected,
-                accessibilityLabel = label(value),
+                onClick = { onSelect(value) },
+                modifier = Modifier.fillMaxWidth(),
                 externalFocusRequester = externalFocusRequester.takeIf { index == 0 },
-            ) {
-                Text(label(value), modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
-            }
+            )
         }
     }
 }
@@ -3758,27 +4015,18 @@ internal fun SettingToggle(
     value: Boolean,
     onChange: (Boolean) -> Unit,
     externalFocusRequester: FocusRequester? = null,
+    enabled: Boolean = true,
 ) {
-    FocusCard(
+    SettingsRow(
         focusKey = "settings:toggle:$label",
-        restoreFocusKey = null,
-        onFocusRestored = {},
+        title = label,
+        value = if (value) "On" else "Off",
         onClick = { onChange(!value) },
+        enabled = enabled,
         selected = value,
-        accessibilityLabel = "$label, ${if (value) "on" else "off"}",
         externalFocusRequester = externalFocusRequester,
         modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(label)
-            Text(if (value) "On" else "Off", color = if (value) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
+    )
 }
 
 @Composable

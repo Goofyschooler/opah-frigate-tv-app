@@ -142,6 +142,41 @@ class ReviewRepository(
         return item.copy(linkedEvents = linked)
     }
 
+    /**
+     * Resolves literal plate text from the events Frigate linked to one authorized Review item.
+     * Event IDs are used directly so alert rules never become server-side search expressions.
+     */
+    suspend fun recognizedLicensePlates(
+        profile: ConnectionProfile,
+        allowedCameras: Set<String>,
+        camera: String,
+        detectionIds: Set<String>,
+    ): Set<String> {
+        if (camera !in allowedCameras || detectionIds.isEmpty()) return emptySet()
+        val safeIds = detectionIds.asSequence()
+            .filter { it.isNotBlank() && it.length <= MAX_LINKED_EVENT_ID_CHARS && it.none(Char::isISOControl) }
+            .distinct()
+            .take(MAX_ALERT_LINKED_EVENT_IDS)
+            .toList()
+        if (safeIds.isEmpty()) return emptySet()
+        return safeIds.chunked(MAX_LINKED_EVENT_IDS)
+            .flatMap { ids ->
+                parsers.parseSearchEvents(gateway.getEventsByIds(profile, ids.toSet()))
+            }
+            .asSequence()
+            .filter { event -> event.camera == camera && event.camera in allowedCameras }
+            .mapNotNull { event ->
+                event.recognizedLicensePlate?.trim()?.takeIf { plate ->
+                    plate.isNotEmpty() &&
+                        plate.length <= MAX_RECOGNIZED_PLATE_CHARS &&
+                        plate.none(Char::isISOControl)
+                }
+            }
+            .distinct()
+            .take(MAX_RECOGNIZED_PLATES)
+            .toCollection(linkedSetOf())
+    }
+
     suspend fun recordingAvailable(
         profile: ConnectionProfile,
         item: ReviewItem,
@@ -187,5 +222,9 @@ class ReviewRepository(
         const val RECORDING_PADDING_SECONDS = 8.0
         const val RECENT_WINDOW_SECONDS = 24 * 60 * 60.0
         const val MAX_LINKED_EVENT_IDS = 50
+        const val MAX_ALERT_LINKED_EVENT_IDS = 128
+        const val MAX_LINKED_EVENT_ID_CHARS = 256
+        const val MAX_RECOGNIZED_PLATE_CHARS = 256
+        const val MAX_RECOGNIZED_PLATES = 256
     }
 }

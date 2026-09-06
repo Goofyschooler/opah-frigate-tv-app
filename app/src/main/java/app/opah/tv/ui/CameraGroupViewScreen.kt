@@ -95,6 +95,7 @@ internal fun CameraGroupViewScreen(
     pictureInPictureAvailable: Boolean,
     pictureInPictureActive: Boolean,
     onEnterPictureInPicture: (PictureInPictureRequest) -> Boolean,
+    onStartMonitor: () -> Unit,
     onBack: () -> Unit,
     cachedBitmap: (String) -> Bitmap?,
     refreshBitmap: suspend (String, Int) -> Bitmap?,
@@ -102,6 +103,7 @@ internal fun CameraGroupViewScreen(
     val streamKey = state.streams.joinToString("|") { it.camera.name }
     val playerFocusRequester = remember(streamKey) { FocusRequester() }
     val popOutFocusRequester = remember(streamKey) { FocusRequester() }
+    val monitorFocusRequester = remember(streamKey) { FocusRequester() }
     var overlayVisible by remember(streamKey) { mutableStateOf(!pictureInPictureActive) }
     var interactionToken by remember(streamKey) { mutableIntStateOf(0) }
     var consumeRevealKeyUp by remember(streamKey) { mutableStateOf(false) }
@@ -131,8 +133,8 @@ internal fun CameraGroupViewScreen(
     LaunchedEffect(overlayVisible, popOutAvailable, pictureInPictureActive) {
         if (pictureInPictureActive) return@LaunchedEffect
         withFrameNanos { }
-        if (overlayVisible && popOutAvailable) {
-            popOutFocusRequester.requestFocus()
+        if (overlayVisible) {
+            monitorFocusRequester.requestFocus()
         } else {
             playerFocusRequester.requestFocus()
         }
@@ -145,7 +147,7 @@ internal fun CameraGroupViewScreen(
     }
 
     BackHandler {
-        when (cameraGroupBackAction(overlayVisible && popOutAvailable, pictureInPictureActive)) {
+        when (cameraGroupBackAction(overlayVisible, pictureInPictureActive)) {
             CameraGroupBackAction.HIDE_CONTROLS -> overlayVisible = false
             CameraGroupBackAction.EXIT -> onBack()
         }
@@ -155,7 +157,7 @@ internal fun CameraGroupViewScreen(
             .fillMaxSize()
             .background(Color.Black)
             .onPreviewKeyEvent { event ->
-                if (event.key == Key.Back || pictureInPictureActive || !canOfferPopOut) {
+                if (event.key == Key.Back || pictureInPictureActive) {
                     false
                 } else if (event.type == KeyEventType.KeyUp && consumeRevealKeyUp) {
                     consumeRevealKeyUp = false
@@ -174,7 +176,7 @@ internal fun CameraGroupViewScreen(
                 }
             }
             .focusRequester(playerFocusRequester)
-            .focusable(enabled = !pictureInPictureActive && (!overlayVisible || !popOutAvailable)),
+            .focusable(enabled = !pictureInPictureActive && !overlayVisible),
     ) {
         Box(
             modifier = Modifier
@@ -223,31 +225,40 @@ internal fun CameraGroupViewScreen(
                     }
                 }
 
-                if (popOutAvailable) {
-                    CameraGroupPopOutControl(
-                        focusRequester = popOutFocusRequester,
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 18.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    CameraGroupMonitorControl(
+                        focusRequester = monitorFocusRequester,
                         onFocused = { interactionToken += 1 },
-                        onClick = {
-                            interactionToken += 1
-                            val entered = onEnterPictureInPicture(
-                                PictureInPictureRequest(
-                                    title = state.title,
-                                    subtitle = "${state.streams.size} cameras",
-                                    aspectRatio = pipAspectRatio(16, 9),
-                                    sourceRectHint = groupBounds,
-                                ),
-                            )
-                            if (entered) {
-                                pictureInPictureMessage = null
-                                overlayVisible = false
-                            } else {
-                                pictureInPictureMessage = "Picture in Picture is not available"
-                            }
-                        },
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 18.dp),
+                        onClick = onStartMonitor,
                     )
+                    if (popOutAvailable) {
+                        CameraGroupPopOutControl(
+                            focusRequester = popOutFocusRequester,
+                            onFocused = { interactionToken += 1 },
+                            onClick = {
+                                interactionToken += 1
+                                val entered = onEnterPictureInPicture(
+                                    PictureInPictureRequest(
+                                        title = state.title,
+                                        subtitle = "${state.streams.size} cameras",
+                                        aspectRatio = pipAspectRatio(16, 9),
+                                        sourceRectHint = groupBounds,
+                                    ),
+                                )
+                                if (entered) {
+                                    pictureInPictureMessage = null
+                                    overlayVisible = false
+                                } else {
+                                    pictureInPictureMessage = "Picture in Picture is not available"
+                                }
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -398,6 +409,38 @@ private fun CameraGroupPopOutControl(
             }
         }
         Text("Pop out", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun CameraGroupMonitorControl(
+    focusRequester: FocusRequester,
+    onFocused: () -> Unit,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .background(Color.Black.copy(alpha = 0.74f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 8.dp, vertical = 7.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        FocusCard(
+            focusKey = "group:control:monitor",
+            restoreFocusKey = null,
+            onFocusRestored = {},
+            onClick = onClick,
+            accessibilityLabel = "Start Monitor Mode",
+            externalFocusRequester = focusRequester,
+            onFocused = { onFocused() },
+            containerColor = Color.White.copy(alpha = 0.10f),
+            modifier = Modifier.size(width = 92.dp, height = 44.dp),
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Monitor", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        Text("Stay aware", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
     }
 }
 

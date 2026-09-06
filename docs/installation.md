@@ -45,11 +45,25 @@ The exact wording and location of these options varies by television.
 Enter your Frigate server address, username, and password. Use the same secure
 `https://` address you normally use in a browser when possible.
 
-Most people should leave **Advanced connection settings** unchanged. Open them
-only if your Frigate setup uses a separate local address for live video.
+Keep **Live video address** set to **Same as Frigate (recommended)** unless live
+video must use a different local host or port. If you choose a separate
+address, Opah shows the additional fields and explains what they affect.
 
-The on-screen keyboard opens only after you select a field. After the first
-successful sign-in, Opah can remember the connection and sign in automatically.
+Select an address or sign-in field to open the on-screen keyboard. Opah asks
+Android to show it immediately and retries if the TV is slow to respond. After
+the first successful sign-in, Opah can remember the connection and sign in
+automatically.
+
+## Optional TV alerts
+
+TV alerts are off until you enable them in **Settings** > **TV alerts**. On
+Android 13 or newer, Android asks for notification permission when you turn
+them on. If you decline, Opah continues to work normally without TV alerts.
+
+Some TVs restrict apps in the background or after a reboot. The TV alerts page
+shows when Android has blocked notifications and includes a shortcut to the
+app's notification settings. Android may still delay restarting alerts until
+you open Opah again.
 
 ## Update Opah
 

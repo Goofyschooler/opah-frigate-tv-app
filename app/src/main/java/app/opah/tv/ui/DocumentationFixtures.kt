@@ -2,6 +2,9 @@ package app.opah.tv.ui
 
 import android.content.Context
 import android.graphics.BitmapFactory
+import app.opah.tv.briefing.BriefingAudience
+import app.opah.tv.briefing.BriefingStoredCandidate
+import app.opah.tv.briefing.BriefingSummarizer
 import app.opah.tv.data.CameraImage
 import app.opah.tv.data.ReviewImage
 import app.opah.tv.data.model.AcceleratorPerformance
@@ -133,6 +136,17 @@ internal object DocumentationFixtures {
         reviewItem("review-garden-2", "garden", 1_787_121_800.0, ReviewSeverity.ALERT, listOf("cat"), listOf("yard")),
     )
 
+    private val briefingSummary = requireNotNull(
+        BriefingSummarizer.summarize(
+            candidates = reviewItems.take(3).map { item ->
+                BriefingStoredCandidate(item, BriefingSummarizer.contentVersion(item))
+            },
+            acknowledgements = emptyMap(),
+            capped = false,
+            maximumPresented = 3,
+        ),
+    )
+
     private val incidents = listOf(
         ExportIncident(
             id = "incident-arrival",
@@ -195,7 +209,7 @@ internal object DocumentationFixtures {
         )
 
     private val snapshot = DiscoverySnapshot(
-        frigateVersion = "0.18.0",
+        frigateVersion = "0.18.0-rc1",
         user = FrigateUserProfile(
             username = profile.username,
             role = "admin",
@@ -250,7 +264,7 @@ internal object DocumentationFixtures {
 
     private val information = FrigateInformationSummary(
         performance = FrigatePerformanceSummary(
-            version = "0.18.0",
+            version = "0.18.0-rc1",
             uptimeSeconds = 432_845.0,
             cameraFps = 45.0,
             processFps = 15.0,
@@ -355,7 +369,7 @@ internal object DocumentationFixtures {
             )
             "UPDATE_LONG" -> base.copy(
                 appUpdate = base.appUpdate.copy(
-                    latestVersion = "0.4.0",
+                    latestVersion = "0.5.0",
                     releaseNotes = (1..36).joinToString("\n") { index ->
                         "Improvement $index makes everyday TV navigation clearer"
                     },
@@ -399,6 +413,11 @@ internal object DocumentationFixtures {
         detail = "Main • Automatic stream selection",
     )
 
+    fun compatibilityPlayback(camera: Camera): PlaybackRequest = livePlayback(camera).copy(
+        detail = "Testing camera compatibility",
+        compatibilityTest = true,
+    )
+
     fun birdseyePlayback(): PlaybackRequest = PlaybackRequest(
         title = "Birdseye",
         uri = "${DOCUMENTATION_URI_PREFIX}birdseye",
@@ -414,6 +433,8 @@ internal object DocumentationFixtures {
         cameraName = item.camera,
         detail = "Recording",
         activityItemId = item.id,
+        recordingStartTime = item.startTime,
+        recordingEndTime = item.endTime,
     )
 
     fun recordingHistory(hourStartSeconds: Double, endSeconds: Double): List<RecordingSegment> = listOf(
@@ -459,6 +480,8 @@ internal object DocumentationFixtures {
         kind = PlaybackKind.RECORDED,
         cameraName = camera.name,
         detail = "Earlier recording",
+        recordingStartTime = startTime,
+        recordingEndTime = endTime,
     )
 
     fun searchPlayback(camera: Camera, event: SearchEvent): PlaybackRequest = PlaybackRequest(
@@ -467,6 +490,8 @@ internal object DocumentationFixtures {
         kind = PlaybackKind.RECORDED,
         cameraName = camera.name,
         detail = "Search result",
+        recordingStartTime = event.startTime,
+        recordingEndTime = event.endTime,
     )
 
     private fun connectedState(): Phase0UiState = Phase0UiState(
@@ -518,7 +543,21 @@ internal object DocumentationFixtures {
         appUpdate = AppUpdateUiState(
             checkedOnce = true,
             updateAvailable = false,
-            latestVersion = "0.4.0",
+            latestVersion = "0.5.0",
+        ),
+        privacy = PrivacyUiState(
+            loading = false,
+            available = true,
+            epoch = 1L,
+        ),
+        tvAlerts = TvAlertsUiState(
+            loading = false,
+            available = true,
+        ),
+        briefing = BriefingUiState(
+            summary = briefingSummary,
+            audience = BriefingAudience.OWNER,
+            privacyEpoch = 1L,
         ),
     )
 

@@ -161,7 +161,9 @@ internal fun ReviewBrowserState.afterClipSaved(itemId: String): ReviewBrowserSta
 internal fun ReviewCounts.unreviewedFor(severity: ReviewSeverity?): Int = when (severity) {
     ReviewSeverity.ALERT -> unreviewedAlerts
     ReviewSeverity.DETECTION -> unreviewedDetections
-    ReviewSeverity.UNKNOWN -> 0
+    ReviewSeverity.SIGNIFICANT_MOTION,
+    ReviewSeverity.UNKNOWN,
+    -> 0
     null -> unreviewedTotal
 }
 

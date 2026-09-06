@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="native_opah_focus">#FF7048</color>
+    <color name="native_opah_text">#FFF7F3</color>
+    <color name="native_opah_text_secondary">#B9C4D2</color>
+    <color name="native_opah_divider">#2A394C</color>
+</resources>

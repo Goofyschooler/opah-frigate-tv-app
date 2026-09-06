@@ -8,5 +8,7 @@ class OpahApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         StartupTrace.begin()
+        container.playbackPersistenceStartupRecoveryOwner.start()
+        container.startPrivacyInitialization()
     }
 }

@@ -18,8 +18,11 @@ import app.opah.tv.data.model.RecordingExport
 import app.opah.tv.data.model.RecordingExportStart
 import app.opah.tv.data.model.ReviewItem
 import app.opah.tv.data.model.ReviewCounts
+import app.opah.tv.data.model.ReviewLifecycle
 import app.opah.tv.data.model.ReviewSummaryMetadata
 import app.opah.tv.data.model.ReviewSeverity
+import app.opah.tv.data.model.RealtimeReviewItem
+import app.opah.tv.data.model.RealtimeReviewUpdate
 import app.opah.tv.data.model.SearchEvent
 import app.opah.tv.data.model.StreamMetadata
 import app.opah.tv.data.model.TemperatureReading
@@ -29,6 +32,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
@@ -194,17 +198,13 @@ class FrigateJsonParsers(
             val camera = item.string("camera") ?: return@mapNotNull null
             val start = item.double("start_time") ?: return@mapNotNull null
             val data = item.obj("data")
-            val metadata = data?.obj("metadata")
+            val rawSeverity = item.string("severity")?.trim()?.lowercase()
             ReviewItem(
                 id = id,
                 camera = camera,
                 startTime = start,
                 endTime = item.double("end_time"),
-                severity = when (item.string("severity")?.lowercase()) {
-                    "alert" -> ReviewSeverity.ALERT
-                    "detection" -> ReviewSeverity.DETECTION
-                    else -> ReviewSeverity.UNKNOWN
-                },
+                severity = rawSeverity.toReviewSeverity(),
                 thumbnailPath = item.string("thumb_path"),
                 objects = data.stringList("objects"),
                 zones = data.stringList("zones"),
@@ -212,21 +212,37 @@ class FrigateJsonParsers(
                 audio = data.stringList("audio"),
                 detectionIds = data.stringList("detections"),
                 subLabels = data.stringList("sub_labels"),
-                summary = metadata?.let {
-                    ReviewSummaryMetadata(
-                        title = it.string("title")?.takeIf(String::isNotBlank),
-                        shortSummary = (it.string("shortSummary") ?: it.string("short_summary"))
-                            ?.takeIf(String::isNotBlank),
-                        scene = it.string("scene")?.takeIf(String::isNotBlank),
-                        potentialThreatLevel = it.int("potential_threat_level"),
-                        otherConcerns = it.stringList("other_concerns"),
-                    )
-                }?.takeIf { summary ->
-                    summary.title != null || summary.shortSummary != null || summary.scene != null ||
-                        summary.potentialThreatLevel != null || summary.otherConcerns.isNotEmpty()
-                },
+                summary = data?.obj("metadata").toReviewSummary(),
+                rawSeverity = rawSeverity,
+                significantMotionAreas = data.intList("significant_motion_areas"),
             )
         }
+    }
+
+    /**
+     * Parses either Frigate's inner Review update or its double-encoded WebSocket envelope.
+     * The real-time representation intentionally remains separate from the canonical REST item.
+     */
+    fun parseRealtimeReviewUpdate(rawJson: String): RealtimeReviewUpdate? {
+        if (rawJson.length > MAX_REALTIME_REVIEW_JSON_CHARACTERS) return null
+        val root = runCatching { json.parseToJsonElement(rawJson) as? JsonObject }.getOrNull()
+            ?: return null
+        val update = when {
+            root["type"] != null -> root
+            root.string("topic") == "reviews" -> root.reviewPayload()
+            else -> null
+        } ?: return null
+        val rawLifecycle = update.string("type")?.trim()?.lowercase()
+        if (rawLifecycle != null && !rawLifecycle.isBoundedRealtimeText(MAX_REALTIME_RAW_VALUE_CHARACTERS)) {
+            return null
+        }
+        val after = update.obj("after")?.toRealtimeReviewItem() ?: return null
+        return RealtimeReviewUpdate(
+            lifecycle = rawLifecycle.toReviewLifecycle(),
+            rawLifecycle = rawLifecycle,
+            before = update.obj("before")?.toRealtimeReviewItem(),
+            after = after,
+        )
     }
 
     fun parseReviewCounts(rawJson: String): ReviewCounts {
@@ -526,8 +542,168 @@ class FrigateJsonParsers(
     }.getOrNull()
     private fun JsonObject?.stringList(key: String): List<String> =
         (this?.get(key) as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
+    private fun JsonObject?.intList(key: String): List<Int> =
+        (this?.get(key) as? JsonArray)?.mapNotNull { it.jsonPrimitive.intOrNull }.orEmpty()
+
+    private fun JsonObject.reviewPayload(): JsonObject? = when (val payload = get("payload")) {
+        is JsonObject -> payload
+        is JsonPrimitive -> payload.contentOrNull?.let { encoded ->
+            if (encoded.length > MAX_REALTIME_REVIEW_JSON_CHARACTERS) {
+                null
+            } else {
+                runCatching { json.parseToJsonElement(encoded) as? JsonObject }.getOrNull()
+            }
+        }
+        else -> null
+    }
+
+    private fun JsonObject.toRealtimeReviewItem(): RealtimeReviewItem? {
+        val id = string("id")?.takeIf { it.isBoundedRealtimeIdentifier() } ?: return null
+        val camera = string("camera")?.takeIf { it.isBoundedRealtimeIdentifier() } ?: return null
+        val startTime = double("start_time")?.takeIf(Double::isFinite) ?: return null
+        val endTime = double("end_time")?.takeIf(Double::isFinite)
+        val rawSeverity = string("severity")?.trim()?.lowercase()
+        if (rawSeverity != null && !rawSeverity.isBoundedRealtimeText(MAX_REALTIME_RAW_VALUE_CHARACTERS)) {
+            return null
+        }
+        val thumbnailPath = string("thumb_path")
+        if (
+            thumbnailPath != null &&
+            !thumbnailPath.isBoundedRealtimeText(MAX_REALTIME_THUMBNAIL_CHARACTERS)
+        ) {
+            return null
+        }
+        val data = obj("data")
+        val budget = RealtimePayloadBudget()
+        val objects = data.boundedRealtimeStringSet("objects", budget) ?: return null
+        val zones = data.boundedRealtimeStringSet("zones", budget) ?: return null
+        val audio = data.boundedRealtimeStringSet("audio", budget) ?: return null
+        val detectionIds = data.boundedRealtimeStringSet("detections", budget) ?: return null
+        val subLabels = data.boundedRealtimeStringSet("sub_labels", budget) ?: return null
+        val significantMotionAreas = data.boundedRealtimeIntSet("significant_motion_areas") ?: return null
+        val metadata = data?.obj("metadata")
+        if (metadata != null && !metadata.isBoundedRealtimeSummary(budget)) return null
+        return RealtimeReviewItem(
+            id = id,
+            camera = camera,
+            startTime = startTime,
+            endTime = endTime,
+            severity = rawSeverity.toReviewSeverity(),
+            rawSeverity = rawSeverity,
+            thumbnailPath = thumbnailPath,
+            objects = objects,
+            zones = zones,
+            audio = audio,
+            detectionIds = detectionIds,
+            subLabels = subLabels,
+            significantMotionAreas = significantMotionAreas,
+            summary = metadata.toReviewSummary(),
+            hasBeenReviewed = bool("has_been_reviewed"),
+        )
+    }
+
+    private class RealtimePayloadBudget {
+        private var characters: Int = 0
+
+        fun consume(value: String): Boolean {
+            if (characters > MAX_REALTIME_AGGREGATE_CHARACTERS - value.length) return false
+            characters += value.length
+            return true
+        }
+    }
+
+    private fun JsonObject?.boundedRealtimeStringSet(
+        key: String,
+        budget: RealtimePayloadBudget,
+    ): Set<String>? {
+        val element = this?.get(key) ?: return emptySet()
+        val array = element as? JsonArray ?: return null
+        if (array.size > MAX_REALTIME_ARRAY_ITEMS) return null
+        val result = linkedSetOf<String>()
+        for (item in array) {
+            val value = (item as? JsonPrimitive)?.contentOrNull ?: return null
+            if (!value.isBoundedRealtimeText(MAX_REALTIME_ARRAY_ITEM_CHARACTERS)) return null
+            if (!budget.consume(value)) return null
+            result += value
+        }
+        return result
+    }
+
+    private fun JsonObject?.boundedRealtimeIntSet(key: String): Set<Int>? {
+        val element = this?.get(key) ?: return emptySet()
+        val array = element as? JsonArray ?: return null
+        if (array.size > MAX_REALTIME_ARRAY_ITEMS) return null
+        val result = linkedSetOf<Int>()
+        for (item in array) {
+            result += (item as? JsonPrimitive)?.intOrNull ?: return null
+        }
+        return result
+    }
+
+    private fun JsonObject.isBoundedRealtimeSummary(budget: RealtimePayloadBudget): Boolean {
+        val boundedFields = mapOf(
+            "title" to MAX_REALTIME_TITLE_CHARACTERS,
+            "shortSummary" to MAX_REALTIME_SUMMARY_CHARACTERS,
+            "short_summary" to MAX_REALTIME_SUMMARY_CHARACTERS,
+            "scene" to MAX_REALTIME_SCENE_CHARACTERS,
+        )
+        for ((key, maximum) in boundedFields) {
+            val element = get(key) ?: continue
+            val value = (element as? JsonPrimitive)?.contentOrNull ?: return false
+            if (!value.isBoundedRealtimeText(maximum) || !budget.consume(value)) return false
+        }
+        return boundedRealtimeStringSet("other_concerns", budget) != null
+    }
+
+    private fun String.isBoundedRealtimeIdentifier(): Boolean =
+        isNotBlank() && isBoundedRealtimeText(MAX_REALTIME_IDENTIFIER_CHARACTERS)
+
+    private fun String.isBoundedRealtimeText(maximumCharacters: Int): Boolean =
+        length <= maximumCharacters && none { character ->
+            character.isISOControl() || Character.getType(character) == Character.FORMAT.toInt()
+        }
+
+    private fun JsonObject?.toReviewSummary(): ReviewSummaryMetadata? = this?.let {
+        ReviewSummaryMetadata(
+            title = it.string("title")?.takeIf(String::isNotBlank),
+            shortSummary = (it.string("shortSummary") ?: it.string("short_summary"))
+                ?.takeIf(String::isNotBlank),
+            scene = it.string("scene")?.takeIf(String::isNotBlank),
+            potentialThreatLevel = it.int("potential_threat_level"),
+            otherConcerns = it.stringList("other_concerns"),
+        )
+    }?.takeIf { summary ->
+        summary.title != null || summary.shortSummary != null || summary.scene != null ||
+            summary.potentialThreatLevel != null || summary.otherConcerns.isNotEmpty()
+    }
+
+    private fun String?.toReviewSeverity(): ReviewSeverity = when (this) {
+        "alert" -> ReviewSeverity.ALERT
+        "detection" -> ReviewSeverity.DETECTION
+        "significant_motion" -> ReviewSeverity.SIGNIFICANT_MOTION
+        else -> ReviewSeverity.UNKNOWN
+    }
+
+    private fun String?.toReviewLifecycle(): ReviewLifecycle = when (this) {
+        "new" -> ReviewLifecycle.NEW
+        "update" -> ReviewLifecycle.UPDATE
+        "end" -> ReviewLifecycle.END
+        "genai" -> ReviewLifecycle.GENAI
+        else -> ReviewLifecycle.UNKNOWN
+    }
 
     companion object {
+        private const val MAX_REALTIME_REVIEW_JSON_CHARACTERS = 1_048_576
+        private const val MAX_REALTIME_IDENTIFIER_CHARACTERS = 256
+        private const val MAX_REALTIME_RAW_VALUE_CHARACTERS = 128
+        private const val MAX_REALTIME_THUMBNAIL_CHARACTERS = 2_048
+        private const val MAX_REALTIME_ARRAY_ITEMS = 256
+        private const val MAX_REALTIME_ARRAY_ITEM_CHARACTERS = 512
+        private const val MAX_REALTIME_AGGREGATE_CHARACTERS = 262_144
+        private const val MAX_REALTIME_TITLE_CHARACTERS = 160
+        private const val MAX_REALTIME_SUMMARY_CHARACTERS = 1_000
+        private const val MAX_REALTIME_SCENE_CHARACTERS = 500
+
         private val EVIDENCE_KEYS = setOf(
             "medias", "media", "sdp", "codec", "codec_name", "video", "audio", "resolution",
         )

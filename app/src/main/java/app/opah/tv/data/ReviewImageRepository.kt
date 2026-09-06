@@ -54,9 +54,20 @@ class ReviewImageRepository(
         item: ReviewItem,
         height: Int = DEFAULT_HEIGHT,
     ): Result<ReviewImage> {
-        val url = reviewThumbnailUrl(profile, item.thumbnailPath)
-            ?: return Result.failure(IllegalArgumentException("This Review item has no safe thumbnail"))
-        return refresh(cacheKey(profile, item), url, height)
+        val urls = listOfNotNull(
+            reviewThumbnailUrl(profile, item.thumbnailPath),
+            reviewFallbackThumbnailUrl(profile, item.id, item.camera),
+        ).distinct()
+        if (urls.isEmpty()) {
+            return Result.failure(IllegalArgumentException("This Review item has no safe thumbnail"))
+        }
+        var lastFailure: Throwable? = null
+        urls.forEach { url ->
+            val result = refresh(cacheKey(profile, item), url, height)
+            result.getOrNull()?.let { return Result.success(it) }
+            lastFailure = result.exceptionOrNull()
+        }
+        return Result.failure(lastFailure ?: IllegalStateException("Review thumbnail request failed"))
     }
 
     suspend fun refresh(
@@ -178,15 +189,32 @@ internal fun reviewThumbnailUrl(
     profile: ConnectionProfile,
     thumbnailPath: String?,
 ): HttpUrl? {
-    val relative = thumbnailPath
-        ?.takeIf { it.startsWith(REVIEW_MEDIA_PREFIX) }
-        ?.removePrefix(REVIEW_MEDIA_PREFIX)
-        ?: return null
+    val relative = when {
+        thumbnailPath?.startsWith(REVIEW_MEDIA_PREFIX) == true ->
+            thumbnailPath.removePrefix(REVIEW_MEDIA_PREFIX)
+        thumbnailPath?.startsWith(REVIEW_DIRECT_PREFIX) == true ->
+            thumbnailPath.removePrefix(REVIEW_DIRECT_PREFIX)
+        else -> return null
+    }
     val segments = relative.split('/').filter(String::isNotBlank)
     if (segments.isEmpty() || segments.any { it == "." || it == ".." || '\\' in it }) return null
     return profile.apiBaseUrl.toHttpUrl().newBuilder()
         .addPathSegments("clips/review")
         .apply { segments.forEach { addPathSegment(it) } }
+        .build()
+}
+
+internal fun reviewFallbackThumbnailUrl(
+    profile: ConnectionProfile,
+    reviewId: String,
+    cameraId: String,
+): HttpUrl? {
+    if (!reviewId.isSafeReviewThumbnailIdentifier() || !cameraId.isSafeReviewThumbnailIdentifier()) {
+        return null
+    }
+    return profile.apiBaseUrl.toHttpUrl().newBuilder()
+        .addPathSegments("clips/review")
+        .addPathSegment("thumb-$cameraId-$reviewId.webp")
         .build()
 }
 
@@ -207,4 +235,10 @@ internal fun exportThumbnailUrl(
 }
 
 private const val REVIEW_MEDIA_PREFIX = "/media/frigate/clips/review/"
+private const val REVIEW_DIRECT_PREFIX = "/clips/review/"
 private const val EXPORT_THUMBNAIL_MEDIA_PREFIX = "/media/frigate/clips/export/"
+
+private fun String.isSafeReviewThumbnailIdentifier(): Boolean =
+    isNotBlank() && length <= 256 && none {
+        it.isISOControl() || Character.getType(it) == Character.FORMAT.toInt()
+    }

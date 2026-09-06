@@ -8,7 +8,7 @@ try when a camera does not play.
 | Item | Tested status |
 | --- | --- |
 | Frigate 0.17.2 | Supported stable version |
-| Frigate 0.18.0 beta 3 (`344efb6`) | Features for this exact beta have automated coverage; live beta-server testing remains limited |
+| Frigate 0.18.0 RC1 (`a745070`) | Exact source and authenticated API audits passed; signed-candidate Home, Activity, Clip, and Monitor smoke tests passed on the main TV |
 | Android TV / Google TV | Android 7.0 or newer |
 | Main test device | 2024 onn. 4K Pro with Android 14 |
 | H.264 camera video | Tested |
@@ -24,10 +24,14 @@ try when a camera does not play.
 | Camera groups | Two and four cameras tested on the main device; results depend on the TV's video hardware |
 | Picture-in-picture | Requires Android TV 14 or newer and support from the TV |
 | Camera controls | Built for compatible Frigate PTZ cameras; physical-camera testing is still needed |
+| Native TV alerts | Local evaluator, permission, channel, privacy, lifecycle, and reboot paths have automated coverage; physical-TV background testing is pending |
+| Monitor Mode | Deterministic promotion, recovery, privacy, timer, and cleanup paths have automated coverage; ONN endurance testing is pending |
+| Since-you-last-watched briefing | Deterministic 24-hour first load, seven-day bound, PIN/private-camera scoping, Room persistence, and exact progress have automated coverage; documentation and exact final signed-APK TV testing passed |
+| Automatic playback compatibility | Strategy selection, persistence, invalidation, and fallback paths have automated coverage; the full device/codec matrix is pending |
 
-Newer Frigate releases may work before they are listed here, but they have not
-completed the same checks yet. Future Opah updates will aim to support new
-Frigate versions without breaking the versions already listed.
+Newer parseable Frigate 0.18 builds are not rejected merely because their exact
+build name is not listed here. They may work before they complete the same
+checks, and Opah shows their tested status separately from basic compatibility.
 
 ## Camera video formats
 
@@ -42,12 +46,15 @@ Codec.
 
 If a camera stays on **Preparing** or does not start:
 
-1. Turn on **Compatibility mode** under **Settings** > **Playback**.
-2. Try the camera's lower-resolution stream.
-3. Turn off Smart Codec, H.264+, or H.265+ in the camera settings.
-4. Make sure the camera creates a full video frame regularly. Camera interfaces
+1. Open **Settings** > **Cameras and Playback** > **Check camera compatibility**,
+   choose the camera, and start with **Automatic**.
+2. If Automatic cannot verify a choice, try **Reliable video only** to separate
+   an audio problem from a video problem.
+3. Try the camera's lower-resolution stream.
+4. Turn off Smart Codec, H.264+, or H.265+ in the camera settings.
+5. Make sure the camera creates a full video frame regularly. Camera interfaces
    may call this the keyframe or I-frame interval.
-5. Try H.264 to determine whether the problem is specific to H.265 support.
+6. Try H.264 to determine whether the problem is specific to H.265 support.
 
 ## Audio and live controls
 
@@ -88,6 +95,18 @@ Camera movement, zoom, focus, and saved positions appear only when both Frigate
 and the camera report support. These controls have not yet been tested with a
 physical PTZ camera, so support may vary.
 
+## TV alerts and Monitor Mode
+
+TV alerts require Android notification permission on Android 13 or newer. A
+notification channel can also be turned off separately in Android settings.
+Some TVs delay background work or reboot delivery even when alerts are enabled.
+Open **Settings** > **TV alerts** to see Opah's current status.
+
+Monitor Mode starts from an existing saved View or Frigate camera group. It
+uses snapshots for the quiet baseline and promotes at most one camera to live
+video. If a TV struggles, use fewer cameras or lower-resolution streams. Audio
+starts off unless you turn it on.
+
 ## Clips and Incidents
 
 Clips stay on the Frigate server. If a clip does not play, first confirm that
@@ -122,7 +141,8 @@ Please include:
 - the exact Frigate version;
 - the TV brand/model and Android version;
 - the camera video format and resolution; and
-- whether **Compatibility mode** or the lower-resolution stream works.
+- whether **Check camera compatibility**, **Reliable video only**, or the
+  lower-resolution stream works.
 
 Do not post your password, server address, camera names or images, Frigate
 configuration, or unedited logs. See [Contributing to Opah](../CONTRIBUTING.md)
