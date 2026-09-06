@@ -2,7 +2,7 @@
 
 This page lists the user-visible changes in each Opah release.
 
-## 0.5.0 - Unreleased
+## 0.5.0 - 2026-09-05
 
 ### A clearer television interface
 
