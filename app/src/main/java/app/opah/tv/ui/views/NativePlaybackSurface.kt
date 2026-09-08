@@ -45,6 +45,7 @@ import app.opah.tv.playback.compatibility.TransportMode
 import app.opah.tv.playback.media3.PlayerViewMedia3VideoOutputTarget
 import app.opah.tv.ui.DOCUMENTATION_URI_PREFIX
 import app.opah.tv.ui.DocumentationImageStore
+import app.opah.tv.ui.boundedSeekPosition
 import app.opah.tv.playback.media3.SingleLivePlaybackRequestId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -196,7 +197,28 @@ internal class NativePlaybackSurface(
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         visibility = if (request.kind == PlaybackKind.RECORDED) View.VISIBLE else View.GONE
+        isFocusable = request.kind == PlaybackKind.RECORDED
+        isClickable = request.kind == PlaybackKind.RECORDED
+        tag = "recorded:timeline"
+        background = activity.nativeFlatOverlayFocusableBackground()
+        contentDescription = "Playback timeline, use left and right to seek 10 seconds"
         setPadding(activity.dp(10), 0, activity.dp(10), activity.dp(3))
+        setOnKeyListener { _, keyCode, event ->
+            if (event.action != KeyEvent.ACTION_DOWN || request.kind != PlaybackKind.RECORDED) {
+                return@setOnKeyListener false
+            }
+            when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_LEFT -> { seekBy(-10_000L); true }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBy(10_000L); true }
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                -> { togglePlayback(); true }
+                else -> false
+            }
+        }
+        onFocusChangeListener = OnFocusChangeListener { _, focused ->
+            if (focused) controlHint.setText(R.string.native_playback_seek_help)
+        }
         addView(progress, LinearLayout.LayoutParams(activity.dp(92), LayoutParams.WRAP_CONTENT))
         addView(
             timeline,
@@ -220,6 +242,8 @@ internal class NativePlaybackSurface(
     private var automaticReviewThresholdReported = false
     private var watchedPlaybackMillis = 0L
     private var lastWatchSampleElapsedRealtime: Long? = null
+    private var documentationPositionMillis = 8_000L
+    private val documentationDurationMillis = 24_000L
     private var pictureInPictureReady = false
     private var pictureInPictureActive = false
     private var chromeVisible = true
@@ -595,8 +619,7 @@ internal class NativePlaybackSurface(
             pictureInPicture.isEnabled = true
             pictureInPicture.alpha = 1f
         } else {
-            progress.setText(R.string.native_documentation_playback_progress)
-            timeline.progress = 333
+            updateDocumentationProgress()
         }
         updatePlayPauseControl(true)
     }
@@ -731,11 +754,38 @@ internal class NativePlaybackSurface(
     }
 
     private fun seekBy(offsetMillis: Long) {
-        val active = player ?: return
         if (request.kind != PlaybackKind.RECORDED) return
-        val duration = active.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
-        active.seekTo((active.currentPosition + offsetMillis).coerceIn(0L, duration))
+        if (documentationPlayback) {
+            documentationPositionMillis = boundedSeekPosition(
+                documentationPositionMillis,
+                documentationDurationMillis,
+                offsetMillis,
+            )
+            updateDocumentationProgress()
+            return
+        }
+        val active = player ?: return
+        val duration = active.duration.takeIf { it > 0L }
+        if (!active.isCurrentMediaItemSeekable || duration == null) {
+            status.setText(R.string.native_playback_seek_unavailable)
+            showChrome(requestFocus = false)
+            return
+        }
+        active.seekTo(boundedSeekPosition(active.currentPosition, duration, offsetMillis))
         updateProgress(active)
+    }
+
+    private fun updateDocumentationProgress() {
+        progress.text = activity.getString(
+            R.string.native_playback_progress,
+            playbackTime(documentationPositionMillis),
+            playbackTime(documentationDurationMillis),
+        )
+        timeline.progress = (
+            documentationPositionMillis.toDouble() / documentationDurationMillis.toDouble() * timeline.max
+            ).toInt().coerceIn(0, timeline.max)
+        progressStrip.contentDescription =
+            "Playback timeline, ${progress.text}, use left and right to seek 10 seconds"
     }
 
     private fun startProgressUpdates(active: ExoPlayer) {
@@ -753,6 +803,9 @@ internal class NativePlaybackSurface(
         recordAutomaticReviewWatch(active)
         val position = active.currentPosition.coerceAtLeast(0L)
         val duration = active.duration.takeIf { it > 0 }
+        val seekable = active.isCurrentMediaItemSeekable && duration != null
+        progressStrip.isEnabled = seekable
+        progressStrip.alpha = if (seekable) 1f else 0.55f
         progress.text = if (duration != null) {
             "${playbackTime(position)} / ${playbackTime(duration)}"
         } else {
@@ -764,6 +817,12 @@ internal class NativePlaybackSurface(
                 .coerceIn(0, timeline.max)
         } else {
             0
+        }
+        progressStrip.contentDescription = if (duration != null) {
+            "Playback timeline, ${playbackTime(position)} of ${playbackTime(duration)}, " +
+                if (seekable) "use left and right to seek 10 seconds" else "loading"
+        } else {
+            "Playback timeline loading"
         }
     }
 

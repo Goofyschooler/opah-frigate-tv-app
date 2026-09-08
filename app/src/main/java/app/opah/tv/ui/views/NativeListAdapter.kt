@@ -21,6 +21,25 @@ internal fun RecyclerView.addNativeFlatDividers(startInsetDp: Int = 12) {
     addItemDecoration(NativeFlatDividerDecoration(context.dp(startInsetDp)))
 }
 
+internal fun RecyclerView.focusRow(position: Int): Boolean {
+    if (position < 0 || position >= (adapter?.itemCount ?: 0)) return false
+    scrollToPosition(position)
+    post { findViewHolderForAdapterPosition(position)?.itemView?.requestFocus() }
+    return true
+}
+
+internal fun RecyclerView.focusAdjacentRow(
+    rowAdapter: NativeListAdapter,
+    focused: View,
+    forward: Boolean,
+): Boolean {
+    val currentPosition = findContainingViewHolder(focused)?.bindingAdapterPosition
+        ?.takeIf { it != RecyclerView.NO_POSITION }
+        ?: return false
+    val target = adjacentFocusableRowPosition(rowAdapter.currentList, currentPosition, forward) ?: return false
+    return focusRow(target)
+}
+
 private class NativeFlatDividerDecoration(
     private val startInset: Int,
 ) : RecyclerView.ItemDecoration() {

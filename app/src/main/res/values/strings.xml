@@ -10,7 +10,9 @@
     <string name="native_playback_loading">Loading video</string>
     <string name="native_playback_finished">Playback finished</string>
     <string name="native_playback_failed">Video could not be played</string>
-    <string name="native_documentation_playback_progress" translatable="false">0:08 / 0:24</string>
+    <string name="native_playback_seek_help">Use left and right to seek 10 seconds</string>
+    <string name="native_playback_seek_unavailable">This recording is not ready to seek</string>
+    <string name="native_playback_progress">%1$s / %2$s</string>
     <string name="native_picture_in_picture_unavailable">Picture-in-picture is unavailable</string>
     <string name="native_live_video_route">Live video address</string>
     <string name="native_live_video_route_help">Live video normally uses the Frigate address • change this only when your network requires another host or RTSP port</string>

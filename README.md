@@ -113,6 +113,7 @@ summary, a recognized name, or a license plate.
 While a saved Activity video is playing, choose **Next activity** to continue
 through the same list without returning to the grid. At the end, the control
 shows **Caught up** for a review queue or **No next activity** for another list.
+Move focus to the playback timeline and use left or right to move by 10 seconds.
 Pressing Back returns to the original item, filters, and position in the
 Activity list.
 

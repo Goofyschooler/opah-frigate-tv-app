@@ -179,20 +179,34 @@ internal fun Context.nativeFlatReadingBackground(): StateListDrawable = StateLis
     )
 }
 
+internal fun Context.nativeFlatScrollRegionBackground(): StateListDrawable = StateListDrawable().apply {
+    addState(
+        intArrayOf(android.R.attr.state_focused),
+        nativeUiShape(Color.TRANSPARENT).also {
+            it.setStroke(dp(2), NativeTheme.palette.focus)
+        },
+    )
+    addState(intArrayOf(), nativeUiShape(Color.TRANSPARENT))
+}
+
 private fun Context.nativeUiShape(fillColor: Int): GradientDrawable = GradientDrawable().apply {
     shape = GradientDrawable.RECTANGLE
     setColor(fillColor)
     cornerRadius = if (NativeTheme.subtleRoundedCorners) dp(4).toFloat() else 0f
 }
 
-internal fun Context.nativeNavigationIcon(iconRes: Int, badgeText: String = ""): Drawable {
+internal fun Context.nativeNavigationIcon(
+    iconRes: Int,
+    badgeText: String = "",
+    centerDot: Boolean = false,
+): Drawable {
     val icon = requireNotNull(getDrawable(iconRes)).mutate().apply {
         setTint(NativeTheme.palette.text)
     }
-    return if (badgeText.isBlank()) {
+    return if (badgeText.isBlank() && !centerDot) {
         icon
     } else {
-        NativeNavigationBadgeDrawable(this, icon, badgeText)
+        NativeNavigationBadgeDrawable(this, icon, badgeText, centerDot)
     }
 }
 
@@ -200,6 +214,7 @@ private class NativeNavigationBadgeDrawable(
     context: Context,
     private val icon: Drawable,
     private val badgeText: String,
+    private val centerDot: Boolean,
 ) : Drawable() {
     private val density = context.resources.displayMetrics.density
     private val iconSize = (24f * density).toInt()
@@ -214,6 +229,10 @@ private class NativeNavigationBadgeDrawable(
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
     }
     private val textCenterOffset = -(textPaint.fontMetrics.ascent + textPaint.fontMetrics.descent) / 2f
+    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = NativeTheme.palette.activityBadge
+    }
+    private val dotRadius = 3.5f * density
 
     override fun onBoundsChange(bounds: android.graphics.Rect) {
         val iconLeft = bounds.centerX() - iconSize / 2
@@ -223,17 +242,22 @@ private class NativeNavigationBadgeDrawable(
 
     override fun draw(canvas: Canvas) {
         icon.draw(canvas)
-        canvas.drawText(
-            badgeText,
-            bounds.exactCenterX(),
-            bounds.exactCenterY() + textCenterOffset,
-            textPaint,
-        )
+        if (badgeText.isNotBlank()) {
+            canvas.drawText(
+                badgeText,
+                bounds.exactCenterX(),
+                bounds.exactCenterY() + textCenterOffset,
+                textPaint,
+            )
+        } else if (centerDot) {
+            canvas.drawCircle(bounds.exactCenterX(), bounds.exactCenterY(), dotRadius, dotPaint)
+        }
     }
 
     override fun setAlpha(alpha: Int) {
         icon.alpha = alpha
         textPaint.alpha = alpha
+        dotPaint.alpha = alpha
     }
 
     override fun setColorFilter(colorFilter: ColorFilter?) {

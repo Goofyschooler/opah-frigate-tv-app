@@ -2,6 +2,15 @@
 
 This page lists the user-visible changes in each Opah release.
 
+## 0.5.2 - 2026-09-08
+
+- Made remote navigation predictable across Activity, Clips, Motion Search,
+  Settings, and full-screen camera views, including clear movement between
+  tabs, lists, choices, and results.
+- Added a selectable recorded-video timeline. Use left or right to move by
+  10 seconds while watching saved or reviewed activity.
+- Restored the colored update indicator inside the Settings gear.
+
 ## 0.5.1 - 2026-09-07
 
 - Restored a visible **Mark all reviewed** action on the New Activity page

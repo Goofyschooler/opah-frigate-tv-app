@@ -58,6 +58,7 @@ internal class NativeMediaBrowserSurface(
     private val onActivate: (String) -> Unit,
     private val onFocused: (String, View) -> Unit,
     private val onThumbnailRequested: (NativeRowModel, ImageView) -> Unit,
+    private val onNavigateOutLeft: () -> Unit,
 ) : LinearLayout(activity) {
     private val subtitle = TextView(activity).apply {
         textSize = 13f
@@ -70,6 +71,7 @@ internal class NativeMediaBrowserSurface(
         visibility = View.GONE
     }
     private val list = RecyclerView(activity).apply {
+        isFocusable = false
         layoutManager = NativeLinearLayoutManager(activity)
         itemAnimator = null
         overScrollMode = View.OVER_SCROLL_NEVER
@@ -84,6 +86,7 @@ internal class NativeMediaBrowserSurface(
     private val detailSubtitle = text(13f, secondary = true)
     private val detailBody = text(13f, secondary = true).apply { maxLines = 4 }
     private val detailActions = RecyclerView(activity).apply {
+        isFocusable = false
         layoutManager = NativeLinearLayoutManager(activity)
         itemAnimator = null
         overScrollMode = View.OVER_SCROLL_NEVER
@@ -190,12 +193,66 @@ internal class NativeMediaBrowserSurface(
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
             val focused = findFocus()
-            if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && focused != null && list.isAncestorOf(focused)) {
-                return focusDetailActions()
-            }
-            if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT && focused != null && detailActions.isAncestorOf(focused)) {
-                restoreSelectedListFocus()
-                return true
+            when {
+                focused != null && list.isAncestorOf(focused) -> when (event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        focusDetailActions()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_UP,
+                    KeyEvent.KEYCODE_DPAD_DOWN,
+                    -> {
+                        val forward = event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                        if (list.focusAdjacentRow(listAdapter, focused, forward)) return true
+                        if (!forward) focusLastToolOrSelectedTab()
+                        return true
+                    }
+                }
+                focused != null && detailActions.isAncestorOf(focused) -> when (event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        restoreSelectedListFocus()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_UP,
+                    KeyEvent.KEYCODE_DPAD_DOWN,
+                    -> {
+                        detailActions.focusAdjacentRow(
+                            actionAdapter,
+                            focused,
+                            forward = event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN,
+                        )
+                        return true
+                    }
+                }
+                focused != null && tabs.isAncestorOf(focused) && event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    focusFirstToolOrList()
+                    return true
+                }
+                focused != null && tabs.isAncestorOf(focused) && (
+                    event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+                        event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                    ) -> {
+                    val forward = event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                    if (!focusHorizontalSibling(tabs, focused, forward) && !forward) onNavigateOutLeft()
+                    return true
+                }
+                focused != null && tools.isAncestorOf(focused) -> when (event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        focusSelectedTab()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        focusFirstListRow()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT,
+                    KeyEvent.KEYCODE_DPAD_RIGHT,
+                    -> {
+                        val forward = event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                        if (!focusHorizontalSibling(tools, focused, forward) && !forward) onNavigateOutLeft()
+                        return true
+                    }
+                }
             }
         }
         return super.dispatchKeyEvent(event)
@@ -209,66 +266,81 @@ internal class NativeMediaBrowserSurface(
 
     private fun updateTabs(models: List<NativeBrowserTab>) {
         val focusedKey = tabs.findFocus()?.tag as? String
-        tabs.removeAllViews()
-        models.forEach { tab ->
-            tabs.addView(
-                TextView(activity).apply {
-                    tag = tab.key
-                    text = tab.label
-                    textSize = 14f
-                    gravity = Gravity.CENTER
-                    setTextColor(NativeTheme.palette.text)
-                    isFocusable = tab.enabled
-                    isClickable = tab.enabled
-                    isEnabled = tab.enabled
-                    isSelected = tab.selected
-                    alpha = if (tab.enabled) 1f else 0.5f
-                    background = activity.nativeFlatFocusableBackground()
-                    setPadding(activity.dp(11), activity.dp(5), activity.dp(11), activity.dp(5))
-                    setOnClickListener { onActivate(tab.key) }
-                },
-                LayoutParams(LayoutParams.WRAP_CONTENT, activity.dp(36)).apply { marginStart = activity.dp(3) },
-            )
+        val existingKeys = (0 until tabs.childCount).map { tabs.getChildAt(it).tag as? String }
+        if (existingKeys != models.map(NativeBrowserTab::key)) {
+            tabs.removeAllViews()
+            models.forEach { tab ->
+                tabs.addView(
+                    TextView(activity).apply {
+                        id = View.generateViewId()
+                        tag = tab.key
+                        textSize = 14f
+                        gravity = Gravity.CENTER
+                        setTextColor(NativeTheme.palette.text)
+                        background = activity.nativeFlatFocusableBackground()
+                        setPadding(activity.dp(11), activity.dp(5), activity.dp(11), activity.dp(5))
+                        setOnClickListener { onActivate(tab.key) }
+                    },
+                    LayoutParams(LayoutParams.WRAP_CONTENT, activity.dp(36)).apply { marginStart = activity.dp(3) },
+                )
+            }
+        }
+        models.forEachIndexed { index, tab ->
+            (tabs.getChildAt(index) as? TextView)?.apply {
+                text = tab.label
+                isFocusable = tab.enabled
+                isClickable = tab.enabled
+                isEnabled = tab.enabled
+                isSelected = tab.selected
+                alpha = if (tab.enabled) 1f else 0.5f
+            }
         }
         if (focusedKey != null) tabs.post { tabs.findViewWithTag<View>(focusedKey)?.requestFocus() }
     }
 
     private fun updateTools(models: List<NativeBrowserTool>) {
         val focusedKey = tools.findFocus()?.tag as? String
-        tools.removeAllViews()
-        models.forEach { tool ->
-            val text = buildString {
-                append(tool.label)
-                if (tool.value.isNotBlank()) append("   ${tool.value}")
+        val existingKeys = (0 until tools.childCount).map { tools.getChildAt(it).tag as? String }
+        if (existingKeys != models.map(NativeBrowserTool::key)) {
+            tools.removeAllViews()
+            models.forEach { tool ->
+                tools.addView(
+                    TextView(activity).apply {
+                        id = View.generateViewId()
+                        tag = tool.key
+                        textSize = if (tool.field) 15f else 13f
+                        gravity = if (tool.field) Gravity.CENTER_VERTICAL else Gravity.CENTER
+                        setTextColor(NativeTheme.palette.text)
+                        if (tool.primary) setTypeface(typeface, Typeface.BOLD)
+                        background = if (tool.field) {
+                            activity.nativeFlatFieldBackground()
+                        } else {
+                            activity.nativeFlatFocusableBackground()
+                        }
+                        setPadding(activity.dp(if (tool.field) 13 else 10), activity.dp(5), activity.dp(if (tool.field) 13 else 10), activity.dp(5))
+                        setOnClickListener { onActivate(tool.key) }
+                    },
+                    LayoutParams(
+                        if (tool.field) 0 else LayoutParams.WRAP_CONTENT,
+                        activity.dp(if (tool.field) 42 else 36),
+                        if (tool.field) 1f else 0f,
+                    ).apply {
+                        marginEnd = activity.dp(if (tool.field) 8 else 3)
+                    },
+                )
             }
-            tools.addView(
-                TextView(activity).apply {
-                    tag = tool.key
-                    this.text = text
-                    textSize = if (tool.field) 15f else 13f
-                    gravity = if (tool.field) Gravity.CENTER_VERTICAL else Gravity.CENTER
-                    setTextColor(NativeTheme.palette.text)
-                    if (tool.primary) setTypeface(typeface, Typeface.BOLD)
-                    isFocusable = tool.enabled
-                    isClickable = tool.enabled
-                    isEnabled = tool.enabled
-                    alpha = if (tool.enabled) 1f else 0.5f
-                    background = if (tool.field) {
-                        activity.nativeFlatFieldBackground()
-                    } else {
-                        activity.nativeFlatFocusableBackground()
-                    }
-                    setPadding(activity.dp(if (tool.field) 13 else 10), activity.dp(5), activity.dp(if (tool.field) 13 else 10), activity.dp(5))
-                    setOnClickListener { onActivate(tool.key) }
-                },
-                LayoutParams(
-                    if (tool.field) 0 else LayoutParams.WRAP_CONTENT,
-                    activity.dp(if (tool.field) 42 else 36),
-                    if (tool.field) 1f else 0f,
-                ).apply {
-                    marginEnd = activity.dp(if (tool.field) 8 else 3)
-                },
-            )
+        }
+        models.forEachIndexed { index, tool ->
+            (tools.getChildAt(index) as? TextView)?.apply {
+                text = buildString {
+                    append(tool.label)
+                    if (tool.value.isNotBlank()) append("   ${tool.value}")
+                }
+                isFocusable = tool.enabled
+                isClickable = tool.enabled
+                isEnabled = tool.enabled
+                alpha = if (tool.enabled) 1f else 0.5f
+            }
         }
         tools.visibility = if (models.isEmpty()) View.GONE else View.VISIBLE
         if (focusedKey != null) tools.post { tools.findViewWithTag<View>(focusedKey)?.requestFocus() }
@@ -321,6 +393,42 @@ internal class NativeMediaBrowserSurface(
             list.scrollToPosition(position)
             list.post { list.findViewHolderForAdapterPosition(position)?.itemView?.requestFocus() }
         }
+    }
+
+    private fun focusFirstListRow(): Boolean {
+        val position = listAdapter.currentList.indexOfFirst(NativeRowModel::focusable)
+        return if (position >= 0) list.focusRow(position) else false
+    }
+
+    private fun focusSelectedTab(): Boolean {
+        val selectedIndex = currentState.tabs.indexOfFirst { it.selected && it.enabled }
+            .takeIf { it >= 0 }
+            ?: currentState.tabs.indexOfFirst(NativeBrowserTab::enabled)
+        return tabs.getChildAt(selectedIndex)?.requestFocus() == true
+    }
+
+    private fun focusFirstToolOrList(): Boolean {
+        val firstTool = (0 until tools.childCount)
+            .map(tools::getChildAt)
+            .firstOrNull { it.isFocusable && it.isEnabled }
+        return firstTool?.requestFocus() == true || focusFirstListRow()
+    }
+
+    private fun focusLastToolOrSelectedTab(): Boolean {
+        val lastTool = (tools.childCount - 1 downTo 0)
+            .map(tools::getChildAt)
+            .firstOrNull { it.isFocusable && it.isEnabled }
+        return lastTool?.requestFocus() == true || focusSelectedTab()
+    }
+
+    private fun focusHorizontalSibling(group: ViewGroup, focused: View, forward: Boolean): Boolean {
+        val index = group.indexOfChild(focused)
+        if (index < 0) return false
+        val positions = if (forward) (index + 1 until group.childCount) else (index - 1 downTo 0)
+        val target = positions
+            .map(group::getChildAt)
+            .firstOrNull { it.isFocusable && it.isEnabled }
+        return target?.requestFocus() == true
     }
 
     private fun firstFocusableChild(group: ViewGroup): View? {

@@ -54,7 +54,7 @@ internal class NativeSettingsSurface(
         addNativeFlatDividers()
     }
     private val detailList = NativeSettingsColumn(activity).apply {
-        isFocusable = true
+        isFocusable = false
         isFocusableInTouchMode = true
         layoutManager = NativeLinearLayoutManager(activity)
         itemAnimator = null
@@ -157,6 +157,14 @@ internal class NativeSettingsSurface(
         subtitle.text = state.subtitle
         selectedCategoryKey = state.selectedCategoryKey
         detailHasActions = state.detailRows.any(NativeRowModel::focusable)
+        val readOnlyDetail = state.detailContent == null && !detailHasActions
+        detailList.isFocusable = readOnlyDetail
+        detailList.background = if (readOnlyDetail) activity.nativeFlatScrollRegionBackground() else null
+        detailList.contentDescription = if (readOnlyDetail) {
+            "${state.title} details, use up and down to scroll"
+        } else {
+            null
+        }
         detailScrollGuide.text = if (detailHasActions) {
             "Use ↑ ↓ to read • press Select for actions"
         } else {
@@ -218,11 +226,22 @@ internal class NativeSettingsSurface(
             val focused = findFocus()
             when {
                 focused != null && categoryList.isAncestorOf(focused) -> {
-                    if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
-                        preferDetailFocus = true
-                        val customTarget = currentDetailContent?.let(::firstFocusableDescendant)
-                        if (customTarget != null) customTarget.requestFocus() else detailList.requestFocus()
-                        return true
+                    when (event.keyCode) {
+                        KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                            preferDetailFocus = true
+                            if (!focusFirstDetailTarget()) detailList.requestFocus()
+                            return true
+                        }
+                        KeyEvent.KEYCODE_DPAD_UP,
+                        KeyEvent.KEYCODE_DPAD_DOWN,
+                        -> {
+                            categoryList.focusAdjacentRow(
+                                categoryAdapter,
+                                focused,
+                                forward = event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN,
+                            )
+                            return true
+                        }
                     }
                     preferDetailFocus = false
                 }
@@ -251,51 +270,128 @@ internal class NativeSettingsSurface(
                     }
                 }
                 focused != null && detailList.isAncestorOf(focused) -> {
-                    if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
-                        preferDetailFocus = false
-                    } else {
-                        preferDetailFocus = true
-                        rememberedDetailKey = focused.tag as? String ?: rememberedDetailKey
+                    when (event.keyCode) {
+                        KeyEvent.KEYCODE_DPAD_LEFT -> {
+                            val focusedKind = (focused.tag as? String)?.let { key ->
+                                detailAdapter.currentList.firstOrNull { it.key == key }?.kind
+                            }
+                            if (focusedKind != NativeRowKind.ADJUSTMENT) {
+                                focusSelectedCategory(null)
+                                return true
+                            }
+                        }
+                        KeyEvent.KEYCODE_DPAD_UP,
+                        KeyEvent.KEYCODE_DPAD_DOWN,
+                        -> {
+                            preferDetailFocus = true
+                            rememberedDetailKey = focused.tag as? String ?: rememberedDetailKey
+                            val forward = event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                            if (detailList.focusAdjacentRow(detailAdapter, focused, forward)) return true
+                            if (!forward) {
+                                detailList.focusUpTarget?.takeIf(View::isFocusable)?.requestFocus()
+                            }
+                            return true
+                        }
+                        else -> {
+                            preferDetailFocus = true
+                            rememberedDetailKey = focused.tag as? String ?: rememberedDetailKey
+                        }
                     }
                 }
-                focused != null && detailTabs.isAncestorOf(focused) -> preferDetailFocus = true
+                focused != null && detailTabs.isAncestorOf(focused) -> {
+                    preferDetailFocus = true
+                    when (event.keyCode) {
+                        KeyEvent.KEYCODE_DPAD_UP -> return true
+                        KeyEvent.KEYCODE_DPAD_DOWN -> {
+                            focusFirstDetailTarget()
+                            return true
+                        }
+                        KeyEvent.KEYCODE_DPAD_LEFT -> {
+                            if (!focusHorizontalDetailTab(focused, forward = false)) {
+                                focusSelectedCategory(null)
+                            }
+                            return true
+                        }
+                        KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                            focusHorizontalDetailTab(focused, forward = true)
+                            return true
+                        }
+                    }
+                }
+                focused != null && currentDetailContent?.let { content ->
+                    content === focused || (content as? ViewGroup)?.isAncestorOf(focused) == true
+                } == true -> {
+                    preferDetailFocus = true
+                    val tag = focused.tag as? String
+                    if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT && tag == "appearance:mode:SYSTEM") {
+                        focusSelectedCategory(null)
+                        return true
+                    }
+                }
             }
         }
         return super.dispatchKeyEvent(event)
     }
 
+    private fun focusFirstDetailTarget(): Boolean {
+        val customTarget = currentDetailContent?.let(::firstFocusableDescendant)
+        if (customTarget != null) {
+            customTarget.requestFocus()
+            return true
+        }
+        return focusFirstDetailAction()
+    }
+
+    private fun focusHorizontalDetailTab(focused: View, forward: Boolean): Boolean {
+        val index = detailTabs.indexOfChild(focused)
+        if (index < 0) return false
+        val positions = if (forward) {
+            (index + 1) until detailTabs.childCount
+        } else {
+            index - 1 downTo 0
+        }
+        val target = positions
+            .map(detailTabs::getChildAt)
+            .firstOrNull { it.isFocusable && it.isEnabled }
+        return target?.requestFocus() == true
+    }
+
     private fun focusFirstDetailAction(): Boolean {
         val position = detailAdapter.currentList.indexOfFirst(NativeRowModel::focusable)
         if (position < 0) return false
-        detailList.scrollToPosition(position)
-        detailList.post {
-            detailList.findViewHolderForAdapterPosition(position)?.itemView?.requestFocus()
-        }
-        return true
+        return detailList.focusRow(position)
     }
 
     private fun updateDetailTabs(models: List<NativeBrowserTab>) {
         val focusedKey = detailTabs.findFocus()?.tag as? String
-        detailTabs.removeAllViews()
-        models.forEach { tab ->
-            detailTabs.addView(
-                TextView(activity).apply {
-                    tag = tab.key
-                    text = tab.label
-                    textSize = 14f
-                    gravity = Gravity.CENTER
-                    setTextColor(NativeTheme.palette.text)
-                    isFocusable = tab.enabled
-                    isClickable = tab.enabled
-                    isEnabled = tab.enabled
-                    isSelected = tab.selected
-                    alpha = if (tab.enabled) 1f else 0.5f
-                    background = activity.nativeFlatFocusableBackground()
-                    setPadding(activity.dp(11), activity.dp(5), activity.dp(11), activity.dp(5))
-                    setOnClickListener { onActivate(tab.key) }
-                },
-                LayoutParams(LayoutParams.WRAP_CONTENT, activity.dp(36)).apply { marginEnd = activity.dp(3) },
-            )
+        val existingKeys = (0 until detailTabs.childCount).map { detailTabs.getChildAt(it).tag as? String }
+        if (existingKeys != models.map(NativeBrowserTab::key)) {
+            detailTabs.removeAllViews()
+            models.forEach { tab ->
+                detailTabs.addView(
+                    TextView(activity).apply {
+                        id = View.generateViewId()
+                        tag = tab.key
+                        textSize = 14f
+                        gravity = Gravity.CENTER
+                        setTextColor(NativeTheme.palette.text)
+                        background = activity.nativeFlatFocusableBackground()
+                        setPadding(activity.dp(11), activity.dp(5), activity.dp(11), activity.dp(5))
+                        setOnClickListener { onActivate(tab.key) }
+                    },
+                    LayoutParams(LayoutParams.WRAP_CONTENT, activity.dp(36)).apply { marginEnd = activity.dp(3) },
+                )
+            }
+        }
+        models.forEachIndexed { index, tab ->
+            (detailTabs.getChildAt(index) as? TextView)?.apply {
+                text = tab.label
+                isFocusable = tab.enabled
+                isClickable = tab.enabled
+                isEnabled = tab.enabled
+                isSelected = tab.selected
+                alpha = if (tab.enabled) 1f else 0.5f
+            }
         }
         detailTabs.visibility = if (models.isEmpty()) View.GONE else View.VISIBLE
         detailList.focusUpTarget = models.firstOrNull { it.selected }?.key?.let { key ->
@@ -357,16 +453,6 @@ private class NativeSettingsColumn(context: android.content.Context) : RecyclerV
         val proposed = super.focusSearch(focused, direction)
         val vertical = direction == View.FOCUS_UP || direction == View.FOCUS_DOWN
         if (
-            vertical &&
-            focused != null &&
-            focused !== this &&
-            isAncestorOf(focused) &&
-            (proposed == null || !isAncestorOf(proposed)) &&
-            isFocusable
-        ) {
-            return this
-        }
-        if (
             direction == View.FOCUS_UP &&
             focused != null && isAncestorOf(focused) &&
             (proposed == null || !isAncestorOf(proposed)) &&
@@ -376,7 +462,7 @@ private class NativeSettingsColumn(context: android.content.Context) : RecyclerV
         }
         return if (
             vertical &&
-            focused != null && isAncestorOf(focused) &&
+            focused != null && focused !== this && isAncestorOf(focused) &&
             (proposed == null || !isAncestorOf(proposed))
         ) {
             focused

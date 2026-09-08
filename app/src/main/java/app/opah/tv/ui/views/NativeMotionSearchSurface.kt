@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.graphics.Typeface
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -48,6 +49,7 @@ internal class NativeMotionSearchSurface(
     private val onRegion: (Int) -> Unit,
     private val onSearch: () -> Unit,
     private val onFocused: (String, View) -> Unit,
+    private val onNavigateOutLeft: () -> Unit,
 ) : LinearLayout(activity) {
     private val subtitle = text(13f, secondary = true)
     private val tabs = LinearLayout(activity).apply { orientation = HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -86,6 +88,7 @@ internal class NativeMotionSearchSurface(
         setPadding(activity.dp(12), activity.dp(18), activity.dp(12), activity.dp(18))
     }
     private val results = RecyclerView(activity).apply {
+        isFocusable = false
         layoutManager = NativeLinearLayoutManager(activity)
         itemAnimator = null
         overScrollMode = View.OVER_SCROLL_NEVER
@@ -145,6 +148,7 @@ internal class NativeMotionSearchSurface(
                                 addView(preview, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
                                 repeat(9) { index ->
                                     val button = TextView(activity).apply {
+                                        id = View.generateViewId()
                                         tag = "activity:motion:region:$index"
                                         isFocusable = true
                                         isClickable = true
@@ -254,55 +258,181 @@ internal class NativeMotionSearchSurface(
         previewJob = null
     }
 
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event)
+        val focused = findFocus() ?: return super.dispatchKeyEvent(event)
+        when {
+            tabs.isAncestorOf(focused) -> when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> return true
+                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    focusSelectedCameraOrRegion()
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_DPAD_RIGHT,
+                -> {
+                    val forward = event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                    if (focusHorizontalSibling(tabs, focused, forward)) return true
+                    if (!forward) {
+                        onNavigateOutLeft()
+                        return true
+                    }
+                    return true
+                }
+            }
+            cameras.isAncestorOf(focused) -> when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> {
+                    focusSelectedTab()
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    focusSelectedRegion()
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_DPAD_RIGHT,
+                -> {
+                    val forward = event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                    if (focusHorizontalSibling(cameras, focused, forward)) return true
+                    if (!forward) {
+                        onNavigateOutLeft()
+                        return true
+                    }
+                    return true
+                }
+            }
+            grid.isAncestorOf(focused) -> {
+                val index = regionButtons.indexOf(focused)
+                if (index >= 0) {
+                    when (event.keyCode) {
+                        KeyEvent.KEYCODE_DPAD_UP -> {
+                            if (index >= 3) regionButtons[index - 3].requestFocus() else focusSelectedCameraOrTab()
+                            return true
+                        }
+                        KeyEvent.KEYCODE_DPAD_DOWN -> {
+                            if (index <= 5) regionButtons[index + 3].requestFocus() else searchButton.requestFocus()
+                            return true
+                        }
+                        KeyEvent.KEYCODE_DPAD_LEFT -> {
+                            if (index % 3 != 0) {
+                                regionButtons[index - 1].requestFocus()
+                            } else {
+                                onNavigateOutLeft()
+                            }
+                            return true
+                        }
+                        KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                            if (index % 3 != 2) regionButtons[index + 1].requestFocus() else focusFirstResult()
+                            return true
+                        }
+                    }
+                }
+            }
+            focused === searchButton -> when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                -> {
+                    focusSelectedRegion()
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_RIGHT,
+                -> {
+                    focusFirstResult()
+                    return true
+                }
+            }
+            results.isAncestorOf(focused) -> when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    focusSelectedRegion()
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> return true
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                -> {
+                    val forward = event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                    if (!results.focusAdjacentRow(
+                        resultAdapter,
+                        focused,
+                        forward = forward,
+                    ) && !forward) {
+                        searchButton.requestFocus()
+                    }
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     private fun updateTabs(models: List<NativeBrowserTab>) {
         val focusedKey = tabs.findFocus()?.tag as? String
-        tabs.removeAllViews()
-        models.forEach { tab ->
-            tabs.addView(
-                TextView(activity).apply {
-                    tag = tab.key
-                    text = tab.label
-                    textSize = 14f
-                    gravity = Gravity.CENTER
-                    setTextColor(NativeTheme.palette.text)
-                    isFocusable = tab.enabled
-                    isClickable = tab.enabled
-                    isEnabled = tab.enabled
-                    isSelected = tab.selected
-                    alpha = if (tab.enabled) 1f else 0.5f
-                    background = activity.nativeFlatFocusableBackground()
-                    setPadding(activity.dp(10), activity.dp(5), activity.dp(10), activity.dp(5))
-                    setOnClickListener { onActivate(tab.key) }
-                    onFocusChangeListener = focusListener(tab.key)
-                },
-                LayoutParams(LayoutParams.WRAP_CONTENT, activity.dp(36)).apply { marginStart = activity.dp(3) },
-            )
+        val existingKeys = (0 until tabs.childCount).map { tabs.getChildAt(it).tag as? String }
+        if (existingKeys != models.map(NativeBrowserTab::key)) {
+            tabs.removeAllViews()
+            models.forEach { tab ->
+                tabs.addView(
+                    TextView(activity).apply {
+                        id = View.generateViewId()
+                        tag = tab.key
+                        textSize = 14f
+                        gravity = Gravity.CENTER
+                        setTextColor(NativeTheme.palette.text)
+                        background = activity.nativeFlatFocusableBackground()
+                        setPadding(activity.dp(10), activity.dp(5), activity.dp(10), activity.dp(5))
+                        setOnClickListener { onActivate(tab.key) }
+                        onFocusChangeListener = focusListener(tab.key)
+                    },
+                    LayoutParams(LayoutParams.WRAP_CONTENT, activity.dp(36)).apply { marginStart = activity.dp(3) },
+                )
+            }
+        }
+        models.forEachIndexed { index, tab ->
+            (tabs.getChildAt(index) as? TextView)?.apply {
+                text = tab.label
+                isFocusable = tab.enabled
+                isClickable = tab.enabled
+                isEnabled = tab.enabled
+                isSelected = tab.selected
+                alpha = if (tab.enabled) 1f else 0.5f
+            }
         }
         if (focusedKey != null) tabs.post { tabs.findViewWithTag<View>(focusedKey)?.requestFocus() }
     }
 
     private fun updateCameras(models: List<NativeMotionCamera>, selected: String?) {
         val focusedKey = cameras.findFocus()?.tag as? String
-        cameras.removeAllViews()
-        models.forEach { camera ->
-            cameras.addView(
-                TextView(activity).apply {
-                    tag = "activity:motion:camera:${camera.name}"
-                    text = camera.label
-                    textSize = 13f
-                    gravity = Gravity.CENTER
-                    setTextColor(NativeTheme.palette.text)
-                    isFocusable = !state.searching
-                    isClickable = !state.searching
-                    isEnabled = !state.searching
-                    isSelected = camera.name == selected
-                    background = activity.nativeFlatFocusableBackground()
-                    setPadding(activity.dp(11), activity.dp(5), activity.dp(11), activity.dp(5))
-                    setOnClickListener { onCamera(camera.name) }
-                    onFocusChangeListener = focusListener(tag as String)
-                },
-                LayoutParams(LayoutParams.WRAP_CONTENT, activity.dp(36)).apply { marginEnd = activity.dp(3) },
-            )
+        val keys = models.map { "activity:motion:camera:${it.name}" }
+        val existingKeys = (0 until cameras.childCount).map { cameras.getChildAt(it).tag as? String }
+        if (existingKeys != keys) {
+            cameras.removeAllViews()
+            models.forEach { camera ->
+                cameras.addView(
+                    TextView(activity).apply {
+                        id = View.generateViewId()
+                        tag = "activity:motion:camera:${camera.name}"
+                        textSize = 13f
+                        gravity = Gravity.CENTER
+                        setTextColor(NativeTheme.palette.text)
+                        background = activity.nativeFlatFocusableBackground()
+                        setPadding(activity.dp(11), activity.dp(5), activity.dp(11), activity.dp(5))
+                        setOnClickListener { onCamera(camera.name) }
+                        onFocusChangeListener = focusListener(tag as String)
+                    },
+                    LayoutParams(LayoutParams.WRAP_CONTENT, activity.dp(36)).apply { marginEnd = activity.dp(3) },
+                )
+            }
+        }
+        models.forEachIndexed { index, camera ->
+            (cameras.getChildAt(index) as? TextView)?.apply {
+                text = camera.label
+                isFocusable = !state.searching
+                isClickable = !state.searching
+                isEnabled = !state.searching
+                isSelected = camera.name == selected
+                alpha = if (isEnabled) 1f else 0.5f
+            }
         }
         if (focusedKey != null) cameras.post { cameras.findViewWithTag<View>(focusedKey)?.requestFocus() }
     }
@@ -323,6 +453,52 @@ internal class NativeMotionSearchSurface(
 
     private fun focusListener(key: String) = OnFocusChangeListener { view, focused ->
         if (focused) onFocused(key, view)
+    }
+
+    private fun focusSelectedTab(): Boolean {
+        val index = state.tabs.indexOfFirst { it.selected && it.enabled }
+            .takeIf { it >= 0 }
+            ?: state.tabs.indexOfFirst(NativeBrowserTab::enabled)
+        return tabs.getChildAt(index)?.requestFocus() == true
+    }
+
+    private fun focusSelectedCameraOrTab(): Boolean = focusSelectedCamera() || focusSelectedTab()
+
+    private fun focusSelectedCameraOrRegion(): Boolean = focusSelectedCamera() || focusSelectedRegion()
+
+    private fun focusSelectedCamera(): Boolean {
+        val index = state.cameras.indexOfFirst { it.name == state.selectedCameraName }
+            .takeIf { it >= 0 }
+            ?: state.cameras.indices.firstOrNull()
+            ?: return false
+        return cameras.getChildAt(index)?.takeIf { it.isFocusable && it.isEnabled }?.requestFocus() == true
+    }
+
+    private fun focusSelectedRegion(): Boolean = regionButtons
+        .getOrNull(state.regionIndex.coerceIn(0, regionButtons.lastIndex))
+        ?.takeIf { it.isFocusable && it.isEnabled }
+        ?.requestFocus() == true
+
+    private fun focusFirstResult(): Boolean {
+        val position = resultAdapter.currentList.indexOfFirst(NativeRowModel::focusable)
+        return position >= 0 && results.focusRow(position)
+    }
+
+    private fun focusHorizontalSibling(group: ViewGroup, focused: View, forward: Boolean): Boolean {
+        val index = group.indexOfChild(focused)
+        if (index < 0) return false
+        val range = if (forward) index + 1 until group.childCount else index - 1 downTo 0
+        val target = range.map(group::getChildAt).firstOrNull { it.isFocusable && it.isEnabled }
+        return target?.requestFocus() == true
+    }
+
+    private fun ViewGroup.isAncestorOf(view: View): Boolean {
+        var parent = view.parent
+        while (parent is View) {
+            if (parent === this) return true
+            parent = parent.parent
+        }
+        return false
     }
 
     private fun text(size: Float, bold: Boolean = false, secondary: Boolean = false) = TextView(activity).apply {

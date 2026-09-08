@@ -1681,6 +1681,7 @@ internal class NativeOpahController(
                 focusMemory[route.focusMemoryKey] = key
                 root.rememberContentFocus(view)
             },
+            onNavigateOutLeft = root::openNavigation,
         )
         activeMotionSearch = surface
         contentHost.removeAllViews()
@@ -1791,6 +1792,7 @@ internal class NativeOpahController(
                 root.rememberContentFocus(view)
             },
             onThumbnailRequested = ::loadThumbnail,
+            onNavigateOutLeft = root::openNavigation,
         )
         activeBrowser = surface
         contentHost.removeAllViews()
@@ -4071,6 +4073,7 @@ internal class NativeOpahController(
             val icon = activity.nativeNavigationIcon(
                 iconRes = destination.iconRes,
                 badgeText = countLabel.takeIf { destination == NativeDestination.ACTIVITY }.orEmpty(),
+                centerDot = destination == NativeDestination.SETTINGS && currentState.appUpdate.updateAvailable,
             )
             if (open) {
                 view.foreground = null
@@ -4093,6 +4096,8 @@ internal class NativeOpahController(
                 destination == NativeDestination.ACTIVITY && activityChecking -> "Activity, checking for new alerts"
                 destination == NativeDestination.ACTIVITY && activityCount > 0 ->
                     "Activity, $activityCount new ${if (activityCount == 1) "alert" else "alerts"}"
+                destination == NativeDestination.SETTINGS && currentState.appUpdate.updateAvailable ->
+                    "Settings, update available"
                 else -> destination.label
             }
         }

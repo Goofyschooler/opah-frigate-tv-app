@@ -8,6 +8,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import androidx.core.view.isVisible
 import app.opah.tv.R
 
 internal class NativeRootLayout @JvmOverloads constructor(
@@ -41,7 +42,7 @@ internal class NativeRootLayout @JvmOverloads constructor(
     }
 
     fun openNavigation() {
-        if (navigationOpen) return
+        if (navigationOpen || navigationRail.visibility != View.VISIBLE) return
         rememberContentFocus(findFocus())
         navigationOpen = true
         navigationRail.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
@@ -97,7 +98,20 @@ internal class NativeRootLayout @JvmOverloads constructor(
                 closeNavigation()
                 return true
             }
+            KeyEvent.KEYCODE_DPAD_UP,
+            KeyEvent.KEYCODE_DPAD_DOWN,
+            -> if (navigationOpen) {
+                val focused = findFocus()
+                if (focused != null && navigationRail.isAncestorOf(focused)) {
+                    focusNavigationSibling(
+                        focused,
+                        forward = event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN,
+                    )
+                    return true
+                }
+            }
             KeyEvent.KEYCODE_DPAD_LEFT -> {
+                if (navigationOpen) return true
                 val focused = findFocus()
                 if (!navigationOpen && focused != null && contentHost.isAncestorOf(focused)) {
                     val next = FocusFinder.getInstance().findNextFocus(contentHost, focused, View.FOCUS_LEFT)
@@ -109,6 +123,21 @@ internal class NativeRootLayout @JvmOverloads constructor(
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    private fun focusNavigationSibling(focused: View, forward: Boolean): Boolean {
+        val parent = focused.parent as? ViewGroup ?: return false
+        val currentIndex = parent.indexOfChild(focused)
+        if (currentIndex < 0) return false
+        val positions = if (forward) {
+            (currentIndex + 1) until parent.childCount
+        } else {
+            currentIndex - 1 downTo 0
+        }
+        val target = positions
+            .map(parent::getChildAt)
+            .firstOrNull { it.isFocusable && it.isEnabled && it.isVisible }
+        return target?.requestFocus() == true
     }
 }
 

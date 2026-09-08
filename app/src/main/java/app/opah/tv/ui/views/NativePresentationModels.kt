@@ -103,6 +103,20 @@ internal data class NativeRowModel(
     }
 }
 
+internal fun adjacentFocusableRowPosition(
+    rows: List<NativeRowModel>,
+    currentPosition: Int,
+    forward: Boolean,
+): Int? {
+    if (currentPosition !in rows.indices) return null
+    val positions = if (forward) {
+        (currentPosition + 1)..rows.lastIndex
+    } else {
+        (currentPosition - 1) downTo 0
+    }
+    return positions.firstOrNull { rows[it].focusable }
+}
+
 internal enum class NativeBackAction {
     CLOSE_NAVIGATION,
     CLOSE_DETAIL,

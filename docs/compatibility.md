@@ -75,6 +75,9 @@ through the list that opened the player. Opah skips missing items and items
 without a recording, and it does not start over after the last item. Pressing
 Back returns to the original item, filters, and list position.
 
+The recorded-video timeline can receive focus. Use left or right on the
+timeline to move by 10 seconds in saved or reviewed activity.
+
 ## Activity search
 
 Search appears only when Frigate reports that the feature is available. Search
