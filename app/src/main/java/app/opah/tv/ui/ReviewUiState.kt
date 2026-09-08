@@ -144,12 +144,8 @@ internal fun ReviewBrowserState.canSaveClip(item: ReviewItem): Boolean =
         item.recordingAvailable != false &&
         item.id !in savedClipItemIds
 
-internal fun ReviewBrowserState.unreviewedShownAlerts(): List<ReviewItem> =
-    if (filters.severity == ReviewSeverity.ALERT) {
-        items.filter { item -> item.severity == ReviewSeverity.ALERT && !item.hasBeenReviewed }
-    } else {
-        emptyList()
-    }
+internal fun ReviewBrowserState.unreviewedShownActivity(): List<ReviewItem> =
+    items.filterNot(ReviewItem::hasBeenReviewed)
 
 internal fun ReviewBrowserState.afterClipSaved(itemId: String): ReviewBrowserState = copy(
     savingClipItemId = null,

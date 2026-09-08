@@ -706,9 +706,11 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 val profile = profileRepository.load()
                 _state.update { it.copy(savedProfile = profile) }
 
-                val canRestore = profile != null && withContext(Dispatchers.IO) {
-                    container.cookieJar.hasUnexpiredSession() || sessionManager.hasSavedCredential()
-                }
+                val canRestore = profile != null && (
+                    profile.usesUnauthenticatedFrigatePort || withContext(Dispatchers.IO) {
+                        container.cookieJar.hasUnexpiredSession() || sessionManager.hasSavedCredential()
+                    }
+                )
                 if (profile != null && canRestore) {
                     loadSavedSession(profile)
                 } else if (profile != null) {
@@ -3748,9 +3750,9 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun markAllShownAlertsReviewed() {
+    fun markAllShownActivityReviewed() {
         val current = _state.value
-        val items = current.review.unreviewedShownAlerts()
+        val items = current.review.unreviewedShownActivity()
         if (items.isEmpty() || current.review.markingAllReviewed) return
         if (BuildConfig.DOCUMENTATION_MODE) {
             publishReviewStatuses(items.map(ReviewItem::id).toSet(), reviewed = true)
@@ -5492,7 +5494,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         viewModelScope.launch {
-            if (!sessionManager.hasSavedCredential()) {
+            if (!profile.usesUnauthenticatedFrigatePort && !sessionManager.hasSavedCredential()) {
                 finishSignedOut(message)
             } else {
                 loadSavedSession(profile, "Reconnecting…")

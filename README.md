@@ -33,7 +33,8 @@ names, addresses, and data shown in the gallery are fictional examples.
 
 - A working Frigate server
 - Android TV or Google TV running Android 7.0 or newer
-- A Frigate username and password
+- A Frigate username and password for the recommended authenticated connection
+  (not needed for a direct port `5000` connection on a trusted private network)
 - Network access from the TV to the Frigate server
 
 Opah supports Frigate 0.17.2. Features that need Frigate 0.18 target the exact
@@ -55,7 +56,7 @@ been changed or may be unsafe.
 
 ## Connect for the first time
 
-Opah asks for:
+For the recommended authenticated connection, Opah asks for:
 
 1. your Frigate server address;
 2. your Frigate username; and
@@ -68,6 +69,12 @@ address as the recommended default.
 
 After a successful sign-in, Opah can securely remember the connection and sign
 in automatically. Choose **Sign out** to remove the saved sign-in information.
+
+If your TV and Frigate server share a trusted private network, Opah can also
+connect directly to Frigate port `5000` without an account. Enter an address
+such as `http://frigate.local:5000` and leave the username and password blank.
+This connection has full Frigate access, so never expose port `5000` to the
+internet. Most people should use Frigate's authenticated address instead.
 
 ## Make Home yours and watch cameras together
 

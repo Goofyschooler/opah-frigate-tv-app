@@ -9,7 +9,8 @@ You need:
 
 - an Android TV or Google TV running Android 7.0 or newer;
 - a working Frigate server that the TV can reach;
-- a Frigate username and password; and
+- a Frigate username and password for the recommended authenticated connection;
+  and
 - a way to send the downloaded APK to the TV, such as a USB drive or a trusted
   file-transfer app.
 
@@ -53,6 +54,13 @@ Select an address or sign-in field to open the on-screen keyboard. Opah asks
 Android to show it immediately and retries if the TV is slow to respond. After
 the first successful sign-in, Opah can remember the connection and sign in
 automatically.
+
+If the TV and Frigate server are on the same trusted private network, you can
+instead enter Frigate's direct port `5000` address, such as
+`http://frigate.local:5000`. Leave the username and password blank. This option
+does not use an account and gives the TV full Frigate access. Never expose port
+`5000` to the internet; use Frigate's authenticated address for ordinary or
+remote connections.
 
 ## Optional TV alerts
 

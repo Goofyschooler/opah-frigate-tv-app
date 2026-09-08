@@ -38,8 +38,9 @@ class FrigateApiClient(
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) : FrigateGateway {
     override suspend fun login(profile: ConnectionProfile, password: String): FrigateUserProfile {
-        require(password.isNotEmpty()) { "Password is required." }
         cookieJar.clear()
+        if (profile.usesUnauthenticatedFrigatePort) return getProfile(profile)
+        require(password.isNotEmpty()) { "Password is required." }
         val payload = buildString {
             append("{\"user\":")
             append(json.encodeToString(profile.username))
@@ -68,6 +69,7 @@ class FrigateApiClient(
     }
 
     override suspend fun refreshSession(profile: ConnectionProfile): FrigateUserProfile {
+        if (profile.usesUnauthenticatedFrigatePort) return getProfile(profile)
         if (!cookieJar.hasUnexpiredSession()) {
             throw AuthenticationExpiredException("The saved Frigate session has expired. Sign in again.")
         }
@@ -76,11 +78,13 @@ class FrigateApiClient(
     }
 
     override suspend fun logout(profile: ConnectionProfile) {
-        runCatching {
-            execute(
-                Request.Builder().url(apiUrl(profile, "logout")).get().build(),
-                acceptedStatusCodes = setOf(303),
-            )
+        if (!profile.usesUnauthenticatedFrigatePort) {
+            runCatching {
+                execute(
+                    Request.Builder().url(apiUrl(profile, "logout")).get().build(),
+                    acceptedStatusCodes = setOf(303),
+                )
+            }
         }
         cookieJar.clear()
     }

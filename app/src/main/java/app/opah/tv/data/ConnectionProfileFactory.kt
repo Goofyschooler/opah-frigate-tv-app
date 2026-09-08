@@ -4,18 +4,28 @@ import app.opah.tv.data.model.ConnectionProfile
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 object ConnectionProfileFactory {
+    fun targetsUnauthenticatedFrigatePort(rawApiBaseUrl: String): Boolean {
+        val input = rawApiBaseUrl.trim()
+        if (input.isBlank()) return false
+        val candidate = if ("://" in input) input else "http://$input"
+        return candidate.toHttpUrlOrNull()?.port == 5000
+    }
+
     fun create(
         rawApiBaseUrl: String,
         username: String,
         rtspHostOverride: String? = null,
         rtspPort: Int = 8554,
     ): Result<ConnectionProfile> = runCatching {
-        require(username.isNotBlank()) { "Username is required." }
         require(rtspPort in 1..65535) { "RTSP port must be between 1 and 65535." }
 
         val withScheme = rawApiBaseUrl.trim().let { input ->
             require(input.isNotBlank()) { "Frigate URL is required." }
-            if ("://" in input) input else "https://$input"
+            when {
+                "://" in input -> input
+                targetsUnauthenticatedFrigatePort(input) -> "http://$input"
+                else -> "https://$input"
+            }
         }
         val parsed = withScheme.toHttpUrlOrNull()
             ?: error("Enter a valid Frigate HTTP or HTTPS URL")
@@ -24,6 +34,10 @@ object ConnectionProfileFactory {
         }
         require(parsed.username.isEmpty() && parsed.password.isEmpty()) {
             "Do not embed credentials in the Frigate URL."
+        }
+        val unauthenticated = parsed.port == 5000
+        require(username.isNotBlank() || unauthenticated) {
+            "Username is required unless you connect directly to Frigate port 5000."
         }
 
         val normalizedPath = parsed.encodedPath
@@ -46,7 +60,7 @@ object ConnectionProfileFactory {
 
         ConnectionProfile(
             apiBaseUrl = normalized,
-            username = username.trim(),
+            username = if (unauthenticated) "anonymous" else username.trim(),
             rtspHostOverride = hostOverride,
             rtspPort = rtspPort,
         )

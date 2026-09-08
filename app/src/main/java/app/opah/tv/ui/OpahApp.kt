@@ -807,7 +807,7 @@ fun OpahApp(
                                         viewModel.playReview(item)
                                     },
                                     onSetReviewed = viewModel::setReviewReviewed,
-                                    onMarkAllReviewed = viewModel::markAllShownAlertsReviewed,
+                                    onMarkAllReviewed = viewModel::markAllShownActivityReviewed,
                                     onSaveClip = viewModel::saveReviewClip,
                                     onSaveAllAngles = viewModel::saveReviewAllAngles,
                                     onFindSimilar = { item ->

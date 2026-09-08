@@ -133,6 +133,12 @@ local live-video address are different.
 Use `https://` for the Frigate server address when possible. Keep the live-video
 service inside a trusted local network rather than exposing it to the internet.
 
+Opah can also connect directly to Frigate port `5000` without a username or
+password. Frigate treats this as anonymous administrator access, so use it only
+when the TV and server share a trusted private network. Do not expose port
+`5000` to the internet. The authenticated Frigate address remains the
+recommended choice for most installations.
+
 ## Report a compatibility problem
 
 Please include:

@@ -2,6 +2,15 @@
 
 This page lists the user-visible changes in each Opah release.
 
+## 0.5.1 - 2026-09-07
+
+- Restored a visible **Mark all reviewed** action on the New Activity page
+  and made it work with whichever activity type and filters are currently
+  shown.
+- Added direct connections to Frigate port `5000` without a username or
+  password for trusted private networks. Opah clearly identifies the
+  full-access connection and never sends or stores account credentials for it.
+
 ## 0.5.0 - 2026-09-05
 
 ### A clearer television interface

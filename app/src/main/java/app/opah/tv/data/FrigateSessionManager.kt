@@ -40,13 +40,19 @@ class FrigateSessionManager(
         val user = gateway.login(profile, password)
         profileStore.save(profile)
         withContext(ioDispatcher) {
-            if (rememberCredential) credentialStore.writePassword(password)
-            else credentialStore.clearPassword()
+            if (rememberCredential && !profile.usesUnauthenticatedFrigatePort) {
+                credentialStore.writePassword(password)
+            } else {
+                credentialStore.clearPassword()
+            }
         }
         return user
     }
 
     suspend fun restore(profile: ConnectionProfile): FrigateUserProfile {
+        if (profile.usesUnauthenticatedFrigatePort) {
+            return gateway.login(profile, "")
+        }
         if (cookieStore.hasUnexpiredSession()) {
             try {
                 return gateway.refreshSession(profile)

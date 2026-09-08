@@ -5,8 +5,10 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
+import android.text.TextWatcher
 import android.text.format.DateUtils
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -33,6 +35,7 @@ import androidx.recyclerview.widget.RecyclerView
 import app.opah.tv.BuildConfig
 import app.opah.tv.PictureInPictureRequest
 import app.opah.tv.R
+import app.opah.tv.data.ConnectionProfileFactory
 import app.opah.tv.data.model.AppearanceMode
 import app.opah.tv.data.model.Camera
 import app.opah.tv.data.model.CustomThemeColors
@@ -83,7 +86,7 @@ import app.opah.tv.ui.themeBrightnessLabel
 import app.opah.tv.ui.themeHueName
 import app.opah.tv.ui.themeIntensityLabel
 import app.opah.tv.ui.tvAlertOverlayDisplayDurationLabel
-import app.opah.tv.ui.unreviewedShownAlerts
+import app.opah.tv.ui.unreviewedShownActivity
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -1097,9 +1100,22 @@ internal class NativeOpahController(
     }
 
     private fun activityTools(state: Phase0UiState): List<NativeBrowserTool> = when (activityPage) {
-        NativeActivityPage.NEW,
-        NativeActivityPage.REVIEWED,
-        -> listOf(
+        NativeActivityPage.NEW -> {
+            val count = state.review.unreviewedShownActivity().size
+            handlers["activity:mark-all"] = { showMarkShownActivityReviewedConfirmation(count) }
+            listOf(
+                NativeBrowserTool("activity:filter", "Filter", state.review.filters.summaryWithoutStatus()),
+                NativeBrowserTool(
+                    "activity:mark-all",
+                    if (state.review.markingAllReviewed) "Saving" else "Mark all reviewed",
+                    if (count > 0) "$count new" else "Caught up",
+                    enabled = count > 0 && !state.review.markingAllReviewed,
+                    primary = true,
+                ),
+                NativeBrowserTool("activity:refresh", "Refresh", enabled = !state.review.loading),
+            )
+        }
+        NativeActivityPage.REVIEWED -> listOf(
             NativeBrowserTool("activity:filter", "Filter", state.review.filters.summaryWithoutStatus()),
             NativeBrowserTool("activity:refresh", "Refresh", enabled = !state.review.loading),
         )
@@ -1113,7 +1129,7 @@ internal class NativeOpahController(
     private fun showActivityFilterActions() {
         val filters = currentState.review.filters
         val selected = filters.severity
-        val unreviewedShownCount = currentState.review.unreviewedShownAlerts().size
+        val unreviewedShownCount = currentState.review.unreviewedShownActivity().size
         showChoiceDialog(
             "Show activity",
             "Choose the activity type, camera, object, area, and time",
@@ -1127,13 +1143,6 @@ internal class NativeOpahController(
                 add(Triple("zone", "Area", filters.zone?.humanize() ?: "All areas"))
                 add(Triple("time", "Time", filters.timeRange.displayName))
                 add(Triple("clear", "Clear detailed filters", "Keep the selected activity type"))
-                if (
-                    selected == app.opah.tv.data.model.ReviewSeverity.ALERT &&
-                    unreviewedShownCount > 0 &&
-                    !currentState.review.markingAllReviewed
-                ) {
-                    add(Triple("mark", "Mark shown alerts reviewed", "$unreviewedShownCount new"))
-                }
                 if (unreviewedShownCount > 0 && !currentState.review.queueActive) {
                     add(Triple("queue", "Review all new activity", "$unreviewedShownCount items"))
                 }
@@ -1160,24 +1169,23 @@ internal class NativeOpahController(
                         reviewStatus = ReviewStatusFilter.ALL,
                     ),
                 )
-                "mark" -> showMarkShownAlertsReviewedConfirmation(unreviewedShownCount)
                 "queue" -> viewModel.startReviewQueue()
                 "more" -> viewModel.loadMoreReview()
             }
         }
     }
 
-    private fun showMarkShownAlertsReviewedConfirmation(count: Int) {
+    private fun showMarkShownActivityReviewedConfirmation(count: Int) {
         if (count <= 0 || currentState.review.markingAllReviewed) return
         showChoiceDialog(
-            title = "Mark $count ${if (count == 1) "alert" else "alerts"} reviewed?",
-            explanation = "This updates the alerts currently shown in Frigate",
+            title = "Mark $count ${if (count == 1) "item" else "items"} reviewed?",
+            explanation = "This updates the new activity currently shown in Frigate",
             choices = listOf(
                 Triple("cancel", "Keep as new", "Nothing changes"),
-                Triple("confirm", "Mark reviewed", "You can change individual alerts later"),
+                Triple("confirm", "Mark reviewed", "You can change individual items later"),
             ),
         ) { choice ->
-            if (choice == "confirm") viewModel.markAllShownAlertsReviewed()
+            if (choice == "confirm") viewModel.markAllShownActivityReviewed()
         }
     }
 
@@ -3096,9 +3104,19 @@ internal class NativeOpahController(
     private fun connectionRows(state: Phase0UiState): List<NativeRowModel> {
         val profile = state.activeProfile ?: state.savedProfile
         return buildList {
-            add(section("connection:heading", "Connection", "Server address, account, and live video route"))
+            add(section("connection:heading", "Connection", "Server address, access, and live video route"))
             add(info("connection:server", "Server", profile?.apiBaseUrl ?: "Not connected"))
-            add(info("connection:user", "User", profile?.username ?: "Not signed in"))
+            add(
+                info(
+                    "connection:user",
+                    "Access",
+                    when {
+                        profile == null -> "Not connected"
+                        profile.usesUnauthenticatedFrigatePort -> "No account • full Frigate access"
+                        else -> profile.username
+                    },
+                ),
+            )
             add(
                 info(
                     "connection:rtsp",
@@ -3402,7 +3420,7 @@ internal class NativeOpahController(
         showList(
             "system:setup",
             "Connect Opah",
-            "Sign in to your Frigate server",
+            "Connect to your Frigate server",
             buildList {
                 state.errorMessage?.let { add(info("setup:error", "Connection needs attention", it)) }
                 profile?.let { add(info("setup:saved", "Saved server", it.apiBaseUrl)) }
@@ -4659,13 +4677,16 @@ internal class NativeOpahController(
         initialRtspPort: String,
     ) {
         val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val initialAccountUsername = initialUsername.takeUnless {
+            ConnectionProfileFactory.targetsUnauthenticatedFrigatePort(initialUrl)
+        }.orEmpty()
         val fields = listOf(
             dialogTextField(
                 "https://frigate.example:8971",
                 initialUrl,
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
             ),
-            dialogTextField("Optional", initialUsername),
+            dialogTextField("Optional", initialAccountUsername),
             dialogTextField(
                 "Optional",
                 "",
@@ -4696,6 +4717,35 @@ internal class NativeOpahController(
             }
             prepareDialogKeyboard(dialog, field)
         }
+        val unauthenticatedPortNotice = TextView(activity).apply {
+            setText(R.string.native_unauthenticated_port_warning)
+            textSize = 12.5f
+            setTextColor(NativeTheme.palette.secondaryText)
+            setPadding(activity.dp(2), activity.dp(3), 0, activity.dp(5))
+            visibility = View.GONE
+        }
+        fun updateCredentialFields() {
+            val unauthenticated = ConnectionProfileFactory.targetsUnauthenticatedFrigatePort(
+                fields[0].text.toString(),
+            )
+            fields[0].imeOptions = if (unauthenticated) {
+                android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            } else {
+                android.view.inputmethod.EditorInfo.IME_ACTION_NEXT
+            }
+            fields[1].isEnabled = !unauthenticated
+            fields[1].isFocusable = !unauthenticated
+            fields[1].alpha = if (unauthenticated) 0.5f else 1f
+            fields[2].isEnabled = !unauthenticated
+            fields[2].isFocusable = !unauthenticated
+            fields[2].alpha = if (unauthenticated) 0.5f else 1f
+            unauthenticatedPortNotice.visibility = if (unauthenticated) View.VISIBLE else View.GONE
+        }
+        fields[0].addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(text: Editable?) = updateCredentialFields()
+        })
         var differentLiveVideoAddress = initialRtspHost.isNotBlank() ||
             initialRtspPort.trim().let { it.isNotEmpty() && it != "8554" }
         val liveVideoFields = LinearLayout(activity).apply {
@@ -4754,11 +4804,13 @@ internal class NativeOpahController(
                     "Use the address you would open to view Frigate in a browser",
                 ),
             )
-            addView(labeledDialogField("Username", fields[1]))
-            addView(labeledDialogField("Password", fields[2]))
+            addView(unauthenticatedPortNotice)
+            addView(labeledDialogField("Username • not used on port 5000", fields[1]))
+            addView(labeledDialogField("Password • not used on port 5000", fields[2]))
             addView(liveVideoChoice)
             addView(liveVideoFields)
         }
+        updateCredentialFields()
         updateLiveVideoAddressChoice()
         val formScroll = ScrollView(activity).apply {
             isFillViewport = false

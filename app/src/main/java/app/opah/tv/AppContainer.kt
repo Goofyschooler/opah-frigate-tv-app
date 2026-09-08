@@ -651,7 +651,7 @@ class AppContainer(context: Context) {
     internal suspend fun restoreTvAlertsAfterProcessRecreation(): Boolean {
         if (!AndroidNotificationChannels.eventChannelsAvailable(appContext)) return false
         val profile = profileRepository.load() ?: return false
-        if (!cookieJar.hasUnexpiredSession()) return false
+        if (!profile.usesUnauthenticatedFrigatePort && !cookieJar.hasUnexpiredSession()) return false
         val profileKey = compatibilityIdentityFactory.derive(
             CompatibilityIdentityDomain.PROFILE,
             profile.compatibilityIdentityComponents(),
@@ -681,7 +681,7 @@ class AppContainer(context: Context) {
         if (runtime.owner.currentState().profileState is app.opah.tv.data.realtime.RealtimeProfileState.Unavailable) {
             realtimeProcessScope.launch {
                 val profile = profileRepository.load() ?: return@launch
-                if (!cookieJar.hasUnexpiredSession()) return@launch
+                if (!profile.usesUnauthenticatedFrigatePort && !cookieJar.hasUnexpiredSession()) return@launch
                 runCatching { apiClient.getVersion(profile) }
                     .onSuccess { version -> runtime.activateAuthenticatedProfile(profile, version) }
             }
@@ -723,7 +723,7 @@ class AppContainer(context: Context) {
         ) {
             realtimeProcessScope.launch {
                 val profile = profileRepository.load() ?: return@launch
-                if (!cookieJar.hasUnexpiredSession()) return@launch
+                if (!profile.usesUnauthenticatedFrigatePort && !cookieJar.hasUnexpiredSession()) return@launch
                 runCatching { apiClient.getVersion(profile) }
                     .onSuccess { version -> runtime.activateAuthenticatedProfile(profile, version) }
             }

@@ -109,7 +109,7 @@ internal fun ReviewScreen(
     } else {
         allActivityFocusRequester
     }
-    val unreviewedShownAlerts = review.unreviewedShownAlerts()
+    val unreviewedShownActivity = review.unreviewedShownActivity()
     val reviewEntryItemId by remember(review.items, reviewListState) {
         derivedStateOf { review.items.getOrNull(reviewListState.firstVisibleItemIndex)?.id }
     }
@@ -241,15 +241,13 @@ internal fun ReviewScreen(
                     },
                 )
                 Spacer(Modifier.weight(1f))
-                if (review.filters.severity == ReviewSeverity.ALERT) {
-                    SecondaryAction(
-                        focusKey = "review:mark-all-reviewed",
-                        label = if (review.markingAllReviewed) "Saving…" else "Mark all reviewed",
-                        onClick = { markAllConfirmationVisible = true },
-                        enabled = unreviewedShownAlerts.isNotEmpty() && !review.markingAllReviewed,
-                        modifier = Modifier.focusProperties { down = reviewEntryFocusRequester },
-                    )
-                }
+                SecondaryAction(
+                    focusKey = "review:mark-all-reviewed",
+                    label = if (review.markingAllReviewed) "Saving…" else "Mark all reviewed",
+                    onClick = { markAllConfirmationVisible = true },
+                    enabled = unreviewedShownActivity.isNotEmpty() && !review.markingAllReviewed,
+                    modifier = Modifier.focusProperties { down = reviewEntryFocusRequester },
+                )
                 Button(
                     onClick = {
                         filtersVisible = true
@@ -369,8 +367,8 @@ internal fun ReviewScreen(
         )
     }
     if (markAllConfirmationVisible) {
-        MarkAllAlertsReviewedDialog(
-            count = unreviewedShownAlerts.size,
+        MarkAllActivityReviewedDialog(
+            count = unreviewedShownActivity.size,
             onDismiss = { markAllConfirmationVisible = false },
             onConfirm = {
                 markAllConfirmationVisible = false
@@ -381,7 +379,7 @@ internal fun ReviewScreen(
 }
 
 @Composable
-private fun MarkAllAlertsReviewedDialog(
+private fun MarkAllActivityReviewedDialog(
     count: Int,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
@@ -390,15 +388,15 @@ private fun MarkAllAlertsReviewedDialog(
         DialogSurface(modifier = Modifier.width(520.dp)) {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text(
-                    "Mark all shown alerts reviewed?",
+                    "Mark all shown activity reviewed?",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
                     if (count == 1) {
-                        "The new alert currently shown will be marked reviewed\nYou can only undo this one alert at a time"
+                        "The new item currently shown will be marked reviewed\nYou can only undo this one item at a time"
                     } else {
-                        "All $count new alerts currently shown will be marked reviewed\nYou can only undo this one alert at a time"
+                        "All $count new items currently shown will be marked reviewed\nYou can only undo them one at a time"
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
