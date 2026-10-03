@@ -3315,6 +3315,25 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             ?.let { cameraImageRepository.cached(it, cameraName) }
     }
 
+    internal fun prepareMonitorHttpLive(cameraName: String): app.opah.tv.playback.AuthenticatedHttpLive? {
+        val current = _state.value
+        val profile = current.activeProfile ?: return null
+        val snapshot = current.snapshot ?: return null
+        if (cameraName !in snapshot.user.allowedCameras) return null
+        val camera = snapshot.cameras.firstOrNull { it.name == cameraName } ?: return null
+        val stream = camera.streams.firstOrNull { it.streamName == cameraName }
+            ?: camera.streams.firstOrNull() ?: return null
+        val grant = issuePrivacyGrant(PrivacySurface.LIVE_PLAYBACK, PrivacyTarget.Camera(cameraName))
+            ?: return null
+        val uri = app.opah.tv.playback.httpLiveUri(profile.apiBaseUrl, stream.streamName) ?: return null
+        return app.opah.tv.playback.AuthenticatedHttpLive(uri) {
+            _state.value.activeProfile == profile && revalidatePrivacyGrant(grant) &&
+                _state.value.snapshot?.cameras?.any { latest ->
+                    latest.name == cameraName && latest.streams.any { it.streamName == stream.streamName }
+                } == true
+        }
+    }
+
     suspend fun refreshCameraImage(cameraName: String, height: Int = 360): Result<CameraImage> {
         if (BuildConfig.DOCUMENTATION_MODE) {
             return documentationImages.camera(cameraName)?.let(Result.Companion::success)

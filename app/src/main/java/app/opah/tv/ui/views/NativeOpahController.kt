@@ -3484,6 +3484,7 @@ internal class NativeOpahController(
         val surface = NativeMonitorSurface(
             activity = activity,
             initialState = monitor,
+            prepareHttpLive = viewModel::prepareMonitorHttpLive,
             cachedBitmap = { cameraName -> viewModel.cachedCameraImage(cameraName)?.bitmap },
             refreshBitmap = { cameraName, height ->
                 viewModel.refreshCameraImage(cameraName, height).getOrNull()?.bitmap
