@@ -197,7 +197,7 @@ class GitHubReleaseApiClient(
     private fun JsonObject.long(key: String): Long? = get(key)?.jsonPrimitive?.longOrNull
 
     companion object {
-        const val OPAH_REPOSITORY_OWNER = "VibeCodingAntagonist"
+        const val OPAH_REPOSITORY_OWNER = "Goofyschooler"
         const val OPAH_REPOSITORY_NAME = "opah-frigate-tv-app"
         const val LATEST_APK_ALIAS = "opah-latest.apk"
         private const val GITHUB_WEB_HOST = "github.com"

@@ -21,11 +21,21 @@ jobs:
       - name: Install build SDK
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
       - name: Build separate diagnostic app
-        run: bash gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
+        env:
+          OPAH_TEST_KEYSTORE_BASE64: ${{ secrets.OPAH_TEST_KEYSTORE_BASE64 }}
+          OPAH_RELEASE_STORE_PASSWORD: ${{ secrets.OPAH_TEST_PASSWORD }}
+          OPAH_RELEASE_KEY_PASSWORD: ${{ secrets.OPAH_TEST_PASSWORD }}
+          OPAH_RELEASE_KEY_ALIAS: opah-test
+        run: |
+          umask 077
+          export OPAH_RELEASE_KEYSTORE_FILE="$RUNNER_TEMP/opah-test.p12"
+          trap 'rm -f "$OPAH_RELEASE_KEYSTORE_FILE"' EXIT
+          printf '%s' "$OPAH_TEST_KEYSTORE_BASE64" | base64 --decode > "$OPAH_RELEASE_KEYSTORE_FILE"
+          bash gradlew --no-daemon -Popah.requireReleaseSigning=true testDebugUnitTest lintDebug assembleDebug
       - name: Fingerprint APK
         run: sha256sum app/build/outputs/apk/debug/*.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: opah-test-diagnostic-2
+          name: opah-test-update-bootstrap
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
