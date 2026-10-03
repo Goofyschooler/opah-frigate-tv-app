@@ -84,7 +84,7 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix = ".darknode.test"
-            versionNameSuffix = "-darknode-diagnostic-1"
+            versionNameSuffix = "-darknode-diagnostic-2"
             resValue("string", "app_name", "Opah Test")
         }
         release {

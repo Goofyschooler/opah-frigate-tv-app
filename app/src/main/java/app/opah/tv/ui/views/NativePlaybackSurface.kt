@@ -132,7 +132,7 @@ internal class NativePlaybackSurface(
     private val status = TextView(activity).apply {
         setTextColor(0xFFD7E1EE.toInt())
         textSize = 13f
-        maxLines = 2
+        maxLines = 8
         text = request.detail ?: if (request.kind == PlaybackKind.LIVE) "Live" else "Recording"
         setShadowLayer(5f, 0f, 2f, Color.BLACK)
     }
@@ -664,7 +664,12 @@ internal class NativePlaybackSurface(
                             is PlaybackResult.UnpersistedLive,
                             -> "Playing with a verified camera setting"
                             is PlaybackResult.Cancelled -> "Compatibility check stopped"
-                            else -> playbackFailureSummary(state.result)
+                            else -> playbackFailureSummary(state.result) +
+                                "\nCleanup: ${snapshot.diagnosticReleaseStage}" +
+                                (snapshot.diagnosticPriorFailure?.let {
+                                    "\nPrior: ${it.category.name} / ${it.phase.name}" +
+                                        "\nCode: ${it.diagnosticCode.name}"
+                                } ?: "\nPrior: not captured")
                         }
                         is PlaybackCompatibilityState.Idle -> "Preparing compatibility check"
                         is PlaybackCompatibilityState.Releasing,
