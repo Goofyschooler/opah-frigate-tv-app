@@ -81,6 +81,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".darknode.test"
+            versionNameSuffix = "-darknode-diagnostic-1"
+            resValue("string", "app_name", "Opah Test")
+        }
         release {
             if (hasCompleteReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")

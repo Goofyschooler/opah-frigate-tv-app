@@ -664,7 +664,7 @@ internal class NativePlaybackSurface(
                             is PlaybackResult.UnpersistedLive,
                             -> "Playing with a verified camera setting"
                             is PlaybackResult.Cancelled -> "Compatibility check stopped"
-                            else -> "No reliable playback choice was found"
+                            else -> playbackFailureSummary(state.result)
                         }
                         is PlaybackCompatibilityState.Idle -> "Preparing compatibility check"
                         is PlaybackCompatibilityState.Releasing,
