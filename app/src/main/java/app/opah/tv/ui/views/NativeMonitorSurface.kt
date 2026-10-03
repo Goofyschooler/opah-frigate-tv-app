@@ -23,6 +23,7 @@ import app.opah.tv.OpahApplication
 import app.opah.tv.R
 import app.opah.tv.data.model.Camera
 import app.opah.tv.monitor.MonitorPhase
+import app.opah.tv.monitor.MonitorCameraPin
 import app.opah.tv.monitor.MonitorPresentationKind
 import app.opah.tv.monitor.MonitorPreset
 import app.opah.tv.playback.compatibility.PlaybackCompatibilityState
@@ -67,6 +68,8 @@ internal class NativeMonitorSurface(
     private val audioButton: TextView
     private val awakeButton: TextView
     private val exitButton: TextView
+    private val gridButton: TextView
+    private val cameraPin = MonitorCameraPin()
     private var state = initialState
     private var visualKey: String? = null
     private var visualJob: Job? = null
@@ -107,11 +110,21 @@ internal class NativeMonitorSurface(
         controls.addView(controlButton("Exit", R.drawable.ic_chevron_left, onBack))
         controls.addView(panelLabel("View"))
         MonitorPreset.entries.forEach { preset ->
-            val button = controlButton(preset.displayLabel()) { onPreset(preset) }
+            val button = controlButton(preset.displayLabel()) {
+                cameraPin.clear()
+                update(state)
+                onPreset(preset)
+            }
             presetButtons[preset] = button
             controls.addView(button)
         }
         controls.addView(divider())
+        gridButton = controlButton("Show grid") {
+            cameraPin.clear()
+            update(state)
+            presetButtons[state.preset]?.requestFocus()
+        }
+        controls.addView(gridButton)
         audioButton = controlButton("", R.drawable.ic_volume_off) { onAudioEnabled(!state.audioEnabled) }
         awakeButton = controlButton("") { onKeepScreenAwake(!state.keepScreenAwake) }
         exitButton = controlButton("") { onExitMinutes(nextExitMinutes(state.exitAfterMinutes)) }
@@ -137,9 +150,15 @@ internal class NativeMonitorSurface(
 
     fun update(updated: MonitorModeUiState) {
         state = updated
+        val visible = updated.cameras.filter { it.name in updated.visibleCameraIds }
+        val pinnedId = cameraPin.reconcile(updated.preset, visible.map { it.name })
+        val pinned = visible.firstOrNull { it.name == pinnedId }
+        gridButton.visibility = if (pinned != null) View.VISIBLE else View.GONE
         keepScreenOn = updated.keepScreenAwake
         title.text = updated.title
-        status.text = monitorStatus(updated)
+        status.text = if (pinned != null) {
+            "Pinned ${pinned.displayName} · Refreshed images every 5s · No audio"
+        } else monitorStatus(updated)
         presetButtons.forEach { (preset, button) -> button.isSelected = preset == updated.preset }
         audioButton.text = if (updated.audioEnabled) "Audio on" else "Audio off"
         audioButton.setCompoundDrawablesRelativeWithIntrinsicBounds(
@@ -150,6 +169,7 @@ internal class NativeMonitorSurface(
         )
         audioButton.compoundDrawablesRelative.forEach { drawable -> drawable?.setTint(Color.WHITE) }
         audioButton.isSelected = updated.audioEnabled
+        audioButton.visibility = if (pinned != null) View.GONE else View.VISIBLE
         awakeButton.text = if (updated.keepScreenAwake) "Stay awake" else "Allow sleep"
         awakeButton.isSelected = updated.keepScreenAwake
         exitButton.text = updated.exitAfterMinutes?.let { "Timer: $it min" } ?: "Timer: Never"
@@ -159,8 +179,8 @@ internal class NativeMonitorSurface(
             ?.let { id -> updated.cameras.firstOrNull { it.name == id } }
         val patrol = updated.arbitration.patrolCameraId
             ?.let { id -> updated.cameras.firstOrNull { it.name == id } }
-        val visible = updated.cameras.filter { it.name in updated.visibleCameraIds }
         val nextVisualKey = when {
+            pinned != null -> "pinned:${pinned.name}"
             promoted != null &&
                 updated.arbitration.promotion.presentation == MonitorPresentationKind.LIVE &&
                 updated.liveCompatibilityRequestId != null ->
@@ -176,6 +196,7 @@ internal class NativeMonitorSurface(
         visualHost.removeAllViews()
         cameraLabels.clear()
         when {
+            pinned != null -> showSnapshot(pinned)
             nextVisualKey.startsWith("live:") -> showLive(requireNotNull(updated.liveCompatibilityRequestId), !updated.audioEnabled)
             promoted != null -> showSnapshot(promoted)
             patrol != null -> showSnapshot(patrol)
@@ -188,6 +209,7 @@ internal class NativeMonitorSurface(
     }
 
     fun close() {
+        cameraPin.clear()
         chromeHideJob?.cancel()
         chromeHideJob = null
         visualJob?.cancel()
@@ -198,6 +220,12 @@ internal class NativeMonitorSurface(
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
             if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+                if (cameraPin.cameraId != null) {
+                    cameraPin.clear()
+                    update(state)
+                    showChrome(requestFocus = true)
+                    return true
+                }
                 onBack()
                 return true
             }
@@ -328,12 +356,22 @@ internal class NativeMonitorSurface(
                 bottomMargin = activity.dp(10)
             },
         )
-        setOnClickListener { onManualCamera(camera.name) }
+        setOnClickListener {
+            if (state.preset == MonitorPreset.FIXED) {
+                cameraPin.select(camera.name, state.cameras
+                    .filter { it.name in state.visibleCameraIds }.map { it.name })
+                update(state)
+                showChrome(requestFocus = false)
+                gridButton.requestFocus()
+            } else {
+                onManualCamera(camera.name)
+            }
+        }
     }
 
     private fun snapshotView(cameraName: String): ImageView = ImageView(activity).apply {
         tag = "monitor:image:$cameraName"
-        scaleType = ImageView.ScaleType.CENTER_CROP
+        scaleType = ImageView.ScaleType.FIT_CENTER
         setBackgroundColor(NativeTheme.palette.panel)
         cachedBitmap(cameraName)?.let(::setImageBitmap)
     }
@@ -347,7 +385,7 @@ internal class NativeMonitorSurface(
             value.arbitration.phase == MonitorPhase.RECOVERING -> "Reconnecting"
             promoted != null -> "Watching ${promoted.displayName}"
             patrol != null -> "Patrolling ${patrol.displayName}"
-            value.preset == MonitorPreset.FIXED -> "Fixed view"
+            value.preset == MonitorPreset.FIXED -> "Fixed view · Select a camera to pin · Images refresh every 5s"
             else -> "Watching for activity"
         }
     }
