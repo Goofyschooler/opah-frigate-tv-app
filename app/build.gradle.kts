@@ -8,10 +8,10 @@ plugins {
 
 val opahVersionCode = providers.gradleProperty("opah.versionCode")
     .map(String::toInt)
-    .orElse(5003)
+    .orElse(5004)
     .get()
 val opahVersionName = providers.gradleProperty("opah.versionName")
-    .orElse("0.5.3-darknode-test")
+    .orElse("0.5.4-darknode-test")
     .get()
 
 val releaseKeystoreFile = providers.environmentVariable("OPAH_RELEASE_KEYSTORE_FILE").orNull
@@ -87,7 +87,7 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
             applicationIdSuffix = ".darknode.test"
-            versionNameSuffix = "-darknode-diagnostic-2"
+            versionNameSuffix = "-darknode-diagnostic-3"
             resValue("string", "app_name", "Opah Test")
         }
         release {
