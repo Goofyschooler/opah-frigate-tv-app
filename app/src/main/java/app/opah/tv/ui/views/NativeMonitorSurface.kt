@@ -24,6 +24,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import app.opah.tv.playback.AuthenticatedHttpLive
 import app.opah.tv.playback.HttpsLivePlayer
+import app.opah.tv.playback.liveFailureStatus
 import app.opah.tv.playback.LivePlayer
 import app.opah.tv.playback.LivePlaybackOptions
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -323,7 +324,7 @@ internal class NativeMonitorSurface(
             override fun onPlayerError(error: PlaybackException) {
                 if (httpPlayer !== player) return
                 failed = true
-                setPinnedStatus(camera, "HTTPS playback failed: ${error.errorCodeName}")
+                setPinnedStatus(camera, "HTTPS playback failed: ${liveFailureStatus(error) ?: error.errorCodeName}")
                 stopHttpLive()
             }
 

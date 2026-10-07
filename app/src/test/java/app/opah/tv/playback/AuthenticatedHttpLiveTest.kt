@@ -25,9 +25,9 @@ class AuthenticatedHttpLiveTest {
 
     @Test
     fun usesConfiguredHttpsOriginAndBasePath() {
-        assertEquals("https://example.test/frigate/api/go2rtc/api/stream.mp4?src=cam1&mp4=",
+        assertEquals("https://example.test/frigate/live/mse/api/ws?src=cam1",
             httpLiveUri("https://example.test/frigate/", "cam1"))
-        assertEquals("https://example.test/api/go2rtc/api/stream.mp4?src=cam1&mp4=",
+        assertEquals("https://example.test/live/mse/api/ws?src=cam1",
             httpLiveUri("https://example.test", "cam1"))
     }
 

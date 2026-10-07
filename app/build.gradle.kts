@@ -8,10 +8,10 @@ plugins {
 
 val opahVersionCode = providers.gradleProperty("opah.versionCode")
     .map(String::toInt)
-    .orElse(5006)
+    .orElse(5007)
     .get()
 val opahVersionName = providers.gradleProperty("opah.versionName")
-    .orElse("0.5.6-darknode-test")
+    .orElse("0.5.7-darknode-test")
     .get()
 
 val releaseKeystoreFile = providers.environmentVariable("OPAH_RELEASE_KEYSTORE_FILE").orNull

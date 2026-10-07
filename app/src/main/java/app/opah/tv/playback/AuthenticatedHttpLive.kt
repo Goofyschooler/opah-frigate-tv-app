@@ -25,8 +25,7 @@ internal fun httpLiveUri(baseUrl: String, streamName: String): String? {
         base.query != null || base.fragment != null
     ) return null
     return base.newBuilder()
-        .addPathSegments("api/go2rtc/api/stream.mp4")
+        .addPathSegments("live/mse/api/ws")
         .addQueryParameter("src", streamName)
-        .addQueryParameter("mp4", "")
         .build().toString()
 }
