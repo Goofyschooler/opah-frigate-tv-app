@@ -32,10 +32,12 @@ internal class MseLiveDataSource(private val client: OkHttpClient) : BaseDataSou
     }
 
     @Volatile private var session: Session? = null
+    @Volatile private var stopped = false
     private var uri: Uri? = null
     private var opened = false
 
     override fun open(dataSpec: DataSpec): Long {
+        if (stopped) throw IOException("Live stream closed")
         if (dataSpec.position != 0L) throw IOException("Live stream cannot seek")
         val url = dataSpec.uri.toString().toHttpUrl()
         if (url.scheme != "https" || url.username.isNotEmpty() || url.password.isNotEmpty()) {
@@ -44,10 +46,14 @@ internal class MseLiveDataSource(private val client: OkHttpClient) : BaseDataSou
         transferInitializing(dataSpec)
         val active = Session()
         session = active
+        if (stopped) {
+            active.cancel()
+            throw IOException("Live stream closed")
+        }
         uri = dataSpec.uri
         val socket = client.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (active.cancelled) {
+                if (active.cancelled || stopped) {
                     webSocket.cancel()
                     return
                 }
@@ -88,7 +94,7 @@ internal class MseLiveDataSource(private val client: OkHttpClient) : BaseDataSou
             }
         })
         active.socket = socket
-        if (active.cancelled) socket.cancel()
+        if (active.cancelled || stopped) active.cancel()
         opened = true
         transferStarted(dataSpec)
         return C.LENGTH_UNSET.toLong()
@@ -103,7 +109,10 @@ internal class MseLiveDataSource(private val client: OkHttpClient) : BaseDataSou
     override fun getUri(): Uri? = uri
 
     /** Called before player.release so a waiting reader cannot delay UI teardown. */
-    fun cancel() { session?.cancel() }
+    fun cancel() {
+        stopped = true
+        session?.cancel()
+    }
 
     override fun close() {
         cancel()

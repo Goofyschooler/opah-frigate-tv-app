@@ -9,6 +9,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import java.util.concurrent.CopyOnWriteArrayList
+import java.io.IOException
 import okhttp3.OkHttpClient
 import okhttp3.HttpUrl.Companion.toHttpUrl
 
@@ -16,6 +17,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 @UnstableApi
 internal class HttpsLivePlayer(context: Context, authenticatedClient: OkHttpClient) : LivePlayer {
     private val sources = CopyOnWriteArrayList<MseLiveDataSource>()
+    private var released = false
     private val client = httpLiveClient(authenticatedClient)
     override val player = ExoPlayer.Builder(context.applicationContext,
         DefaultRenderersFactory(context.applicationContext)
@@ -23,7 +25,10 @@ internal class HttpsLivePlayer(context: Context, authenticatedClient: OkHttpClie
             .forceDisableMediaCodecAsynchronousQueueing(),
     ).setMediaSourceFactory(DefaultMediaSourceFactory(context.applicationContext)
         .setDataSourceFactory(DataSource.Factory {
-            MseLiveDataSource(client).also { sources.add(it) }
+            synchronized(sources) {
+                if (released) throw IOException("Live player released")
+                MseLiveDataSource(client).also { sources.add(it) }
+            }
         })
         .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(0)),
     ).build()
@@ -37,7 +42,10 @@ internal class HttpsLivePlayer(context: Context, authenticatedClient: OkHttpClie
     }
 
     override fun release() {
-        sources.forEach { it.cancel() }
+        synchronized(sources) {
+            released = true
+            sources.forEach { it.cancel() }
+        }
         player.release()
         sources.clear()
     }
