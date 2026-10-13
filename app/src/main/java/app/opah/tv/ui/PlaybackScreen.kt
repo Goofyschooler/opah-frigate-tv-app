@@ -110,7 +110,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-private data class PlaybackTelemetry(
+internal data class PlaybackTelemetry(
     val state: String = "Preparing",
     val isPlaying: Boolean = false,
     val playWhenReady: Boolean = true,
@@ -843,9 +843,7 @@ fun PlaybackScreen(
     }
 
     BackHandler {
-        if (request.compatibilityTest) {
-            onBack()
-        } else when (playbackBackAction(controlsVisible, diagnosticsVisible, pictureInPictureActive)) {
+        when (playbackBackAction(controlsVisible, diagnosticsVisible, pictureInPictureActive)) {
             PlaybackBackAction.HIDE_OVERLAY -> {
                 diagnosticsVisible = false
                 controlsVisible = false
@@ -1215,13 +1213,12 @@ private fun DocumentationPlaybackScreen(
     onNextActivity: (() -> Unit)?,
 ) {
     val context = LocalContext.current
-    val resourceName = when (request.uri.removePrefix(DOCUMENTATION_URI_PREFIX).substringBefore('?')) {
-        "garden" -> "docs_camera_garden"
-        "driveway" -> "docs_camera_driveway"
-        "birdseye" -> "docs_camera_birdseye"
-        else -> "docs_camera_entry"
+    val cameraName = request.uri.removePrefix(DOCUMENTATION_URI_PREFIX).substringBefore('?')
+    val imageResource = remember(cameraName) { DocumentationSupport.cameraDrawable(cameraName) }
+    val recorded = request.kind == PlaybackKind.RECORDED
+    val initialTelemetry = remember(cameraName, recorded) {
+        DocumentationSupport.data.playbackTelemetry(cameraName, recorded, videoOnly = false)
     }
-    val imageResource = remember(resourceName) { DocumentationResources.drawable(resourceName) }
     val player = remember { ExoPlayer.Builder(context).build().apply { playWhenReady = true } }
     DisposableEffect(player) { onDispose(player::release) }
     var controlsVisible by rememberSaveable(request.uri) { mutableStateOf(true) }
@@ -1232,28 +1229,16 @@ private fun DocumentationPlaybackScreen(
     val playButtonFocusRequester = remember(request.uri) { FocusRequester() }
     var muted by rememberSaveable(request.uri) { mutableStateOf(startMuted) }
     var documentationPlaying by rememberSaveable(request.uri) { mutableStateOf(true) }
-    var documentationPositionMs by rememberSaveable(request.uri) { mutableLongStateOf(24_000L) }
+    var documentationPositionMs by rememberSaveable(request.uri) { mutableLongStateOf(initialTelemetry.positionMs) }
     var videoOnly by rememberSaveable(request.uri) { mutableStateOf(false) }
     var forceTcp by rememberSaveable(request.uri) { mutableStateOf(request.kind == PlaybackKind.LIVE) }
     var diagnosticsVisible by rememberSaveable(request.uri) { mutableStateOf(false) }
     var pipRequested by remember(request.uri) { mutableStateOf(false) }
     var pipError by remember(request.uri) { mutableStateOf<String?>(null) }
-    val recorded = request.kind == PlaybackKind.RECORDED
-    val telemetry = PlaybackTelemetry(
-        state = "Ready",
+    val telemetry = DocumentationSupport.data.playbackTelemetry(cameraName, recorded, videoOnly).copy(
         isPlaying = documentationPlaying,
         playWhenReady = documentationPlaying,
-        videoDecoder = "Reference hardware decoder",
-        audioDecoder = if (videoOnly) null else "Reference AAC decoder",
-        videoFormat = if (resourceName == "docs_camera_driveway") "H.265 / HEVC • 3840×2160" else "H.264 / AVC • 2560×1440",
-        audioFormat = if (videoOnly) null else "AAC • stereo",
-        videoWidth = 1920,
-        videoHeight = 1080,
-        firstFrameMs = 118L,
         positionMs = if (recorded) documentationPositionMs else 0L,
-        bufferedPositionMs = if (recorded) 56_000L else 0L,
-        durationMs = if (recorded) 78_000L else 0L,
-        seekable = recorded,
     )
 
     LaunchedEffect(recorded, documentationPositionMs, documentationPlaying, onReturnToLive) {
@@ -1284,9 +1269,7 @@ private fun DocumentationPlaybackScreen(
     }
 
     BackHandler {
-        if (request.compatibilityTest) {
-            onBack()
-        } else when (playbackBackAction(controlsVisible, diagnosticsVisible, pictureInPictureActive)) {
+        when (playbackBackAction(controlsVisible, diagnosticsVisible, pictureInPictureActive)) {
             PlaybackBackAction.HIDE_OVERLAY -> {
                 diagnosticsVisible = false
                 controlsVisible = false

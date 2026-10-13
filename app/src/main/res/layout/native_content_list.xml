@@ -2,13 +2,16 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical">
+    android:orientation="vertical"
+    android:clipChildren="false"
+    android:clipToPadding="false">
 
     <TextView
         android:id="@+id/native_page_title"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:textColor="@color/native_opah_text"
+        android:includeFontPadding="false"
         android:textSize="26sp"
         android:textStyle="bold" />
 
@@ -16,11 +19,11 @@
         android:id="@+id/native_page_subtitle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
+        android:layout_marginTop="4dp"
         android:layout_marginBottom="8dp"
         android:maxLines="2"
         android:textColor="@color/native_opah_text_secondary"
-        android:textSize="13sp" />
+        android:textSize="14sp" />
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/native_page_list"
@@ -30,6 +33,8 @@
         android:clipToPadding="false"
         android:descendantFocusability="afterDescendants"
         android:overScrollMode="never"
-        android:paddingBottom="32dp"
+        android:paddingStart="3dp"
+        android:paddingEnd="3dp"
+        android:paddingBottom="8dp"
         android:scrollbars="vertical" />
 </LinearLayout>

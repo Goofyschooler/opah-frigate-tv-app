@@ -19,6 +19,9 @@ internal class NativeRootLayout @JvmOverloads constructor(
     private lateinit var contentHost: FrameLayout
     private var selectedNavigationView: View? = null
     private var lastContentFocus: View? = null
+    private var consumedRootKey: Int? = null
+    private var consumedRootDownTime = 0L
+    private var contentFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
 
     var navigationOpen: Boolean = false
         private set
@@ -26,11 +29,13 @@ internal class NativeRootLayout @JvmOverloads constructor(
     var onBackFromContent: (() -> Unit)? = null
     var onNavigationOpened: (() -> Unit)? = null
     var onNavigationStateChanged: ((Boolean) -> Unit)? = null
+    var onRestoreContentFocus: (() -> Boolean)? = null
 
     override fun onFinishInflate() {
         super.onFinishInflate()
         navigationRail = findViewById(R.id.native_nav_rail)
         contentHost = findViewById(R.id.native_content_host)
+        navigationRail.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
     }
 
     fun setSelectedNavigationView(view: View?) {
@@ -45,8 +50,11 @@ internal class NativeRootLayout @JvmOverloads constructor(
         if (navigationOpen || navigationRail.visibility != View.VISIBLE) return
         rememberContentFocus(findFocus())
         navigationOpen = true
+        contentFocusability = contentHost.descendantFocusability
+        contentHost.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         navigationRail.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
-        navigationRail.layoutParams = navigationRail.layoutParams.apply { width = context.dp(152) }
+        navigationRail.layoutParams = navigationRail.layoutParams.apply { width = context.dp(172) }
+        animateRailEntrance()
         onNavigationStateChanged?.invoke(true)
         onNavigationOpened?.invoke()
         selectedNavigationView?.requestFocus()
@@ -55,14 +63,17 @@ internal class NativeRootLayout @JvmOverloads constructor(
     fun closeNavigation(restoreContentFocus: Boolean = true) {
         if (!navigationOpen) return
         navigationOpen = false
+        contentHost.descendantFocusability = contentFocusability
+        navigationRail.animate().cancel()
+        navigationRail.translationX = 0f
         navigationRail.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         navigationRail.layoutParams = navigationRail.layoutParams.apply { width = context.dp(56) }
         onNavigationStateChanged?.invoke(false)
         if (restoreContentFocus) {
             val remembered = lastContentFocus
-            if (remembered?.isAttachedToWindow == true && remembered.isFocusable) {
-                remembered.requestFocus()
-            } else {
+            val restored = remembered?.takeIf { it.isAttachedToWindow && it.isShown && it.isEnabled && it.isFocusable }
+                ?.requestFocus() == true
+            if (!restored && onRestoreContentFocus?.invoke() != true) {
                 contentHost.focusSearch(View.FOCUS_DOWN)?.requestFocus()
             }
         }
@@ -80,13 +91,31 @@ internal class NativeRootLayout @JvmOverloads constructor(
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == consumedRootKey) {
+            val newPress = event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
+                event.downTime != consumedRootDownTime
+            if (newPress) {
+                // Android may finish Back through its system callback without
+                // delivering key-up here. A later physical press must still work.
+                consumedRootKey = null
+            } else {
+                if (event.action == KeyEvent.ACTION_UP && event.downTime == consumedRootDownTime) {
+                    consumedRootKey = null
+                }
+                return true
+            }
+        }
         if (event.action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event)
         when (event.keyCode) {
             KeyEvent.KEYCODE_MENU -> {
+                if (event.repeatCount > 0) return true
+                consumeRootPress(event)
                 if (navigationOpen) closeNavigation() else openNavigation()
                 return true
             }
             KeyEvent.KEYCODE_BACK -> {
+                if (event.repeatCount > 0) return true
+                consumeRootPress(event)
                 if (navigationOpen) {
                     closeNavigation()
                 } else if (!super.dispatchKeyEvent(event)) {
@@ -95,6 +124,7 @@ internal class NativeRootLayout @JvmOverloads constructor(
                 return true
             }
             KeyEvent.KEYCODE_DPAD_RIGHT -> if (navigationOpen) {
+                consumeRootPress(event)
                 closeNavigation()
                 return true
             }
@@ -112,17 +142,41 @@ internal class NativeRootLayout @JvmOverloads constructor(
             }
             KeyEvent.KEYCODE_DPAD_LEFT -> {
                 if (navigationOpen) return true
+                // Sliders, timelines, editors and grid children get first refusal.
+                if (super.dispatchKeyEvent(event)) return true
                 val focused = findFocus()
                 if (!navigationOpen && focused != null && contentHost.isAncestorOf(focused)) {
                     val next = FocusFinder.getInstance().findNextFocus(contentHost, focused, View.FOCUS_LEFT)
-                    if (next == null || next === focused) {
+                    if ((next == null || next === focused) && event.repeatCount == 0) {
+                        consumeRootPress(event)
                         openNavigation()
                         return true
                     }
                 }
+                return false
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    private fun consumeRootPress(event: KeyEvent) {
+        consumedRootKey = event.keyCode
+        consumedRootDownTime = event.downTime
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (!hasWindowFocus) consumedRootKey = null
+    }
+
+    private fun animateRailEntrance() {
+        navigationRail.animate().cancel()
+        if (NativeTheme.reducedMotion) {
+            navigationRail.translationX = 0f
+            return
+        }
+        navigationRail.translationX = -context.dp(6).toFloat()
+        navigationRail.animate().translationX(0f).setDuration(180L).start()
     }
 
     private fun focusNavigationSibling(focused: View, forward: Boolean): Boolean {

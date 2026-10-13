@@ -44,7 +44,9 @@ results. Never upload raw device captures or a real server configuration.
 
 ## Style and architecture
 
-- Kotlin and Compose follow the existing formatting and architecture.
+- Kotlin code follows the existing formatting and architecture. The main TV
+  interface uses native Android Views; an alternate Compose interface remains
+  in the source.
 - Networking stays behind the project's existing data-access boundaries.
 - Playback uses the `LivePlayer` abstraction so policy can be tested without a
   physical decoder.

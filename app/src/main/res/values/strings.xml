@@ -40,4 +40,10 @@
         <item quantity="one">Choose two to four cameras • %1$d selected</item>
         <item quantity="other">Choose two to four cameras • %1$d selected</item>
     </plurals>
+    <string name="native_state_on">On</string>
+    <string name="native_state_off">Off</string>
+    <string name="native_reduce_motion_state">Reduce motion   %1$s</string>
+    <string name="native_high_contrast_state">High contrast   %1$s</string>
+    <string name="native_extra_rounding_state">Extra rounding   %1$s</string>
+    <string name="native_reduce_transparency_state">Reduce transparency   %1$s</string>
 </resources>

@@ -8,10 +8,10 @@ plugins {
 
 val opahVersionCode = providers.gradleProperty("opah.versionCode")
     .map(String::toInt)
-    .orElse(5002)
+    .orElse(6002)
     .get()
 val opahVersionName = providers.gradleProperty("opah.versionName")
-    .orElse("0.5.2-dev")
+    .orElse("0.6.0")
     .get()
 
 val releaseKeystoreFile = providers.environmentVariable("OPAH_RELEASE_KEYSTORE_FILE").orNull
@@ -81,6 +81,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".dev"
+        }
         release {
             if (hasCompleteReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
@@ -92,13 +95,22 @@ android {
                 "proguard-rules.pro",
             )
         }
-        create("documentation") {
-            initWith(getByName("release"))
-            applicationIdSuffix = ".docs"
-            versionNameSuffix = "-documentation"
-            signingConfig = signingConfigs.getByName("debug")
-            matchingFallbacks += "release"
-            buildConfigField("boolean", "DOCUMENTATION_MODE", "true")
+        if (file("src/documentation").isDirectory && file("src/documentationFixtures").isDirectory) {
+            create("documentation") {
+                initWith(getByName("release"))
+                applicationIdSuffix = ".docs"
+                versionNameSuffix = "-documentation"
+                signingConfig = signingConfigs.getByName("debug")
+                matchingFallbacks += "release"
+                buildConfigField("boolean", "DOCUMENTATION_MODE", "true")
+            }
+        }
+    }
+
+    sourceSets {
+        if (file("src/documentationFixtures").isDirectory) {
+            getByName("test").kotlin.directories.add("src/documentationFixtures/java")
+            findByName("documentation")?.kotlin?.directories?.add("src/documentationFixtures/java")
         }
     }
 

@@ -4,7 +4,7 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:paddingStart="12dp"
+    android:paddingStart="10dp"
     android:paddingTop="7dp"
     android:paddingEnd="10dp"
     android:paddingBottom="8dp">
@@ -14,17 +14,17 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:textColor="@color/native_opah_text"
-        android:textSize="16sp"
+        android:textSize="17sp"
         android:textStyle="bold" />
 
     <TextView
         android:id="@+id/native_information_description"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
+        android:layout_marginTop="3dp"
         android:lineSpacingExtra="2dp"
         android:textColor="@color/native_opah_text_secondary"
-        android:textSize="13sp" />
+        android:textSize="14sp" />
 
     <TextView
         android:id="@+id/native_information_value"
@@ -33,5 +33,5 @@
         android:layout_marginTop="3dp"
         android:lineSpacingExtra="2dp"
         android:textColor="@color/native_opah_text_secondary"
-        android:textSize="13sp" />
+        android:textSize="14sp" />
 </LinearLayout>

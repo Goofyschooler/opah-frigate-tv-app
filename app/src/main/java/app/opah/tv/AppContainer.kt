@@ -234,6 +234,7 @@ class AppContainer(context: Context) {
         AndroidAlertNotificationPlatform(
             context = appContext,
             client = httpClient,
+            appearanceSettings = settingsRepository.settings,
             profile = { requestedProfileKey ->
                 profileRepository.load()?.takeIf { profile ->
                     compatibilityIdentityFactory.derive(

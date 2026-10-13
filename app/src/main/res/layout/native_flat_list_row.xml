@@ -8,11 +8,20 @@
     android:focusable="true"
     android:gravity="center_vertical"
     android:minHeight="48dp"
+    android:layout_marginBottom="2dp"
     android:orientation="horizontal"
-    android:paddingStart="12dp"
-    android:paddingTop="6dp"
+    android:paddingStart="10dp"
+    android:paddingTop="7dp"
     android:paddingEnd="10dp"
-    android:paddingBottom="6dp">
+    android:paddingBottom="7dp">
+
+    <View
+        android:id="@+id/native_row_selection"
+        android:layout_width="3dp"
+        android:layout_height="24dp"
+        android:layout_marginEnd="7dp"
+        android:importantForAccessibility="no"
+        android:visibility="gone" />
 
     <ImageView
         android:id="@+id/native_row_thumbnail"
@@ -35,20 +44,22 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:ellipsize="end"
-            android:maxLines="1"
+            android:maxLines="2"
+            android:includeFontPadding="false"
             android:textColor="@color/native_opah_text"
-            android:textSize="16sp"
+            android:textSize="17sp"
             android:textStyle="bold" />
 
         <TextView
             android:id="@+id/native_row_description"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="1dp"
+            android:layout_marginTop="3dp"
+            android:includeFontPadding="false"
             android:ellipsize="end"
             android:maxLines="2"
             android:textColor="@color/native_opah_text_secondary"
-            android:textSize="12sp" />
+            android:textSize="13sp" />
     </LinearLayout>
 
     <TextView
@@ -56,9 +67,12 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginStart="12dp"
-        android:maxLines="1"
+        android:maxLines="2"
+        android:maxWidth="142dp"
+        android:ellipsize="end"
+        android:gravity="end"
         android:textColor="@color/native_opah_text_secondary"
-        android:textSize="13sp" />
+        android:textSize="14sp" />
 
     <TextView
         android:id="@+id/native_row_affordance"
@@ -68,6 +82,6 @@
         android:gravity="center"
         android:maxLines="1"
         android:textColor="@color/native_opah_focus"
-        android:textSize="12sp"
+        android:textSize="14sp"
         android:textStyle="bold" />
 </LinearLayout>

@@ -427,6 +427,7 @@ data class AppSettings(
     val stretchedCameraNames: Set<String> = emptySet(),
     val savedCameraViews: List<SavedCameraView> = emptyList(),
     val reducedMotion: Boolean = false,
+    val reducedTransparency: Boolean = false,
     val highContrast: Boolean = false,
     val subtleRoundedCorners: Boolean = false,
     val favoriteCameraNames: List<String> = emptyList(),

@@ -3,6 +3,7 @@ package app.opah.tv.ui.views
 import android.annotation.SuppressLint
 import android.graphics.Color
 import android.graphics.Typeface
+import android.os.Parcelable
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -13,7 +14,9 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.core.view.isNotEmpty
 import androidx.core.view.isVisible
+import androidx.core.view.doOnPreDraw
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.LinearLayoutManager
 import app.opah.tv.R
 
 internal data class NativeSettingsUiState(
@@ -27,6 +30,15 @@ internal data class NativeSettingsUiState(
     val detailContent: View? = null,
 )
 
+/** View-only bookmarks. No settings values, private content, or action drafts are retained. */
+internal data class NativeSettingsPosition(
+    val categoryKey: String?,
+    val focusedKey: String?,
+    val focusInDetails: Boolean,
+    val categoryScroll: Parcelable?,
+    val detailScroll: Parcelable?,
+)
+
 @SuppressLint("ViewConstructor", "SetTextI18n")
 internal class NativeSettingsSurface(
     private val activity: ComponentActivity,
@@ -34,45 +46,44 @@ internal class NativeSettingsSurface(
     private val onActivate: (String) -> Unit,
     private val onFocused: (String, View) -> Unit,
     private val onAdjust: (String, Int) -> Unit,
+    initialPosition: NativeSettingsPosition? = null,
 ) : LinearLayout(activity) {
     private val title = TextView(activity).apply {
-        textSize = 26f
+        textSize = 20f
+        includeFontPadding = false
         setTextColor(NativeTheme.palette.text)
         setTypeface(typeface, Typeface.BOLD)
     }
     private val subtitle = TextView(activity).apply {
-        textSize = 13f
+        textSize = 14f
         setTextColor(NativeTheme.palette.secondaryText)
         maxLines = 2
     }
     private val categoryList = NativeSettingsColumn(activity).apply {
         isFocusable = false
-        layoutManager = NativeLinearLayoutManager(activity)
         itemAnimator = null
         overScrollMode = View.OVER_SCROLL_NEVER
-        setPadding(0, 0, activity.dp(8), activity.dp(20))
-        addNativeFlatDividers()
+        setPadding(activity.dp(2), activity.dp(2), activity.dp(2), activity.dp(6))
     }
     private val detailList = NativeSettingsColumn(activity).apply {
+        tag = "settings:reading"
         isFocusable = false
         isFocusableInTouchMode = true
-        layoutManager = NativeLinearLayoutManager(activity)
         itemAnimator = null
         overScrollMode = View.OVER_SCROLL_NEVER
-        setPadding(activity.dp(10), 0, activity.dp(2), activity.dp(28))
-        addNativeFlatDividers()
+        setPadding(activity.dp(2), activity.dp(2), activity.dp(2), activity.dp(6))
     }
     private val detailScrollGuide = TextView(activity).apply {
         textSize = 12f
-        setTextColor(NativeTheme.palette.focus)
-        visibility = View.INVISIBLE
-        setPadding(activity.dp(12), activity.dp(2), 0, activity.dp(4))
+        setTextColor(NativeTheme.palette.secondaryText)
+        visibility = View.GONE
+        setPadding(activity.dp(12), 0, 0, activity.dp(4))
     }
     private val detailTabs = LinearLayout(activity).apply {
         orientation = HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         visibility = View.GONE
-        setPadding(activity.dp(10), 0, activity.dp(2), activity.dp(6))
+        setPadding(activity.dp(4), activity.dp(2), activity.dp(4), activity.dp(8))
     }
     private val standardDetailColumn = LinearLayout(activity).apply {
         orientation = VERTICAL
@@ -82,19 +93,27 @@ internal class NativeSettingsSurface(
         addView(detailScrollGuide, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         addView(detailList, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
     }
+    // Scrolling content must stay below the fixed title and subtitle.
     private val detailHost = FrameLayout(activity)
     private var currentDetailContent: View? = null
     private var preferDetailFocus = false
     private var rememberedDetailKey: String? = null
     private var detailHasActions = false
     private var selectedCategoryKey: String? = initialState.selectedCategoryKey
+    private var enterCategoryKey: String? = null
     private val categoryAdapter = NativeListAdapter(
         onActivate = onActivate,
-        onFocused = onFocused,
+        compact = true,
+        onFocused = { key, view ->
+            preferDetailFocus = false
+            if (enterCategoryKey != key) enterCategoryKey = null
+            onFocused(key, view)
+        },
     )
     private val detailAdapter = NativeListAdapter(
         onActivate = onActivate,
         onAdjust = onAdjust,
+        focusInformationRows = true,
         onFocused = { key, view ->
             preferDetailFocus = true
             rememberedDetailKey = key
@@ -102,40 +121,62 @@ internal class NativeSettingsSurface(
         },
     )
     private var firstUpdate = true
+    private var updateGeneration = 0
+    private var locationKey: String? = null
+    private val detailPositions = mutableMapOf<String, NativeSettingsPosition>()
+    private var pendingPosition = initialPosition
+    private var detailUpdatePending = false
+    private var enterDetailsAfterUpdate = false
 
     init {
         orientation = VERTICAL
         setBackgroundColor(Color.TRANSPARENT)
+        clipChildren = false
+        clipToPadding = false
         addView(
-            LinearLayout(activity).apply {
-                orientation = VERTICAL
-                addView(title)
-                addView(subtitle)
+            TextView(activity).apply {
+                tag = "settings:heading"
+                text = "Settings"
+                textSize = 26f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(NativeTheme.palette.text)
+                includeFontPadding = false
             },
-            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = activity.dp(8) },
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = activity.dp(10) },
         )
         categoryList.adapter = categoryAdapter
         detailList.adapter = detailAdapter
         addView(
             LinearLayout(activity).apply {
                 orientation = HORIZONTAL
+                clipChildren = false
                 addView(
                     LinearLayout(activity).apply {
+                        tag = "settings:categories-panel"
                         orientation = VERTICAL
-                        setBackgroundColor(Color.TRANSPARENT)
-                        setPadding(0, activity.dp(2), 0, 0)
+                        background = activity.nativeGlassPanelBackground()
+                        setPadding(activity.dp(4), activity.dp(4), activity.dp(4), activity.dp(4))
                         addView(categoryList, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
                     },
-                    LayoutParams(activity.dp(255), LayoutParams.MATCH_PARENT),
+                    LayoutParams(activity.dp(210), LayoutParams.MATCH_PARENT),
                 )
                 addView(
-                    View(activity).apply { setBackgroundColor(NativeTheme.palette.divider) },
-                    LayoutParams(activity.dp(1), LayoutParams.MATCH_PARENT).apply {
-                        marginStart = activity.dp(7)
-                        marginEnd = activity.dp(7)
+                    LinearLayout(activity).apply {
+                        tag = "settings:detail-panel"
+                        orientation = VERTICAL
+                        background = activity.nativeGlassPanelBackground(strong = true)
+                        setPadding(activity.dp(12), activity.dp(10), activity.dp(12), activity.dp(8))
+                        addView(title)
+                        addView(subtitle, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                            topMargin = activity.dp(3)
+                            bottomMargin = activity.dp(6)
+                        })
+                        addView(detailHost, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+                    },
+                    LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply {
+                        marginStart = activity.dp(12)
                     },
                 )
-                addView(detailHost, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
             },
             LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f),
         )
@@ -143,11 +184,29 @@ internal class NativeSettingsSurface(
     }
 
     fun update(state: NativeSettingsUiState) {
+        val generation = ++updateGeneration
+        val nextLocation = "${state.selectedCategoryKey}:${state.detailTabs.firstOrNull { it.selected }?.key.orEmpty()}"
+        val changedLocation = locationKey != nextLocation
+        if (changedLocation) locationKey?.let {
+            val position = capturePosition()
+            detailPositions[it] = position.copy(focusedKey = position.focusedKey.takeIf { position.focusInDetails } ?: rememberedDetailKey)
+        }
+        val hadDetailFocus = detailHost.hasFocus()
+        val focusedBefore = findFocus()?.tag as? String
+        val restore = pendingPosition?.takeIf { it.categoryKey == state.selectedCategoryKey }
+            ?: if (changedLocation) detailPositions[nextLocation] else null
+        pendingPosition = null
+        locationKey = nextLocation
+        if (changedLocation) {
+            rememberedDetailKey = restore?.focusedKey?.takeIf { key ->
+                state.detailRows.any { it.key == key && detailAdapter.isFocusableRow(it) } || state.detailContent?.findViewWithTag<View>(key) != null
+            }
+        }
         val focusedDetailKey =
-            detailList.findFocus()?.tag as? String
-                ?: rememberedDetailKey.takeIf { preferDetailFocus }
-                ?: state.preferredDetailFocusKey?.takeIf { key ->
-                    state.detailRows.any { it.key == key && it.focusable }
+            restore?.focusedKey?.takeIf { restore.focusInDetails }
+                ?: (detailList.findFocus()?.tag as? String).takeUnless { changedLocation }
+                ?: state.preferredDetailFocusKey?.takeIf { firstUpdate && it !in state.categories.map(NativeRowModel::key) }?.takeIf { key ->
+                    state.detailRows.any { it.key == key && detailAdapter.isFocusableRow(it) }
                 }
         if (focusedDetailKey != null) {
             preferDetailFocus = true
@@ -155,8 +214,9 @@ internal class NativeSettingsSurface(
         }
         title.text = state.title
         subtitle.text = state.subtitle
+        subtitle.isVisible = state.subtitle.isNotBlank()
         selectedCategoryKey = state.selectedCategoryKey
-        detailHasActions = state.detailRows.any(NativeRowModel::focusable)
+        detailHasActions = state.detailRows.any(detailAdapter::isFocusableRow)
         val readOnlyDetail = state.detailContent == null && !detailHasActions
         detailList.isFocusable = readOnlyDetail
         detailList.background = if (readOnlyDetail) activity.nativeFlatScrollRegionBackground() else null
@@ -165,51 +225,135 @@ internal class NativeSettingsSurface(
         } else {
             null
         }
-        detailScrollGuide.text = if (detailHasActions) {
-            "Use ↑ ↓ to read • press Select for actions"
-        } else {
-            "Use ↑ ↓ to read this page"
-        }
+        detailScrollGuide.text = "↑ ↓  Scroll"
         updateDetailTabs(state.detailTabs)
         updateDetailContent(state.detailContent)
-        categoryAdapter.submitList(state.categories)
+        categoryAdapter.submitList(state.categories) {
+            restore?.categoryScroll?.let { categoryList.layoutManager?.onRestoreInstanceState(it) }
+        }
         if (state.detailContent != null) {
+            detailUpdatePending = false
             detailAdapter.submitList(emptyList())
             if (firstUpdate) {
                 firstUpdate = false
-                val preferredDetail = state.preferredDetailFocusKey?.let { key ->
+                val preferredDetail = (restore?.focusedKey ?: state.preferredDetailFocusKey)?.let { key ->
                     state.detailContent.findViewWithTag<View>(key)
                 }
                 if (preferredDetail != null) {
                     preferredDetail.post { preferredDetail.requestFocus() }
                 } else {
-                    categoryList.post {
-                        val index = state.categories.indexOfFirst { it.key == state.selectedCategoryKey }.coerceAtLeast(0)
-                        categoryList.scrollToPosition(index)
-                        categoryList.post { categoryList.findViewHolderForAdapterPosition(index)?.itemView?.requestFocus() }
-                    }
+                    requestInitialCategoryFocus(state, generation)
                 }
             }
+            enterActivatedCategoryWhenReady(generation)
             return
         }
+        detailUpdatePending = true
         detailAdapter.submitList(state.detailRows) {
-            if (focusedDetailKey != null) {
-                val position = detailAdapter.currentList.indexOfFirst { it.key == focusedDetailKey }
-                if (position >= 0) {
-                    detailList.scrollToPosition(position)
-                    detailList.post {
-                        detailList.findViewHolderForAdapterPosition(position)?.itemView?.requestFocus()
-                    }
-                }
+            if (generation != updateGeneration) return@submitList
+            detailUpdatePending = false
+            restore?.detailScroll?.let { detailList.layoutManager?.onRestoreInstanceState(it) }
+            if (focusedDetailKey != null && (hadDetailFocus || firstUpdate || restore?.focusInDetails == true)) {
+                restoreDetailFocus(focusedDetailKey, generation, explicit = firstUpdate && restore?.focusInDetails == true)
+            } else if (hadDetailFocus && !changedLocation && focusedBefore != null && !detailList.hasFocus()) {
+                // A row can disappear after an authorization or capability update.
+                focusFirstDetailAction()
             } else if (firstUpdate) {
-                firstUpdate = false
-                categoryList.post {
-                    val index = state.categories.indexOfFirst { it.key == state.selectedCategoryKey }.coerceAtLeast(0)
-                    categoryList.scrollToPosition(index)
-                    categoryList.post { categoryList.findViewHolderForAdapterPosition(index)?.itemView?.requestFocus() }
-                }
+                if (restore?.focusInDetails == true && readOnlyDetail) detailList.post { detailList.requestFocus() }
+                else requestInitialCategoryFocus(state, generation)
             }
             firstUpdate = false
+            if (enterDetailsAfterUpdate) {
+                enterDetailsAfterUpdate = false
+                if (categoryList.hasFocus()) {
+                    if (!focusFirstDetailAction()) detailList.requestFocus()
+                }
+            }
+            enterActivatedCategoryWhenReady(generation)
+        }
+    }
+
+    fun capturePosition(): NativeSettingsPosition = NativeSettingsPosition(
+        categoryKey = selectedCategoryKey,
+        focusedKey = findFocus()?.tag as? String ?: rememberedDetailKey.takeIf { preferDetailFocus },
+        focusInDetails = if (hasFocus()) detailHost.hasFocus() else preferDetailFocus,
+        categoryScroll = categoryList.layoutManager?.onSaveInstanceState(),
+        detailScroll = detailList.layoutManager?.onSaveInstanceState(),
+    )
+
+    fun restorePosition(position: NativeSettingsPosition) {
+        if (position.categoryKey != selectedCategoryKey) { pendingPosition = position; return }
+        position.categoryScroll?.let { categoryList.layoutManager?.onRestoreInstanceState(it) }
+        position.detailScroll?.let { detailList.layoutManager?.onRestoreInstanceState(it) }
+        preferDetailFocus = position.focusInDetails
+        if (position.focusInDetails) {
+            val custom = position.focusedKey?.let { currentDetailContent?.findViewWithTag<View>(it) }
+            if (custom?.isFocusable == true) custom.post { custom.requestFocus() }
+            else if (position.focusedKey != null) restoreDetailFocus(position.focusedKey, updateGeneration, explicit = true)
+            else if (!detailHasActions) detailList.post { detailList.requestFocus() }
+        } else {
+            categoryList.doOnPreDraw { focusSelectedCategory(position.focusedKey) }
+            categoryList.invalidate()
+        }
+    }
+
+    fun refreshTheme() {
+        findViewWithTag<TextView>("settings:heading")?.setTextColor(NativeTheme.palette.text)
+        findViewWithTag<View>("settings:categories-panel")?.background = activity.nativeGlassPanelBackground()
+        findViewWithTag<View>("settings:detail-panel")?.background = activity.nativeGlassPanelBackground(strong = true)
+        title.setTextColor(NativeTheme.palette.text)
+        subtitle.setTextColor(NativeTheme.palette.secondaryText)
+        detailScrollGuide.setTextColor(NativeTheme.palette.secondaryText)
+        if (!detailHasActions) detailList.background = activity.nativeFlatScrollRegionBackground()
+        for (index in 0 until detailTabs.childCount) {
+            (detailTabs.getChildAt(index) as? TextView)?.apply {
+                setTextColor(NativeTheme.palette.text)
+                background = activity.nativeFlatFocusableBackground()
+            }
+        }
+        categoryAdapter.refreshTheme()
+        detailAdapter.refreshTheme()
+        (currentDetailContent as? NativeAppearanceSurface)?.refreshTheme()
+    }
+
+    private fun restoreDetailFocus(key: String, generation: Int, explicit: Boolean = false) {
+        // onRestoreInstanceState applies on the next layout. Looking up a holder before
+        // that layout can incorrectly overwrite a saved pixel offset with scrollToPosition.
+        detailList.doOnPreDraw {
+            if (generation != updateGeneration || (!explicit && categoryList.hasFocus())) return@doOnPreDraw
+            val position = detailAdapter.currentList.indexOfFirst { it.key == key && detailAdapter.isFocusableRow(it) }
+            if (position < 0) {
+                if (!focusFirstDetailAction() && !detailHasActions) detailList.requestFocus()
+                return@doOnPreDraw
+            }
+            val visible = detailList.findViewHolderForAdapterPosition(position)?.itemView
+            if (visible != null) {
+                if (!visible.hasFocus()) {
+                    if (visible.bottom > detailList.paddingTop && visible.top < detailList.height - detailList.paddingBottom) {
+                        detailList.focusWithoutScrolling(visible)
+                    } else {
+                        visible.requestFocus()
+                    }
+                }
+            } else {
+                // The saved item is still valid but no longer inside the restored viewport.
+                detailList.scrollToPosition(position)
+                detailList.doOnPreDraw {
+                    if (generation == updateGeneration && (explicit || !categoryList.hasFocus())) {
+                        val target = detailList.findViewHolderForAdapterPosition(position)?.itemView
+                        if (target?.tag == key) target.requestFocus()
+                    }
+                }
+            }
+        }
+        detailList.invalidate()
+    }
+
+    private fun requestInitialCategoryFocus(state: NativeSettingsUiState, generation: Int) {
+        categoryList.post {
+            if (generation != updateGeneration || rootView.findFocus() != null) return@post
+            val index = state.categories.indexOfFirst { it.key == state.selectedCategoryKey }.coerceAtLeast(0)
+            categoryList.focusRow(index)
         }
     }
 
@@ -217,8 +361,7 @@ internal class NativeSettingsSurface(
         preferDetailFocus = false
         val requestedKey = key ?: selectedCategoryKey
         val index = categoryAdapter.currentList.indexOfFirst { it.key == requestedKey }.coerceAtLeast(0)
-        categoryList.scrollToPosition(index)
-        categoryList.post { categoryList.findViewHolderForAdapterPosition(index)?.itemView?.requestFocus() }
+        categoryList.focusRow(index)
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -228,6 +371,16 @@ internal class NativeSettingsSurface(
                 focused != null && categoryList.isAncestorOf(focused) -> {
                     when (event.keyCode) {
                         KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                            val categoryKey = focused.tag as? String ?: return true
+                            if (categoryKey != selectedCategoryKey) {
+                                // Keep focus in this column until the requested pane has arrived.
+                                // Otherwise Right briefly enters controls belonging to the old category.
+                                if (enterCategoryKey != categoryKey) {
+                                    enterCategoryKey = categoryKey
+                                    onActivate(categoryKey)
+                                }
+                                return true
+                            }
                             preferDetailFocus = true
                             if (!focusFirstDetailTarget()) detailList.requestFocus()
                             return true
@@ -286,7 +439,11 @@ internal class NativeSettingsSurface(
                             preferDetailFocus = true
                             rememberedDetailKey = focused.tag as? String ?: rememberedDetailKey
                             val forward = event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN
-                            if (detailList.focusAdjacentRow(detailAdapter, focused, forward)) return true
+                            // A decoder list can be taller than the viewport. Read its remaining
+                            // lines before advancing to the next row or the trailing Refresh action.
+                            val row = detailList.findContainingViewHolder(focused)?.itemView
+                            if (row != null && scrollWithinDetailRow(row, forward)) return true
+                            if (focusAdjacentDetailRow(focused, forward)) return true
                             if (!forward) {
                                 detailList.focusUpTarget?.takeIf(View::isFocusable)?.requestFocus()
                             }
@@ -323,6 +480,7 @@ internal class NativeSettingsSurface(
                 } == true -> {
                     preferDetailFocus = true
                     val tag = focused.tag as? String
+                    rememberedDetailKey = tag ?: rememberedDetailKey
                     if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT && tag == "appearance:mode:SYSTEM") {
                         focusSelectedCategory(null)
                         return true
@@ -334,12 +492,32 @@ internal class NativeSettingsSurface(
     }
 
     private fun focusFirstDetailTarget(): Boolean {
-        val customTarget = currentDetailContent?.let(::firstFocusableDescendant)
+        if (currentDetailContent == null && detailUpdatePending) {
+            enterDetailsAfterUpdate = true
+            return true
+        }
+        val customTarget = rememberedDetailKey?.let { currentDetailContent?.findViewWithTag<View>(it) }
+            ?.takeIf { it.isFocusable && it.isEnabled && it.isVisible }
+            ?: currentDetailContent?.let(::firstFocusableDescendant)
         if (customTarget != null) {
             customTarget.requestFocus()
             return true
         }
         return focusFirstDetailAction()
+    }
+
+    private fun enterActivatedCategoryWhenReady(generation: Int) {
+        val key = enterCategoryKey ?: return
+        if (selectedCategoryKey != key || detailUpdatePending) return
+        detailHost.doOnPreDraw {
+            if (generation != updateGeneration || enterCategoryKey != key) return@doOnPreDraw
+            enterCategoryKey = null
+            if (categoryList.findFocus()?.tag == key) {
+                preferDetailFocus = true
+                if (!focusFirstDetailTarget()) detailList.requestFocus()
+            }
+        }
+        detailHost.invalidate()
     }
 
     private fun focusHorizontalDetailTab(focused: View, forward: Boolean): Boolean {
@@ -357,9 +535,49 @@ internal class NativeSettingsSurface(
     }
 
     private fun focusFirstDetailAction(): Boolean {
-        val position = detailAdapter.currentList.indexOfFirst(NativeRowModel::focusable)
+        val remembered = detailAdapter.currentList.indexOfFirst { it.key == rememberedDetailKey && detailAdapter.isFocusableRow(it) }
+        val position = remembered.takeIf { it >= 0 } ?: detailAdapter.currentList.indexOfFirst(detailAdapter::isFocusableRow)
         if (position < 0) return false
+        if (remembered >= 0) {
+            detailList.findViewHolderForAdapterPosition(position)?.itemView?.let { view ->
+                if (view.bottom > detailList.paddingTop && view.top < detailList.height - detailList.paddingBottom) {
+                    return detailList.focusWithoutScrolling(view)
+                }
+            }
+        }
         return detailList.focusRow(position)
+    }
+
+    private fun scrollWithinDetailRow(row: View, forward: Boolean): Boolean {
+        val viewportHeight = detailList.height - detailList.paddingTop - detailList.paddingBottom
+        val remaining = if (forward) row.bottom - (detailList.height - detailList.paddingBottom)
+            else detailList.paddingTop - row.top
+        if (remaining <= 0 || viewportHeight <= 0) return false
+        val step = minOf(remaining, (viewportHeight * DETAIL_SCROLL_FRACTION).toInt().coerceAtLeast(1))
+        detailList.stopScroll()
+        detailList.scrollBy(0, if (forward) step else -step)
+        return true
+    }
+
+    private fun focusAdjacentDetailRow(focused: View, forward: Boolean): Boolean {
+        if (!detailList.focusAdjacentRow(detailAdapter, focused, forward)) return false
+        if (!forward) {
+            // When returning from an action below a long block, resume at its final lines.
+            val generation = updateGeneration
+            detailList.doOnPreDraw {
+                if (generation != updateGeneration) return@doOnPreDraw
+                val row = detailList.findFocus()?.let(detailList::findContainingViewHolder)?.itemView
+                    ?: return@doOnPreDraw
+                if (row === focused) return@doOnPreDraw
+                val viewportHeight = detailList.height - detailList.paddingTop - detailList.paddingBottom
+                if (row.height > viewportHeight) {
+                    detailList.stopScroll()
+                    detailList.scrollBy(0, row.bottom - (detailList.height - detailList.paddingBottom))
+                }
+            }
+            detailList.invalidate()
+        }
+        return true
     }
 
     private fun updateDetailTabs(models: List<NativeBrowserTab>) {
@@ -413,6 +631,7 @@ internal class NativeSettingsSurface(
     }
 
     private fun firstFocusableDescendant(view: View): View? {
+        if (!view.isVisible) return null
         if (view.isFocusable && view.isEnabled && view.isVisible) return view
         if (view !is ViewGroup) return null
         for (index in 0 until view.childCount) {
@@ -432,7 +651,7 @@ internal class NativeSettingsSurface(
 
     init {
         detailList.onFocusChangeListener = View.OnFocusChangeListener { _, focused ->
-            detailScrollGuide.visibility = if (focused) View.VISIBLE else View.INVISIBLE
+            if (focused) preferDetailFocus = true
         }
     }
 
@@ -448,6 +667,31 @@ internal class NativeSettingsSurface(
  */
 private class NativeSettingsColumn(context: android.content.Context) : RecyclerView(context) {
     var focusUpTarget: View? = null
+    private var preserveScrollOnFocus = false
+
+    init {
+        layoutManager = object : LinearLayoutManager(context) {
+            override fun onRequestChildFocus(
+                parent: RecyclerView,
+                state: RecyclerView.State,
+                child: View,
+                focused: View?,
+            ): Boolean = preserveScrollOnFocus || super.onRequestChildFocus(parent, state, child, focused)
+
+            override fun onFocusSearchFailed(
+                focused: View,
+                focusDirection: Int,
+                recycler: RecyclerView.Recycler,
+                state: RecyclerView.State,
+            ): View? = super.onFocusSearchFailed(focused, focusDirection, recycler, state) ?: focused
+        }
+    }
+
+    fun focusWithoutScrolling(view: View): Boolean {
+        stopScroll()
+        preserveScrollOnFocus = true
+        return try { view.requestFocus() } finally { preserveScrollOnFocus = false }
+    }
 
     override fun focusSearch(focused: View?, direction: Int): View? {
         val proposed = super.focusSearch(focused, direction)

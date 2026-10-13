@@ -4,6 +4,7 @@ import app.opah.tv.data.model.ReviewItem
 import app.opah.tv.data.model.ReviewCounts
 import app.opah.tv.data.model.ReviewSearchQuery
 import app.opah.tv.data.model.ReviewSeverity
+import app.opah.tv.data.model.BatchExportResult
 
 enum class ReviewTimeRange(
     val displayName: String,
@@ -52,6 +53,17 @@ enum class ReviewRecordingState {
 
 internal fun reviewItemFocusKey(itemId: String): String = "review:item:$itemId"
 
+enum class ReviewAction { MARK_REVIEWED, SAVE_CLIP, SAVE_ALL_ANGLES }
+
+data class ReviewActionError(
+    val itemId: String,
+    val action: ReviewAction,
+    val message: String,
+    val reviewed: Boolean = true,
+    val cameraNames: Set<String> = emptySet(),
+    val canRetry: Boolean = true,
+)
+
 data class ReviewBrowserState(
     val filters: ReviewFilters = ReviewFilters(),
     val items: List<ReviewItem> = emptyList(),
@@ -68,6 +80,7 @@ data class ReviewBrowserState(
     val selectedItemId: String? = null,
     val recordingState: ReviewRecordingState = ReviewRecordingState.IDLE,
     val detailErrorMessage: String? = null,
+    val actionError: ReviewActionError? = null,
     val detailLoading: Boolean = false,
     val markingReviewedItemId: String? = null,
     val markingAllReviewed: Boolean = false,
@@ -79,6 +92,7 @@ data class ReviewBrowserState(
     val queueIndex: Int = 0,
     val queueActive: Boolean = false,
     val queueCompleted: Boolean = false,
+    val queueTitle: String = "New activity",
     val playbackItem: ReviewItem? = null,
     val advancingPlayback: Boolean = false,
     val playbackNavigationMessage: String? = null,
@@ -99,11 +113,16 @@ internal fun reviewPlaybackContext(
     review: ReviewBrowserState,
     homeItems: List<ReviewItem>,
     useHomeActivityContext: Boolean,
+    visibleActivityItemIds: List<String>? = null,
 ): ReviewPlaybackContext {
     val queue = !useHomeActivityContext && review.queueActive && itemId in review.queueItemIds
     val itemIds = when {
         useHomeActivityContext -> homeItems.map(ReviewItem::id)
         queue -> review.queueItemIds
+        visibleActivityItemIds != null -> {
+            val availableIds = review.items.mapTo(mutableSetOf(), ReviewItem::id)
+            visibleActivityItemIds.filter(availableIds::contains).distinct()
+        }
         review.items.any { it.id == itemId } -> review.items.map(ReviewItem::id)
         else -> homeItems.map(ReviewItem::id)
     }.takeIf { itemId in it } ?: listOf(itemId)
@@ -140,19 +159,89 @@ internal fun nextActivityControlState(
 }
 
 internal fun ReviewBrowserState.canSaveClip(item: ReviewItem): Boolean =
-    savingClipItemId == null &&
+    !hasPendingWrite() &&
         item.recordingAvailable != false &&
         item.id !in savedClipItemIds
 
-internal fun ReviewBrowserState.unreviewedShownActivity(): List<ReviewItem> =
-    items.filterNot(ReviewItem::hasBeenReviewed)
+internal fun ReviewBrowserState.hasPendingWrite(): Boolean =
+    savingClipItemId != null || markingReviewedItemId != null || markingAllReviewed
 
-internal fun ReviewBrowserState.afterClipSaved(itemId: String): ReviewBrowserState = copy(
+internal data class ReviewBatchSaveOutcome(
+    val savedCameraNames: Set<String>,
+    val retryCameraNames: Set<String>,
+    val unconfirmedCameraNames: Set<String>,
+)
+
+/** A missing/contradictory server result is not permission to create a duplicate export. */
+internal fun reviewBatchSaveOutcome(requested: Set<String>, results: List<BatchExportResult>): ReviewBatchSaveOutcome {
+    val byCamera = results.groupBy(BatchExportResult::camera)
+    val saved = mutableSetOf<String>()
+    val retry = mutableSetOf<String>()
+    val unconfirmed = mutableSetOf<String>()
+    requested.forEach { camera ->
+        val result = byCamera[camera]?.singleOrNull()
+        when {
+            result == null -> unconfirmed += camera
+            result.success && result.exportId != null -> saved += camera
+            !result.success && result.exportId == null -> retry += camera
+            else -> unconfirmed += camera
+        }
+    }
+    return ReviewBatchSaveOutcome(saved, retry, unconfirmed)
+}
+
+internal fun ReviewBrowserState.unreviewedShownActivity(): List<ReviewItem> =
+    visibleReviewItems(reviewed = false).filterNot(ReviewItem::hasBeenReviewed)
+
+internal fun ReviewBrowserState.afterClipSaved(itemId: String, action: ReviewAction = ReviewAction.SAVE_CLIP): ReviewBrowserState = copy(
     savingClipItemId = null,
     savedClipItemIds = savedClipItemIds + itemId,
     savedClipItemId = itemId,
     savedClipMessage = "Recording saved in Frigate",
+    actionError = actionError?.takeUnless { it.itemId == itemId && it.action == action },
 )
+
+internal fun ReviewBrowserState.actionErrorFor(itemId: String?): ReviewActionError? =
+    actionError?.takeIf { it.itemId == itemId }
+
+internal fun ReviewBrowserState.visibleReviewItems(reviewed: Boolean): List<ReviewItem> =
+    if (queueActive) queueItemIds.mapNotNull { id -> items.firstOrNull { it.id == id } }
+    else items.filter { it.hasBeenReviewed == reviewed }
+
+internal val ReviewBrowserState.collectionReviewStatus: ReviewStatusFilter
+    get() = if (queueActive) ReviewStatusFilter.ALL else filters.reviewStatus
+
+/** Call after invalidating discovery requests whenever the current privacy scope changes. */
+internal fun ReviewBrowserState.afterActivityScopeChanged(visibleCameraNames: Set<String>): ReviewBrowserState = copy(
+    items = items.filter { it.camera in visibleCameraNames },
+    playbackItem = playbackItem?.takeIf { it.camera in visibleCameraNames },
+    selectedItemId = selectedItemId?.takeIf { selected ->
+        items.any { it.id == selected && it.camera in visibleCameraNames }
+    },
+    loading = false,
+    loadingMore = false,
+    countsLoading = false,
+)
+
+/** Returning from playback retains an explicitly opened list, including watched highlights. */
+internal fun ReviewBrowserState.afterActivityPlaybackClosed(request: app.opah.tv.playback.PlaybackRequest): ReviewBrowserState {
+    val itemId = request.activityItemId
+    val retainQueue = queueActive && request.activityQueueContext && !request.briefingHighlight &&
+        itemId in queueItemIds && items.any { it.id == itemId }
+    return copy(
+        selectedItemId = itemId.takeIf { retainQueue },
+        recordingState = ReviewRecordingState.IDLE,
+        detailErrorMessage = null,
+        detailLoading = false,
+        queueItemIds = if (retainQueue) queueItemIds else emptyList(),
+        queueIndex = if (retainQueue) queueItemIds.indexOf(itemId) else 0,
+        queueActive = retainQueue,
+        queueCompleted = false,
+        playbackItem = null,
+        advancingPlayback = false,
+        playbackNavigationMessage = null,
+    )
+}
 
 internal fun ReviewCounts.unreviewedFor(severity: ReviewSeverity?): Int = when (severity) {
     ReviewSeverity.ALERT -> unreviewedAlerts

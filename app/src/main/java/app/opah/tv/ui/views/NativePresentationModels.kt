@@ -7,7 +7,7 @@ internal enum class NativeDestination(
     val label: String,
     val iconRes: Int,
 ) {
-    HOME("Home", R.drawable.ic_home),
+    HOME("Cameras", R.drawable.ic_videocam),
     ACTIVITY("Activity", R.drawable.ic_review),
     CLIPS("Clips", R.drawable.ic_saved),
     SETTINGS("Settings", R.drawable.ic_settings),
@@ -71,6 +71,20 @@ internal data class NativeThumbnailRequest(
     val cacheKey: String = "${kind.name}:$sourceId"
 }
 
+internal data class NativeAdjustmentRange(
+    val minimum: Float,
+    val maximum: Float,
+    val current: Float,
+    val wraps: Boolean = false,
+) {
+    init {
+        require(minimum.isFinite() && maximum.isFinite() && current.isFinite())
+        require(minimum <= maximum && current in minimum..maximum)
+    }
+
+    fun canAdjust(direction: Int): Boolean = wraps || if (direction < 0) current > minimum else current < maximum
+}
+
 internal data class NativeRowModel(
     val key: String,
     val title: String,
@@ -87,6 +101,7 @@ internal data class NativeRowModel(
     val previewBackground: Int? = null,
     val secondaryActionKey: String? = null,
     val secondaryActionLabel: String = "",
+    val adjustmentRange: NativeAdjustmentRange? = null,
 ) {
     val focusable: Boolean get() = enabled && kind in FOCUSABLE_ROW_KINDS
     val actionable: Boolean get() = enabled && kind in ACTIONABLE_ROW_KINDS

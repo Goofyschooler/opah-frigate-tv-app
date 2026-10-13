@@ -19,6 +19,9 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import app.opah.tv.notifications.AndroidNotificationIdentity
+import app.opah.tv.data.model.AppSettings
+import app.opah.tv.ui.views.NativeTheme
+import app.opah.tv.ui.views.nativeGlassPanelBackground
 
 internal object TvAlertOverlayPermission {
     fun isGranted(context: Context): Boolean = Settings.canDrawOverlays(context)
@@ -46,11 +49,12 @@ internal class TvAlertOverlayPresenter(context: Context) {
         title: String,
         body: String,
         thumbnail: Bitmap?,
+        appearance: AppSettings,
     ): Boolean {
         if (!TvAlertOverlayPermission.isGranted(appContext)) return false
         mainHandler.post {
             if (!TvAlertOverlayPermission.isGranted(appContext)) return@post
-            showOnMain(profileKey, reviewId, identity, title, body, thumbnail)
+            showOnMain(profileKey, reviewId, identity, title, body, thumbnail, appearance)
         }
         return true
     }
@@ -85,12 +89,13 @@ internal class TvAlertOverlayPresenter(context: Context) {
         title: String,
         body: String,
         thumbnail: Bitmap?,
+        appearance: AppSettings,
     ) {
         active?.let { removeOnMain(it) }
         generation += 1L
         val settings = settingsStore.load()
         if (settings.displayDurationSeconds == 0) return
-        val card = buildCard(title, body, thumbnail, settings)
+        val card = buildCard(appContext, title, body, thumbnail, settings, appearance)
         val overlay = ActiveOverlay(
             profileKey = profileKey,
             reviewId = reviewId,
@@ -103,17 +108,7 @@ internal class TvAlertOverlayPresenter(context: Context) {
         }.isSuccess
         if (!added) return
         active = overlay
-        card.alpha = 0f
-        card.translationY = if (settings.verticalPosition == TvAlertOverlayVerticalPosition.TOP) {
-            -dp(10).toFloat()
-        } else {
-            dp(10).toFloat()
-        }
-        card.animate()
-            .alpha(1f)
-            .translationY(0f)
-            .setDuration(ENTER_ANIMATION_MILLIS)
-            .start()
+        animateEntry(card, settings.verticalPosition, appearance.reducedMotion)
         mainHandler.postDelayed(
             { active?.takeIf { it.generation == overlay.generation }?.let { removeOnMain(it) } },
             tvAlertOverlayDisplayDurationMillis(settings.displayDurationSeconds),
@@ -126,17 +121,17 @@ internal class TvAlertOverlayPresenter(context: Context) {
         runCatching { windowManager.removeViewImmediate(overlay.view) }
     }
 
-    private fun buildCard(
+    internal fun buildCard(
+        context: Context,
         title: String,
         body: String,
         thumbnail: Bitmap?,
         settings: TvAlertOverlaySettings,
+        appearance: AppSettings,
     ): View {
-        val card = FrameLayout(appContext).apply {
-            background = roundedBackground(
-                fill = CARD_COLOR,
-                radius = dp(12).toFloat(),
-            )
+        val theme = NativeTheme.snapshot(context, appearance)
+        val card = FrameLayout(context).apply {
+            background = context.nativeGlassPanelBackground(theme)
             setPadding(dp(12), dp(10), dp(12), dp(10))
             isFocusable = false
             isClickable = false
@@ -144,7 +139,7 @@ internal class TvAlertOverlayPresenter(context: Context) {
             contentDescription = "Alert, $title, $body"
             elevation = dp(8).toFloat()
         }
-        val row = LinearLayout(appContext).apply {
+        val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
@@ -157,7 +152,7 @@ internal class TvAlertOverlayPresenter(context: Context) {
         )
 
         if (thumbnail != null) {
-            val image = ImageView(appContext).apply {
+            val image = ImageView(context).apply {
                 scaleType = ImageView.ScaleType.CENTER_CROP
                 setImageBitmap(thumbnail)
                 background = roundedBackground(
@@ -175,7 +170,7 @@ internal class TvAlertOverlayPresenter(context: Context) {
             )
         }
 
-        val textColumn = LinearLayout(appContext).apply {
+        val textColumn = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
         }
         row.addView(
@@ -184,21 +179,24 @@ internal class TvAlertOverlayPresenter(context: Context) {
         )
         textColumn.addView(
             textView(
+                context = context,
                 text = title,
                 sizeSp = 17f,
-                color = Color.WHITE,
+                color = theme.palette.text,
                 style = Typeface.BOLD,
                 maximumLines = 1,
-            ),
+            ).apply { tag = "alert:overlay:title" },
         )
         textColumn.addView(
             textView(
+                context = context,
                 text = body,
                 sizeSp = 14f,
-                color = SECONDARY_TEXT_COLOR,
+                color = theme.palette.secondaryText,
                 style = Typeface.NORMAL,
                 maximumLines = 2,
             ).apply {
+                tag = "alert:overlay:body"
                 setPadding(0, dp(3), 0, 0)
             },
         )
@@ -212,12 +210,13 @@ internal class TvAlertOverlayPresenter(context: Context) {
     }
 
     private fun textView(
+        context: Context,
         text: String,
         sizeSp: Float,
         color: Int,
         style: Int,
         maximumLines: Int,
-    ) = TextView(appContext).apply {
+    ) = TextView(context).apply {
         this.text = text
         textSize = sizeSp
         setTextColor(color)
@@ -227,7 +226,7 @@ internal class TvAlertOverlayPresenter(context: Context) {
         includeFontPadding = false
     }
 
-    private fun layoutParams(settings: TvAlertOverlaySettings, hasThumbnail: Boolean): WindowManager.LayoutParams {
+    internal fun layoutParams(settings: TvAlertOverlaySettings, hasThumbnail: Boolean): WindowManager.LayoutParams {
         val availableWidth = appContext.resources.displayMetrics.widthPixels - dp(64)
         val preferredWidth = when {
             !hasThumbnail -> TEXT_ONLY_CARD_WIDTH_DP
@@ -270,6 +269,18 @@ internal class TvAlertOverlayPresenter(context: Context) {
         return vertical or horizontal
     }
 
+    internal fun animateEntry(card: View, position: TvAlertOverlayVerticalPosition, reducedMotion: Boolean) {
+        card.animate().cancel()
+        if (reducedMotion) {
+            card.alpha = 1f
+            card.translationY = 0f
+            return
+        }
+        card.alpha = 0f
+        card.translationY = if (position == TvAlertOverlayVerticalPosition.TOP) -dp(10).toFloat() else dp(10).toFloat()
+        card.animate().alpha(1f).translationY(0f).setDuration(ENTER_ANIMATION_MILLIS).start()
+    }
+
     private fun roundedBackground(
         fill: Int,
         stroke: Int? = null,
@@ -298,7 +309,5 @@ internal class TvAlertOverlayPresenter(context: Context) {
         const val MEDIUM_IMAGE_CARD_WIDTH_DP = 530
         const val LARGE_IMAGE_CARD_WIDTH_DP = 620
         const val ENTER_ANIMATION_MILLIS = 180L
-        const val CARD_COLOR = 0xE81A1F28.toInt()
-        const val SECONDARY_TEXT_COLOR = 0xFFD7DEE8.toInt()
     }
 }

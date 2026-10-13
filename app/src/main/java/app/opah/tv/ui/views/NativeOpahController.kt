@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.Bundle
+import android.os.Parcelable
 import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
@@ -26,6 +28,7 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.core.graphics.drawable.toDrawable
 import androidx.core.net.toUri
+import androidx.core.view.doOnPreDraw
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -57,12 +60,22 @@ import app.opah.tv.awareness.AwarenessReviewSeverity
 import app.opah.tv.privacy.PinScope
 import app.opah.tv.ui.Phase0UiState
 import app.opah.tv.ui.Phase0ViewModel
+import app.opah.tv.ui.ConnectionFormSubmission
 import app.opah.tv.ui.PlaybackCompatibilityTestMode
 import app.opah.tv.ui.ActivitySearchFilters
 import app.opah.tv.ui.ActivitySearchTimeRange
+import app.opah.tv.ui.NativeBrowseSelections
+import app.opah.tv.ui.NativeBrowseRestoreResult
+import app.opah.tv.ui.nativeSelection
+import app.opah.tv.ui.filters
 import app.opah.tv.ui.ReviewStatusFilter
 import app.opah.tv.ui.ReviewFilters
 import app.opah.tv.ui.ReviewTimeRange
+import app.opah.tv.ui.ReviewAction
+import app.opah.tv.ui.ReviewActionError
+import app.opah.tv.ui.actionErrorFor
+import app.opah.tv.ui.visibleReviewItems
+import app.opah.tv.ui.hasPendingWrite
 import app.opah.tv.ui.SETTINGS_PAGE_ORDER
 import app.opah.tv.ui.SettingsPage
 import app.opah.tv.ui.TvAlertSchedulePreset
@@ -74,8 +87,11 @@ import app.opah.tv.ui.cameraTechnicalReport
 import app.opah.tv.ui.adjustTvAlertOverlayDisplayDuration
 import app.opah.tv.ui.canDeleteSavedRecordings
 import app.opah.tv.ui.cameraNeighbors
-import app.opah.tv.ui.historySlotKey
+import app.opah.tv.ui.nativeHistoryRowKey
 import app.opah.tv.ui.historySlots
+import app.opah.tv.ui.historyDateChoices
+import app.opah.tv.ui.historyHourChoices
+import app.opah.tv.ui.shiftHistoryDate
 import app.opah.tv.ui.motionRegionLabel
 import app.opah.tv.ui.nextActivityControlState
 import app.opah.tv.ui.nextReviewPlaybackItem
@@ -136,6 +152,7 @@ internal class NativeOpahController(
     initialInformationTabName: String? = null,
     initialActivityPageName: String? = null,
     initialClipsPageName: String? = null,
+    restoredUiState: Bundle? = null,
 ) {
     val root: NativeRootLayout = LayoutInflater.from(activity)
         .inflate(R.layout.native_opah_root, FrameLayout(activity), false) as NativeRootLayout
@@ -145,6 +162,18 @@ internal class NativeOpahController(
     private val navigationItems: LinearLayout = root.findViewById(R.id.native_nav_items)
     private val navViews = linkedMapOf<NativeDestination, TextView>()
     private val focusMemory = mutableMapOf<String, String>()
+    private var homeBookmark: NativeHomeBookmark? = null
+    private var settingsPosition: NativeSettingsPosition? = null
+    private var motionBookmark: NativeMotionSearchBookmark? = null
+    private var appearancePosition: NativeAppearancePosition? = null
+    private var alertSection = NativeAlertSection.ACTIVITY
+    private val browserBookmarks = mutableMapOf<String, NativeMediaBrowserBookmark>()
+    private val listScrollMemory = mutableMapOf<String, Parcelable>()
+    private val destinationLocations = mutableMapOf<NativeDestination, NativeLocation>()
+    private var navigationAppearanceKey: String? = null
+    private var openDialogCount = 0
+    private val activeDialogs = mutableSetOf<Dialog>()
+    private var suppressDialogFocusRestore = false
     private val handlers = mutableMapOf<String, () -> Unit>()
     private val adjustmentHandlers = mutableMapOf<String, (Int) -> Unit>()
     private var route = initialRoute(initialDestinationName, initialSettingsPageName)
@@ -155,6 +184,8 @@ internal class NativeOpahController(
     private var activeHome: NativeHomeSurface? = null
     private var activeSettings: NativeSettingsSurface? = null
     private var activeAppearance: NativeAppearanceSurface? = null
+    private var activeAbout: NativeAboutSurface? = null
+    private var activeWelcome: NativeWelcomeSurface? = null
     private var activeBrowser: NativeMediaBrowserSurface? = null
     private var activeMotionSearch: NativeMotionSearchSurface? = null
     private var activePtz: NativePtzSurface? = null
@@ -181,15 +212,24 @@ internal class NativeOpahController(
         ?.let { name -> runCatching { NativeServerPage.valueOf(name) }.getOrNull() }
         ?: NativeServerPage.PERFORMANCE
     private var activitySearchDraftFilters: ActivitySearchFilters? = null
+    private var pendingBrowseSelections: NativeBrowseSelections? = null
     private var configuredStartupApplied = initialDestinationName != null
     private var pendingDocumentationCameraChooser = BuildConfig.DOCUMENTATION_MODE &&
-        initialDestinationName == "CAMERAS"
+        initialDestinationName == "CREATE_VIEW"
+    private val navigationHistory = NativeNavigationHistory(NativeLocation())
 
     init {
+        if (restoredUiState != null) restoreUiState(restoredUiState)
+        else navigationHistory.reset(currentLocation())
+        viewModel.attachNativeBrowseSelections(pendingBrowseSelections)
         buildNavigation()
         styleRoot()
         root.onBackFromContent = ::handleBack
         root.onNavigationStateChanged = { open -> updateNavigationAppearance(open) }
+        root.onRestoreContentFocus = {
+            (contentHost.findViewWithTag<View>(focusMemory[route.focusMemoryKey])?.requestFocus()
+                ?: contentHost.focusSearch(View.FOCUS_DOWN)?.requestFocus()) == true
+        }
     }
 
     fun start() {
@@ -197,7 +237,26 @@ internal class NativeOpahController(
         stateJob = activity.lifecycleScope.launch {
             activity.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.state.collectLatest { unprojected ->
-                    render(unprojected.projectForPrivacy())
+                    val restoration = viewModel.restoreNativeBrowseSelectionsIfReady()
+                    val draftReady = pendingBrowseSelections == null ||
+                        (unprojected.activeProfile != null && unprojected.snapshot != null && !unprojected.privacy.loading)
+                    if (draftReady) {
+                        pendingBrowseSelections?.let { saved ->
+                            val valid = viewModel.validatedNativeBrowseSelections(saved)
+                            activitySearchDraftFilters = valid?.searchDraft?.filters()
+                            if (valid == null) clearBrowseBookmarks()
+                            pendingBrowseSelections = null
+                        }
+                    }
+                    if (restoration == NativeBrowseRestoreResult.REJECTED_PROFILE) clearBrowseBookmarks()
+                    val presented = if (restoration == NativeBrowseRestoreResult.APPLIED) {
+                        viewModel.state.value.projectForPrivacy()
+                    } else unprojected.projectForPrivacy()
+                    render(if ((restoration == NativeBrowseRestoreResult.WAITING || !draftReady) &&
+                        presented.activeProfile != null && presented.snapshot != null
+                    ) {
+                        presented.copy(snapshot = null, loading = true)
+                    } else presented)
                 }
             }
         }
@@ -214,6 +273,8 @@ internal class NativeOpahController(
         thumbnailJobs.values.forEach(Job::cancel)
         thumbnailJobs.clear()
         thumbnailTargets.clear()
+        suppressDialogFocusRestore = true
+        activeDialogs.toList().forEach(Dialog::dismiss)
         activeHome?.close()
         activeHome = null
         activeSettings = null
@@ -240,10 +301,112 @@ internal class NativeOpahController(
         activePlayback?.setPictureInPictureActive(active)
     }
 
+    private fun currentLocation() = NativeLocation(route, activityPage, clipsPage, serverPage)
+
+    fun saveUiState(): Bundle {
+        captureSurfacePosition()
+        destinationLocations[route.destination] = currentLocation()
+        return NativeNavigationStateCodec.encode(NativeSavedNavigationState(
+            location = currentLocation(),
+            history = navigationHistory.snapshot(),
+            perDestinationLocations = destinationLocations,
+            home = homeBookmark,
+            browsers = browserBookmarks,
+            motion = motionBookmark,
+            settingsPosition = settingsPosition,
+            appearancePosition = appearancePosition,
+            alertSection = alertSection,
+            focus = focusMemory,
+            listScroll = listScrollMemory,
+            browse = viewModel.captureNativeBrowseSelections().copy(
+                searchDraft = activitySearchDraftFilters?.nativeSelection() ?: pendingBrowseSelections?.searchDraft,
+            ),
+        ), activity)
+    }
+
+    private fun restoreUiState(saved: Bundle) {
+        val restored = NativeNavigationStateCodec.decode(saved, activity)
+        applyLocation(restored.location)
+        navigationHistory.restore(restored.location, restored.history)
+        destinationLocations.putAll(restored.perDestinationLocations)
+        focusMemory.putAll(restored.focus)
+        homeBookmark = restored.home
+        browserBookmarks.putAll(restored.browsers)
+        motionBookmark = restored.motion
+        settingsPosition = restored.settingsPosition
+        appearancePosition = restored.appearancePosition
+        alertSection = restored.alertSection
+        listScrollMemory.putAll(restored.listScroll)
+        pendingBrowseSelections = restored.browse
+        configuredStartupApplied = true
+    }
+
+    private fun clearBrowseBookmarks() {
+        homeBookmark = null
+        motionBookmark = null
+        browserBookmarks.clear()
+        focusMemory.clear()
+        listScrollMemory.clear()
+    }
+
+    private fun applyLocation(location: NativeLocation) {
+        route = location.route
+        activityPage = location.activityPage
+        clipsPage = location.clipsPage
+        serverPage = location.serverPage
+    }
+
+    private fun createDialog(onDismiss: (() -> Unit)? = null): Dialog {
+        val origin = root.findFocus()
+        val originKey = origin?.tag as? String
+        val originLocation = currentLocation()
+        return Dialog(activity).apply {
+            requestWindowFeature(Window.FEATURE_NO_TITLE)
+            openDialogCount += 1
+            activeDialogs.add(this)
+            activePlayback?.setInteractionOverlayOpen(true)
+            window?.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            window?.setDimAmount(0.45f)
+            setOnDismissListener {
+                onDismiss?.invoke()
+                activeDialogs.remove(this)
+                openDialogCount = (openDialogCount - 1).coerceAtLeast(0)
+                activePlayback?.setInteractionOverlayOpen(openDialogCount > 0)
+                if (!suppressDialogFocusRestore && currentLocation() == originLocation && !root.navigationOpen) {
+                    val target = if (originKey != null) root.findViewWithTag<View>(originKey) else origin
+                    if (target?.isAttachedToWindow == true && target.isShown && target.isEnabled && target.isFocusable) {
+                        target.requestFocus()
+                    }
+                }
+            }
+        }
+    }
+
     private fun render(state: Phase0UiState) {
+        val removedCameraAccess = currentState.snapshot?.cameras.orEmpty().any { previous ->
+            state.snapshot?.cameras.orEmpty().none { it.name == previous.name }
+        }
+        val privacyRevoked = (!currentState.privacy.guestModeActive && state.privacy.guestModeActive) ||
+            !state.privacy.unlockedScopes.containsAll(currentState.privacy.unlockedScopes) ||
+            (currentState.privacy.available && !state.privacy.available) || removedCameraAccess
+        if (privacyRevoked || state.privacy.epoch != currentState.privacy.epoch ||
+            (!currentState.tvAlertPrivacyGateOpen && state.tvAlertPrivacyGateOpen)
+        ) {
+            suppressDialogFocusRestore = true
+            activeDialogs.toList().forEach(Dialog::dismiss)
+            suppressDialogFocusRestore = false
+            if (privacyRevoked) pendingProtectedAction = null
+        }
         if (NativeTheme.update(activity, state.settings)) {
-            clearActiveSurface()
-            contentHost.removeAllViews()
+            val preserveSurface = activeAppearance != null || activePlayback != null ||
+                activeCameraGroup != null || activeMonitor != null
+            if (!preserveSurface) {
+                clearActiveSurface()
+                contentHost.removeAllViews()
+            } else {
+                activeSettings?.refreshTheme()
+                activeAppearance?.refreshTheme()
+            }
             styleRoot()
         }
         currentState = state
@@ -264,6 +427,8 @@ internal class NativeOpahController(
             }
             applyConfiguredStartupIfReady(state)
         }
+        val requestedLocation = currentLocation()
+        navigationHistory.visit(requestedLocation)
         when {
             state.tvAlertPrivacyGateOpen -> showTvAlertPrivacyGate(state)
             state.playback != null -> showPlayback(state)
@@ -275,6 +440,8 @@ internal class NativeOpahController(
             state.savedSessionRecoveryAvailable -> showRecovery(state)
             else -> showConnectionSetup(state)
         }
+        if (currentLocation() != requestedLocation) navigationHistory.replaceCurrent(currentLocation())
+        destinationLocations[route.destination] = currentLocation()
         showGlobalErrorIfNeeded(state)
         if (!fullyDrawnReported && (
                 state.activeProfile != null || !state.loading || state.savedSessionRecoveryAvailable
@@ -483,7 +650,7 @@ internal class NativeOpahController(
                     NativeHomeTile(
                         key = "camera:${camera.name}",
                         title = camera.displayName,
-                        subtitle = state.health.messagesByCamera[camera.name] ?: "Live camera",
+                        subtitle = state.health.messagesByCamera[camera.name] ?: "Camera preview",
                         kind = NativeHomeTileKind.CAMERA,
                         sourceId = camera.name,
                         previewCameraName = camera.name,
@@ -570,7 +737,7 @@ internal class NativeOpahController(
                     NativeHomeQuickAction(
                         key = "restore",
                         title = "Restore",
-                        detail = "Restore the default Home layout",
+                        detail = "Restore the default camera layout",
                         iconRes = R.drawable.ic_retry,
                         accentColor = NativeTheme.palette.secondaryText,
                         value = "Cameras",
@@ -581,7 +748,7 @@ internal class NativeOpahController(
         }
         val homeState = NativeHomeUiState(
             subtitle = "${snapshot.cameras.size} cameras • ${state.review.counts.unreviewedAlerts} new alerts",
-            tiles = tiles,
+            tiles = tiles.sortedBy { if (it.kind == NativeHomeTileKind.CAMERA) 0 else 1 },
             quickActions = quickActions,
         )
         if (activeSurfaceKey == "home:dashboard" && activeHome != null) {
@@ -594,6 +761,7 @@ internal class NativeOpahController(
         val surface = NativeHomeSurface(
             activity = activity,
             initialState = homeState,
+            imageLoadedAtMillis = { cameraName -> viewModel.cachedCameraImage(cameraName)?.loadedAtMillis },
             cachedBitmap = { cameraName -> viewModel.cachedCameraImage(cameraName)?.bitmap },
             refreshBitmap = { cameraName, height -> viewModel.refreshCameraImage(cameraName, height).getOrNull()?.bitmap },
             onPrimary = ::activateHomeTile,
@@ -603,6 +771,7 @@ internal class NativeOpahController(
         activeHome = surface
         contentHost.removeAllViews()
         contentHost.addView(surface, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        homeBookmark?.let { surface.restoreBookmark(it, requestFocus = !root.navigationOpen) }
     }
 
     private fun activateHomeTile(tile: NativeHomeTile) {
@@ -655,9 +824,9 @@ internal class NativeOpahController(
                     if (state.snapshot.ptzCameras.containsKey(cameraName)) {
                         add(Triple("controls", "Camera controls", "Pan, tilt, zoom, and presets"))
                     }
-                    add(Triple("hide", "Hide from Home", "You can restore hidden cameras from Home"))
+                    add(Triple("hide", "Hide from Cameras", "You can restore hidden cameras from Cameras"))
                 }
-                showChoiceDialog(camera.displayName, "Home and camera options", choices) { choice ->
+                showChoiceDialog(camera.displayName, "Camera options", choices) { choice ->
                     when (choice) {
                         "favorite" -> viewModel.toggleFavoriteCamera(cameraName)
                         "earlier" -> viewModel.moveFavoriteCamera(cameraName, -1)
@@ -722,64 +891,21 @@ internal class NativeOpahController(
             when (choice) {
                 "play" -> viewModel.playBriefingHighlights()
                 "review" -> {
+                    destinationLocations[route.destination] = currentLocation()
+                    applyLocation(NativeLocation(NativeRoute(NativeDestination.ACTIVITY)))
                     viewModel.openBriefingReviewQueue()
-                    navigate(NativeDestination.ACTIVITY)
+                    render(viewModel.state.value)
                 }
                 "dismiss" -> viewModel.dismissBriefing()
             }
         }
     }
 
-    private fun showCreateCameraViewDialog(selectedCameraNames: List<String> = emptyList()) {
+    private fun showCreateCameraViewDialog() {
         val cameras = currentState.snapshot?.cameras.orEmpty()
         if (cameras.size < 2) return
-        val selected = selectedCameraNames.distinct().take(4)
-        val displayNames = cameras.associate { it.name to it.displayName }
-        val selectedLabel = selected.joinToString(" • ") { displayNames[it] ?: it }
-        val choices = buildList {
-            if (selected.size >= 2) {
-                add(Triple("__save__", "Name and save this view", "$selectedLabel • ${selected.size} cameras"))
-            }
-            cameras.filterNot { it.name in selected }.forEach { camera ->
-                add(Triple("camera:${camera.name}", camera.displayName, "Add to this view"))
-            }
-            if (selected.isNotEmpty()) {
-                add(Triple("__undo__", "Remove ${displayNames[selected.last()] ?: selected.last()}", "Choose a different camera"))
-            }
-        }
-        showChoiceDialog(
-            title = "Create camera view",
-            explanation = if (selected.isEmpty()) {
-                "Choose two to four cameras. Opah will remember the view on Home"
-            } else {
-                "Selected: $selectedLabel"
-            },
-            choices = choices,
-        ) { choice ->
-            when {
-                choice == "__save__" -> showTextEntryDialog(
-                    title = "Name this camera view",
-                    explanation = "Use a short name, such as Outside or Entrances",
-                    initial = "",
-                ) { name ->
-                    if (name.isNotBlank()) viewModel.saveCameraView(name, selected)
-                }
-                choice == "__undo__" -> showCreateCameraViewDialog(selected.dropLast(1))
-                choice.startsWith("camera:") -> {
-                    val next = selected + choice.removePrefix("camera:")
-                    if (next.size == 4) {
-                        showTextEntryDialog(
-                            title = "Name this camera view",
-                            explanation = next.joinToString(" • ") { displayNames[it] ?: it },
-                            initial = "",
-                        ) { name ->
-                            if (name.isNotBlank()) viewModel.saveCameraView(name, next)
-                        }
-                    } else {
-                        showCreateCameraViewDialog(next)
-                    }
-                }
-            }
+        showNativeCameraViewDialog(activity, createDialog(), cameras) { name, selected ->
+            viewModel.saveCameraView(name, selected)
         }
     }
 
@@ -791,7 +917,7 @@ internal class NativeOpahController(
         val cameras = currentState.snapshot?.cameras.orEmpty()
             .filter { it.name in cameraNames }
         if (cameras.size < 2) return
-        val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val dialog = createDialog()
         val selected = linkedSetOf<String>()
         val explanation = TextView(activity).apply {
             textSize = 14f
@@ -859,7 +985,7 @@ internal class NativeOpahController(
         val container = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(activity.dp(22), activity.dp(18), activity.dp(22), activity.dp(18))
-            setBackgroundColor(NativeTheme.palette.panel)
+            background = activity.nativeGlassPanelBackground(strong = true)
             addView(TextView(activity).apply {
                 text = title
                 textSize = 22f
@@ -939,6 +1065,12 @@ internal class NativeOpahController(
             )
             return
         }
+        if (
+            activityPage == NativeActivityPage.MOTION &&
+            state.snapshot?.capabilities?.supports(FrigateFeature.MOTION_SEARCH) != true
+        ) {
+            activityPage = NativeActivityPage.NEW
+        }
         when (activityPage) {
             NativeActivityPage.NEW -> showReviewActivity(state, reviewed = false)
             NativeActivityPage.REVIEWED -> showReviewActivity(state, reviewed = true)
@@ -950,9 +1082,14 @@ internal class NativeOpahController(
 
     private fun showReviewActivity(state: Phase0UiState, reviewed: Boolean) {
         if (!state.review.loadedOnce && !state.review.loading) viewModel.loadReview()
-        val visibleItems = state.review.items.filter { item -> item.hasBeenReviewed == reviewed }
+        val visibleItems = state.review.visibleReviewItems(reviewed)
+        val visibleItemIds = visibleItems.map(ReviewItem::id)
         val rows = buildList {
-            visibleItems.forEach { item -> add(reviewRow("activity:item", item, state)) }
+            visibleItems.forEach { item -> add(reviewRow("activity:item", item, state, visibleItemIds)) }
+            if (!state.review.queueActive && (state.review.hasMore || state.review.loadingMore)) {
+                add(action("activity:load-more", if (state.review.loadingMore) "Loading more activity" else "Load more activity",
+                    enabled = !state.review.loadingMore) { viewModel.loadMoreReview() })
+            }
         }
         val details = visibleItems.associate { item ->
             val objectLabel = (item.objects + item.audio).distinct().take(4)
@@ -964,19 +1101,25 @@ internal class NativeOpahController(
                 DateUtils.MINUTE_IN_MILLIS,
             ).toString()
             val actions = buildList {
+                state.review.actionErrorFor(item.id)?.takeIf { it.canRetry }?.let { failure ->
+                    add(action("activity:detail:retry:${item.id}", "Retry", failure.message,
+                        enabled = !state.review.hasPendingWrite()) {
+                        retryReviewAction(item, failure)
+                    })
+                }
                 add(
                     action(
                         "activity:detail:play:${item.id}",
                         "Play recording",
                         enabled = item.recordingAvailable != false,
-                    ) { viewModel.playReview(item) },
+                    ) { viewModel.playReview(item, visibleActivityItemIds = visibleItemIds) },
                 )
                 add(
                     action(
                         "activity:detail:reviewed:${item.id}",
                         if (item.hasBeenReviewed) "Mark unreviewed" else "Mark reviewed",
                         value = if (item.hasBeenReviewed) "Reviewed" else "New",
-                        enabled = state.review.markingReviewedItemId == null,
+                        enabled = !state.review.hasPendingWrite(),
                     ) { viewModel.setReviewReviewed(item, !item.hasBeenReviewed) },
                 )
                 if (item.recordingAvailable != false) {
@@ -985,7 +1128,7 @@ internal class NativeOpahController(
                         action(
                             "activity:detail:save:${item.id}",
                             if (saved) "Recording saved" else "Save recording",
-                            enabled = !saved && state.review.savingClipItemId == null,
+                            enabled = !saved && !state.review.hasPendingWrite(),
                             selected = saved,
                         ) {
                             runProtectedAction(PinScope.ADMINISTRATIVE_ACTIONS, "saving recordings") {
@@ -1002,7 +1145,7 @@ internal class NativeOpahController(
                                 "activity:detail:save-all:${item.id}",
                                 "Save all camera angles",
                                 "Choose cameras covering the same moment",
-                                enabled = state.review.savingClipItemId == null,
+                                enabled = !state.review.hasPendingWrite(),
                             ) { showSaveAllAnglesDialog(item) },
                         )
                     }
@@ -1023,6 +1166,7 @@ internal class NativeOpahController(
                 title = cameraDisplayName(item.camera, state),
                 subtitle = "$objectLabel • $relative",
                 body = body,
+                errorMessage = state.review.actionErrorFor(item.id)?.message,
                 thumbnail = NativeThumbnailRequest(NativeThumbnailKind.REVIEW, item.id),
                 actions = actions,
             )
@@ -1036,12 +1180,18 @@ internal class NativeOpahController(
                 subtitle = when {
                     state.review.loading -> "Loading activity"
                     state.review.errorMessage != null -> state.review.errorMessage
+                    state.review.queueActive -> "${state.review.queueTitle} • $count ${if (count == 1) "item" else "items"} in this review"
+                    state.review.queueCompleted -> "Review complete"
                     else -> "$count ${pageLabel.lowercase()} ${if (count == 1) "item" else "items"} • ${state.review.filters.timeRange.displayName}"
                 },
                 tabs = activityTabs(state),
                 tools = activityTools(state),
                 rows = rows,
                 details = details,
+                preferredSelectionKey = state.review.selectedItemId?.takeIf { state.review.queueActive }?.let { "activity:item:$it" },
+                // The first load may begin after this render's state snapshot was collected.
+                loading = state.review.loading || (!state.review.loadedOnce &&
+                    (viewModel.state.value.review.loading || viewModel.state.value.review.loadedOnce)),
                 emptyTitle = if (state.review.loading) "Loading activity" else "No ${pageLabel.lowercase()} activity",
                 emptyBody = if (reviewed) {
                     "Activity you review or finish playing will appear here"
@@ -1050,6 +1200,21 @@ internal class NativeOpahController(
                 },
             ),
         )
+    }
+
+    private fun retryReviewAction(item: ReviewItem, error: ReviewActionError) {
+        if (error.itemId != item.id) return
+        when (error.action) {
+            ReviewAction.MARK_REVIEWED -> viewModel.setReviewReviewed(item, error.reviewed)
+            ReviewAction.SAVE_CLIP -> runProtectedAction(PinScope.ADMINISTRATIVE_ACTIONS, "saving recordings") {
+                viewModel.saveReviewClip(item)
+            }
+            ReviewAction.SAVE_ALL_ANGLES -> if (error.cameraNames.isEmpty()) showSaveAllAnglesDialog(item) else {
+                runProtectedAction(PinScope.ADMINISTRATIVE_ACTIONS, "saving recordings") {
+                    viewModel.saveReviewAllAngles(item, error.cameraNames)
+                }
+            }
+        }
     }
 
     private fun activityTabs(state: Phase0UiState): List<NativeBrowserTab> {
@@ -1099,7 +1264,12 @@ internal class NativeOpahController(
         }
     }
 
-    private fun activityTools(state: Phase0UiState): List<NativeBrowserTool> = when (activityPage) {
+    private fun activityTools(state: Phase0UiState): List<NativeBrowserTool> = when {
+        state.review.queueActive && activityPage in listOf(NativeActivityPage.NEW, NativeActivityPage.REVIEWED) -> {
+            handlers["activity:leave-queue"] = { viewModel.endReviewQueue(); viewModel.loadReview() }
+            listOf(NativeBrowserTool("activity:leave-queue", "All activity", "Leave this review"))
+        }
+        else -> when (activityPage) {
         NativeActivityPage.NEW -> {
             val count = state.review.unreviewedShownActivity().size
             handlers["activity:mark-all"] = { showMarkShownActivityReviewedConfirmation(count) }
@@ -1109,7 +1279,7 @@ internal class NativeOpahController(
                     "activity:mark-all",
                     if (state.review.markingAllReviewed) "Saving" else "Mark all reviewed",
                     if (count > 0) "$count new" else "Caught up",
-                    enabled = count > 0 && !state.review.markingAllReviewed,
+                    enabled = count > 0 && !state.review.hasPendingWrite(),
                     primary = true,
                 ),
                 NativeBrowserTool("activity:refresh", "Refresh", enabled = !state.review.loading),
@@ -1124,6 +1294,7 @@ internal class NativeOpahController(
         )
         NativeActivityPage.SEARCH -> emptyList()
         NativeActivityPage.MOTION -> emptyList()
+        }
     }
 
     private fun showActivityFilterActions() {
@@ -1169,14 +1340,18 @@ internal class NativeOpahController(
                         reviewStatus = ReviewStatusFilter.ALL,
                     ),
                 )
-                "queue" -> viewModel.startReviewQueue()
+                "queue" -> {
+                    activityPage = NativeActivityPage.NEW
+                    viewModel.startReviewQueue()
+                    render(viewModel.state.value)
+                }
                 "more" -> viewModel.loadMoreReview()
             }
         }
     }
 
     private fun showMarkShownActivityReviewedConfirmation(count: Int) {
-        if (count <= 0 || currentState.review.markingAllReviewed) return
+        if (count <= 0 || currentState.review.hasPendingWrite()) return
         showChoiceDialog(
             title = "Mark $count ${if (count == 1) "item" else "items"} reviewed?",
             explanation = "This updates the new activity currently shown in Frigate",
@@ -1294,8 +1469,8 @@ internal class NativeOpahController(
         } else {
             emptyList()
         }
-        val rows = slots.mapIndexed { index, slot ->
-            val key = "activity:history:slot:$index"
+        val rows = slots.map { slot ->
+            val key = nativeHistoryRowKey(cameraName, slot)
             action(
                 key = key,
                 title = "${formatTime(slot.startTime)}–${formatTime(slot.endTime)}",
@@ -1304,8 +1479,8 @@ internal class NativeOpahController(
                 enabled = slot.available,
             ) { viewModel.playHistorySlot(slot) }
         }
-        val details = slots.mapIndexed { index, slot ->
-            val key = "activity:history:slot:$index"
+        val details = slots.map { slot ->
+            val key = nativeHistoryRowKey(cameraName, slot)
             val motion = state.history.motion
                 .filter { it.startTime >= slot.startTime && it.startTime < slot.endTime }
                 .sumOf { it.motion }
@@ -1327,6 +1502,7 @@ internal class NativeOpahController(
             )
         }.toMap()
         handlers["activity:history:camera"] = ::showHistoryCameraChoices
+        handlers["activity:history:date"] = { showHistoryDateChoices() }
         handlers["activity:history:earlier"] = { viewModel.moveHistoryHour(-1) }
         handlers["activity:history:later"] = { viewModel.moveHistoryHour(1) }
         showMediaBrowser(
@@ -1342,12 +1518,16 @@ internal class NativeOpahController(
                 tabs = activityTabs(state),
                 tools = listOf(
                     NativeBrowserTool("activity:history:camera", "Camera", cameraLabel, field = true),
+                    NativeBrowserTool("activity:history:date", "Date & time", enabled = !state.history.loading),
                     NativeBrowserTool("activity:history:earlier", "Earlier", enabled = !state.history.loading),
-                    NativeBrowserTool("activity:history:later", "Later", enabled = !state.history.loading),
+                    NativeBrowserTool("activity:history:later", "Later", enabled = !state.history.loading &&
+                        hourStart != null && hourStart + 3_600.0 <= System.currentTimeMillis() / 1_000.0),
                     NativeBrowserTool("activity:refresh", "Refresh", enabled = !state.history.loading),
                 ),
                 rows = rows,
                 details = details,
+                loading = state.history.loading || (!state.history.loadedOnce &&
+                    (viewModel.state.value.history.loading || viewModel.state.value.history.loadedOnce)),
                 emptyTitle = if (state.history.loading) "Loading history" else "No recording periods found",
                 emptyBody = "Choose another camera or hour",
             ),
@@ -1361,6 +1541,67 @@ internal class NativeOpahController(
             "Choose which camera recording history to browse",
             cameras.map { camera -> Triple(camera.name, camera.displayName, if (camera.name == currentState.history.cameraName) "Selected" else "") },
         ) { cameraName -> viewModel.loadHistory(cameraName) }
+    }
+
+    private fun showHistoryDateChoices(
+        anchorMillis: Long = currentState.history.hourStartSeconds?.let { (it * 1_000).toLong() }
+            ?: System.currentTimeMillis(),
+    ) {
+        val now = System.currentTimeMillis()
+        val zone = java.util.TimeZone.getDefault()
+        val dates = historyDateChoices(anchorMillis, now, zone)
+        if (dates.isEmpty()) return
+        val today = historyDateChoices(now, now, zone).first()
+        val yesterday = shiftHistoryDate(today, -1, zone)
+        val selectedDate = currentState.history.hourStartSeconds?.let {
+            historyDateChoices((it * 1_000).toLong(), now, zone).firstOrNull()
+        }
+        val choices = buildList {
+            if (dates.first() != today) add(Triple("today", "Today", "Jump to today's recordings"))
+            dates.forEach { day ->
+                val label = when (day) {
+                    today -> "Today"
+                    yesterday -> "Yesterday"
+                    else -> DateFormat.getDateInstance(DateFormat.FULL).apply { timeZone = zone }.format(Date(day))
+                }
+                add(Triple("history:date:$day", label, if (day == selectedDate) "Selected date" else "Choose an hour"))
+            }
+            if (shiftHistoryDate(dates.last(), -1, zone) >= 0L) {
+                add(Triple("older", "Earlier dates", "Previous seven days"))
+            }
+            if (dates.first() != today) add(Triple("newer", "More recent dates", "Next seven days"))
+        }
+        showChoiceDialog("Recording date", "Choose a date in ${zone.id.replace('_', ' ')}", choices) { choice ->
+            when (choice) {
+                "today" -> showHistoryHourChoices(today)
+                "older" -> showHistoryDateChoices(shiftHistoryDate(dates.last(), -1, zone))
+                "newer" -> showHistoryDateChoices(shiftHistoryDate(dates.first(), 7, zone))
+                else -> choice.removePrefix("history:date:").toLongOrNull()?.let(::showHistoryHourChoices)
+            }
+        }
+    }
+
+    private fun showHistoryHourChoices(dayMillis: Long) {
+        val zone = java.util.TimeZone.getDefault()
+        val hours = historyHourChoices(dayMillis, System.currentTimeMillis(), zone)
+        val date = DateFormat.getDateInstance(DateFormat.FULL).apply { timeZone = zone }.format(Date(dayMillis))
+        showChoiceDialog(
+            "Recording time",
+            "$date • ${zone.id.replace('_', ' ')}",
+            hours.map { hour -> Triple("history:hour:${hour.startMillis}", hour.label, hour.zoneLabel) } +
+                Triple("date", "Choose another date", "Return to dates"),
+        ) { choice ->
+            if (choice == "date") {
+                showHistoryDateChoices(dayMillis)
+            } else {
+                choice.removePrefix("history:hour:").toLongOrNull()?.let { selected ->
+                    // Recheck against the current clock before asking the existing history loader.
+                    if (selected <= System.currentTimeMillis()) {
+                        viewModel.loadHistory(currentState.history.cameraName, selected / 1_000.0)
+                    }
+                }
+            }
+        }
     }
 
     private fun showActivitySearch(state: Phase0UiState) {
@@ -1471,7 +1712,7 @@ internal class NativeOpahController(
                     search.searching -> "Searching Frigate"
                     search.errorMessage != null -> search.errorMessage
                     search.searchedOnce -> buildString {
-                        append("${search.results.size} results for ${search.query.ifBlank { "activity" }}")
+                        append("${search.results.size} ${if (search.results.size == 1) "result" else "results"} for ${search.query.ifBlank { "activity" }}")
                         filters.summary(state).takeIf(String::isNotBlank)?.let { append(" • $it") }
                     }
                     else -> "Search descriptions, objects, people, plates, and more"
@@ -1480,6 +1721,7 @@ internal class NativeOpahController(
                 tools = tools,
                 rows = rows,
                 details = details,
+                loading = available && search.searching,
                 emptyTitle = when {
                     !available -> "Search unavailable"
                     search.searching -> "Searching"
@@ -1623,8 +1865,8 @@ internal class NativeOpahController(
     private fun showMotionSearch(state: Phase0UiState) {
         val motion = state.motionReview
         val cameraName = motion.cameraName ?: state.snapshot?.cameras?.firstOrNull()?.name
-        val rows = motion.results.mapIndexed { index, result ->
-            val key = "activity:motion:result:$index"
+        val rows = motion.results.map { result ->
+            val key = "activity:motion:result:$cameraName:${motion.regionIndex}:${result.timestamp}"
             action(
                 key = key,
                 title = formatDateTime(result.timestamp),
@@ -1682,6 +1924,7 @@ internal class NativeOpahController(
                 root.rememberContentFocus(view)
             },
             onNavigateOutLeft = root::openNavigation,
+            initialBookmark = motionBookmark,
         )
         activeMotionSearch = surface
         contentHost.removeAllViews()
@@ -1752,6 +1995,7 @@ internal class NativeOpahController(
                 ),
                 rows = rows,
                 details = details,
+                loading = motion.searching,
                 emptyTitle = if (motion.searching) "Searching for motion" else if (motion.searchedOnce) "No motion matches" else "Motion search",
                 emptyBody = "Use the controls above to search a selected area",
             ),
@@ -1793,6 +2037,7 @@ internal class NativeOpahController(
             },
             onThumbnailRequested = ::loadThumbnail,
             onNavigateOutLeft = root::openNavigation,
+            initialBookmark = browserBookmarks[surfaceKey],
         )
         activeBrowser = surface
         contentHost.removeAllViews()
@@ -1928,6 +2173,8 @@ internal class NativeOpahController(
                 tabs = clipsTabs(state),
                 rows = rows,
                 details = details,
+                loading = state.exports.loading || (!state.exports.loadedOnce &&
+                    (viewModel.state.value.exports.loading || viewModel.state.value.exports.loadedOnce)),
                 emptyTitle = if (state.exports.loading) "Loading clips" else "No saved recordings",
                 emptyBody = "Recordings saved from Activity or live video will appear here",
             ),
@@ -1997,10 +2244,12 @@ internal class NativeOpahController(
             NativeBrowserUiState(
                 title = "Clips",
                 subtitle = state.exports.incidentsErrorMessage
-                    ?: "${state.exports.incidents.size} incidents • organize related recordings",
+                    ?: "${state.exports.incidents.size} ${if (state.exports.incidents.size == 1) "incident" else "incidents"} • organize related recordings",
                 tabs = clipsTabs(state),
                 rows = rows,
                 details = details,
+                loading = state.exports.loading || (!state.exports.loadedOnce &&
+                    (viewModel.state.value.exports.loading || viewModel.state.value.exports.loadedOnce)),
                 emptyTitle = "No incidents",
                 emptyBody = "Create an incident to group related recordings",
             ),
@@ -2279,6 +2528,7 @@ internal class NativeOpahController(
             reducedMotion = state.settings.reducedMotion,
             highContrast = state.settings.highContrast,
             subtleRoundedCorners = state.settings.subtleRoundedCorners,
+            reducedTransparency = state.settings.reducedTransparency,
         )
         val surface = activeAppearance ?: NativeAppearanceSurface(
             activity = activity,
@@ -2288,6 +2538,7 @@ internal class NativeOpahController(
             onReducedMotion = viewModel::updateReducedMotion,
             onHighContrast = viewModel::updateHighContrast,
             onSubtleRoundedCorners = viewModel::updateSubtleRoundedCorners,
+            onReducedTransparency = viewModel::updateReducedTransparency,
             onFocused = { key, view ->
                 focusMemory[route.focusMemoryKey] = key
                 root.rememberContentFocus(view)
@@ -2302,6 +2553,7 @@ internal class NativeOpahController(
             detailContent = surface,
         )
         activeAppearance = surface
+        appearancePosition?.let { position -> surface.restorePosition(position); appearancePosition = null }
     }
 
     @Suppress("unused")
@@ -2353,6 +2605,7 @@ internal class NativeOpahController(
                     key = "appearance:adjust:accent-hue",
                     title = "Accent color",
                     value = themeHueName(accentHsl.hue),
+                    adjustmentRange = NativeAdjustmentRange(0f, 359f, accentHsl.hue.toFloat(), wraps = true),
                     indicatorColor = safeColors.accentArgb,
                     decrease = {
                         viewModel.updateCustomTheme(
@@ -2369,6 +2622,7 @@ internal class NativeOpahController(
                     key = "appearance:adjust:accent-strength",
                     title = "Accent intensity",
                     value = themeIntensityLabel(accentHsl.saturation),
+                    adjustmentRange = NativeAdjustmentRange(0f, 100f, accentHsl.saturation.toFloat()),
                     indicatorColor = safeColors.accentArgb,
                     decrease = {
                         viewModel.updateCustomTheme(
@@ -2385,6 +2639,7 @@ internal class NativeOpahController(
                     key = "appearance:adjust:accent-brightness",
                     title = "Accent brightness",
                     value = themeBrightnessLabel(accentHsl.lightness),
+                    adjustmentRange = NativeAdjustmentRange(minOf(5f, accentHsl.lightness.toFloat()), maxOf(95f, accentHsl.lightness.toFloat()), accentHsl.lightness.toFloat()),
                     indicatorColor = safeColors.accentArgb,
                     decrease = {
                         viewModel.updateCustomTheme(
@@ -2401,6 +2656,7 @@ internal class NativeOpahController(
                     key = "appearance:adjust:background-hue",
                     title = "Background tint",
                     value = themeHueName(backgroundHsl.hue),
+                    adjustmentRange = NativeAdjustmentRange(0f, 359f, backgroundHsl.hue.toFloat(), wraps = true),
                     indicatorColor = safeColors.backgroundArgb,
                     decrease = {
                         viewModel.updateCustomTheme(
@@ -2417,6 +2673,7 @@ internal class NativeOpahController(
                     key = "appearance:adjust:background-strength",
                     title = "Background intensity",
                     value = themeIntensityLabel(backgroundHsl.saturation),
+                    adjustmentRange = NativeAdjustmentRange(0f, 100f, backgroundHsl.saturation.toFloat()),
                     indicatorColor = safeColors.backgroundArgb,
                     decrease = {
                         viewModel.updateCustomTheme(
@@ -2433,6 +2690,7 @@ internal class NativeOpahController(
                     key = "appearance:adjust:background-brightness",
                     title = "Background brightness",
                     value = themeBrightnessLabel(backgroundHsl.lightness),
+                    adjustmentRange = NativeAdjustmentRange(minOf(5f, backgroundHsl.lightness.toFloat()), maxOf(95f, backgroundHsl.lightness.toFloat()), backgroundHsl.lightness.toFloat()),
                     indicatorColor = safeColors.backgroundArgb,
                     decrease = {
                         viewModel.updateCustomTheme(
@@ -2883,6 +3141,11 @@ internal class NativeOpahController(
                     "The compact pop-up closes automatically after this time"
                 },
                 value = tvAlertOverlayDisplayDurationLabel(displaySeconds),
+                adjustmentRange = NativeAdjustmentRange(
+                    app.opah.tv.notifications.android.TV_ALERT_OVERLAY_MIN_DISPLAY_SECONDS.toFloat(),
+                    app.opah.tv.notifications.android.TV_ALERT_OVERLAY_MAX_DISPLAY_SECONDS.toFloat(),
+                    displaySeconds.toFloat(),
+                ),
                 decrease = {
                     viewModel.setTvAlertOverlayDisplayDurationSeconds(
                         adjustTvAlertOverlayDisplayDuration(displaySeconds, -1),
@@ -2981,7 +3244,16 @@ internal class NativeOpahController(
                 })
             }
         }
-        showSettingsList("tv-alerts", "TV alerts", "See camera activity while another TV app is open", rows)
+        val tabs = NativeAlertSection.entries.map { section ->
+            val key = "alerts:section:${section.name}"
+            handlers[key] = { alertSection = section; render(currentState) }
+            NativeBrowserTab(key, section.label, alertSection == section)
+        }
+        showSettingsList(
+            "tv-alerts", "TV alerts", "See important activity while watching TV",
+            rows.filter { alertSectionForKey(it.key)?.let { section -> section == alertSection } ?: true },
+            tabs,
+        )
     }
 
     private fun showPrivacy(state: Phase0UiState) {
@@ -3079,7 +3351,7 @@ internal class NativeOpahController(
     private fun showStartup(state: Phase0UiState) {
         val rows = buildList {
             add(section("startup:main", "When Opah opens"))
-            add(startupChoice("startup:home", "Home", StartupTarget(StartupTargetKind.HOME), state))
+            add(startupChoice("startup:home", "Cameras", StartupTarget(StartupTargetKind.HOME), state))
             add(startupChoice("startup:last", "Last viewed", StartupTarget(StartupTargetKind.LAST_VIEWED), state))
             state.snapshot?.cameras.orEmpty().forEach { camera ->
                 add(startupChoice("startup:camera:${camera.name}", camera.displayName, StartupTarget(StartupTargetKind.CAMERA, camera.name), state))
@@ -3344,7 +3616,7 @@ internal class NativeOpahController(
                     info(
                         "advanced:codec:$index",
                         codec.label,
-                        "${codec.mimeType} • ${codec.decoders.size} decoders${if (codec.hasHardwareDecoder) " • hardware available" else ""}",
+                        "${codec.mimeType} • ${codec.decoders.size} ${if (codec.decoders.size == 1) "decoder" else "decoders"}${if (codec.hasHardwareDecoder) " • hardware available" else ""}",
                         codec.decoders.joinToString("\n") { decoder ->
                             buildList {
                                 add(decoder.name)
@@ -3377,36 +3649,39 @@ internal class NativeOpahController(
 
     private fun showAbout(state: Phase0UiState) {
         val aboutText = aboutOpahText(displayedVersionName(), state.snapshot?.frigateVersion)
-        val rows = buildList {
-            add(info("about:text", "", aboutText))
-            add(
-                action("about:open-project", "Open project", "Source code, documentation, and support", "Open") {
-                    runCatching {
-                        activity.startActivity(Intent(Intent.ACTION_VIEW, OPAH_REPOSITORY_URL.toUri()))
-                    }.onFailure {
-                        showReadingDialog("Project address", "Open this address in a browser", OPAH_REPOSITORY_URL)
-                    }
-                },
-            )
-        }
-        showSettingsList("about", "About Opah", "Version ${displayedVersionName()}", rows)
+        val versionLabel = "Version ${displayedVersionName()}"
+        val surface = activeAbout ?: NativeAboutSurface(
+            activity, aboutText, versionLabel,
+            onOpenProject = {
+                runCatching {
+                    activity.startActivity(Intent(Intent.ACTION_VIEW, OPAH_REPOSITORY_URL.toUri()))
+                }.onFailure {
+                    showReadingDialog("Project address", "Open this address in a browser", OPAH_REPOSITORY_URL)
+                }
+            },
+            onNavigateOutLeft = { activeSettings?.focusSelectedCategory("settings:category:ABOUT") },
+        )
+        surface.update(aboutText, versionLabel)
+        showSettingsPane("About Opah", "Project information", emptyList(), state, detailContent = surface)
+        activeAbout = surface
     }
 
     private fun showLoading(state: Phase0UiState) {
         setNavigationVisible(false)
-        showList(
+        showWelcome(
             "system:loading",
             "Opah",
             state.statusMessage,
             listOf(info("system:loading:status", "Getting things ready", state.errorMessage ?: state.statusMessage)),
+            loading = true,
         )
     }
 
     private fun showRecovery(state: Phase0UiState) {
         setNavigationVisible(false)
-        showList(
+        showWelcome(
             "system:recovery",
-            "Reconnect to Frigate",
+            "Reconnect Opah",
             "The saved server could not be reached",
             listOf(
                 info("recovery:message", "Connection", state.errorMessage ?: "Try the saved connection again"),
@@ -3419,7 +3694,7 @@ internal class NativeOpahController(
     private fun showConnectionSetup(state: Phase0UiState) {
         setNavigationVisible(false)
         val profile = state.savedProfile
-        showList(
+        showWelcome(
             "system:setup",
             "Connect Opah",
             "Connect to your Frigate server",
@@ -3441,6 +3716,35 @@ internal class NativeOpahController(
         )
     }
 
+    private fun showWelcome(
+        surfaceKey: String,
+        title: String,
+        subtitle: String,
+        rows: List<NativeRowModel>,
+        loading: Boolean = false,
+    ) {
+        if (activeSurfaceKey == surfaceKey && activeWelcome != null) {
+            activeWelcome?.update(title, subtitle, rows, loading)
+            return
+        }
+        clearActiveSurface()
+        setContentInsets(fullScreen = true)
+        activeSurfaceKey = surfaceKey
+        val surface = NativeWelcomeSurface(
+            activity, title, subtitle, rows,
+            onActivate = { key -> handlers[key]?.invoke() },
+            onFocused = { key, view ->
+                focusMemory[route.focusMemoryKey] = key
+                root.rememberContentFocus(view)
+            },
+            loading = loading,
+        )
+        activeWelcome = surface
+        contentHost.removeAllViews()
+        contentHost.addView(surface, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        surface.post { if (!root.navigationOpen) surface.focusPrimaryAction() }
+    }
+
     private fun showCameraGroup(state: Phase0UiState) {
         val group = requireNotNull(state.cameraGroupView)
         val surfaceKey = "surface:group:${group.title}:${group.streams.joinToString { it.camera.name }}"
@@ -3452,6 +3756,7 @@ internal class NativeOpahController(
         val surface = NativeCameraGroupSurface(
             activity = activity,
             state = group,
+            imageLoadedAtMillis = { cameraName -> viewModel.cachedCameraImage(cameraName)?.loadedAtMillis },
             preferRtpTcp = state.settings.preferRtpTcp,
             cachedBitmap = { cameraName -> viewModel.cachedCameraImage(cameraName)?.bitmap },
             refreshBitmap = { cameraName, height ->
@@ -3484,6 +3789,7 @@ internal class NativeOpahController(
         val surface = NativeMonitorSurface(
             activity = activity,
             initialState = monitor,
+            imageLoadedAtMillis = { cameraName -> viewModel.cachedCameraImage(cameraName)?.loadedAtMillis },
             cachedBitmap = { cameraName -> viewModel.cachedCameraImage(cameraName)?.bitmap },
             refreshBitmap = { cameraName, height ->
                 viewModel.refreshCameraImage(cameraName, height).getOrNull()?.bitmap
@@ -3510,13 +3816,19 @@ internal class NativeOpahController(
         val surfaceKey = "playback:${request.liveCompatibilityRequestId ?: request.uri}:" +
             "${request.activityItemId}:${request.compatibilityTestVideoOnly}"
         val controls = playbackControls(state, request)
-        val actionMessage = state.review.playbackNavigationMessage
+        val actionMessage = state.review.actionErrorFor(request.activityItemId)?.message
+            ?: state.review.playbackNavigationMessage
             ?: state.liveActions.errorMessage
             ?: state.liveActions.message
             ?: state.review.savedClipMessage.takeIf { state.review.savedClipItemId == request.activityItemId }
             ?: state.history.savedMessage.takeIf { request.recordingSaveKey != null }
+        // Keep an unresolved write error readable instead of auto-hiding its recovery action.
+        val feedbackPending = state.review.actionErrorFor(request.activityItemId) != null ||
+            state.liveActions.recordingBusy || state.review.advancingPlayback ||
+            (request.activityItemId != null && state.review.savingClipItemId == request.activityItemId) ||
+            (request.recordingStartTime != null && state.history.savingSlotStartTime == request.recordingStartTime)
         if (activeSurfaceKey == surfaceKey && activePlayback != null) {
-            activePlayback?.updateControls(controls, actionMessage)
+            activePlayback?.updateControls(controls, actionMessage, feedbackPending)
             return
         }
         clearActiveSurface()
@@ -3558,6 +3870,7 @@ internal class NativeOpahController(
             diagnosticsEnabled = state.settings.diagnosticsEnabled,
             initialControls = controls,
             initialActionMessage = actionMessage,
+            initialFeedbackPending = feedbackPending,
             pictureInPictureAvailable = actions.pictureInPictureAvailable && !request.compatibilityTest,
             onEnterPictureInPicture = actions.onEnterPictureInPicture,
             onCompatibilityTestStatus = viewModel::reportPlaybackCompatibilityStatus,
@@ -3695,6 +4008,12 @@ internal class NativeOpahController(
             val activityItems = playbackItems(state)
             val activityItem = request.activityItemId?.let { id -> activityItems.firstOrNull { it.id == id } }
             activityItem?.let { item ->
+                state.review.actionErrorFor(item.id)?.takeIf { it.canRetry }?.let { failure ->
+                    controls += NativePlaybackControl("retry-activity", "Retry",
+                        enabled = !state.review.hasPendingWrite()) {
+                        retryReviewAction(item, failure)
+                    }
+                }
                 controls += NativePlaybackControl(
                     key = "reviewed",
                     label = when {
@@ -3702,7 +4021,7 @@ internal class NativeOpahController(
                         item.hasBeenReviewed -> "Mark unreviewed"
                         else -> "Mark reviewed"
                     },
-                    enabled = state.review.markingReviewedItemId == null,
+                    enabled = !state.review.hasPendingWrite(),
                     selected = item.hasBeenReviewed,
                 ) { viewModel.setReviewReviewed(item, !item.hasBeenReviewed) }
             }
@@ -3725,7 +4044,7 @@ internal class NativeOpahController(
                         saved -> "Recording saved"
                         else -> "Save recording"
                     },
-                    enabled = !saving && !saved,
+                    enabled = !saving && !saved && (activityItem == null || !state.review.hasPendingWrite()),
                     selected = saved,
                 ) {
                     runProtectedAction(PinScope.ADMINISTRATIVE_ACTIONS, "saving recordings") {
@@ -3817,7 +4136,10 @@ internal class NativeOpahController(
             page.findViewById<TextView>(R.id.native_page_subtitle).text = subtitle
         }
         currentListAdapter?.submitList(rows) {
-            if (recreate) requestRememberedOrFirstFocus(rows)
+            if (recreate) {
+                listScrollMemory[surfaceKey]?.let { currentRecyclerView?.layoutManager?.onRestoreInstanceState(it) }
+                currentRecyclerView?.doOnPreDraw { requestRememberedOrFirstFocus(rows) }
+            }
         }
     }
 
@@ -3828,7 +4150,6 @@ internal class NativeOpahController(
         rows: List<NativeRowModel>,
         detailTabs: List<NativeBrowserTab> = emptyList(),
     ) {
-        activeAppearance = null
         showSettingsPane(title, subtitle, rows, currentState, detailTabs)
     }
 
@@ -3840,6 +4161,11 @@ internal class NativeOpahController(
         detailTabs: List<NativeBrowserTab> = emptyList(),
         detailContent: View? = null,
     ) {
+        activeAppearance?.takeIf { it !== detailContent }?.let {
+            appearancePosition = it.capturePosition()
+            activeAppearance = null
+        }
+        if (activeAbout !== detailContent) activeAbout = null
         val selectedPage = when (route.settingsPage) {
             SettingsPage.PLAYBACK_TEST,
             SettingsPage.CAMERA_DIAGNOSTICS,
@@ -3883,6 +4209,7 @@ internal class NativeOpahController(
                 focusMemory[route.focusMemoryKey] = key
                 root.rememberContentFocus(view)
             },
+            initialPosition = settingsPosition,
         )
         activeSettings = surface
         contentHost.removeAllViews()
@@ -3895,11 +4222,15 @@ internal class NativeOpahController(
             ?: rows.firstOrNull { it.focusable }?.key
             ?: return
         currentRecyclerView?.post {
+            if (root.navigationOpen) return@post
             val adapter = currentListAdapter ?: return@post
             val position = rows.indexOfFirst { it.key == targetKey }
             if (position >= 0) {
+                val visible = currentRecyclerView?.findViewHolderForAdapterPosition(position)?.itemView
+                if (visible?.requestFocus() == true) return@post
                 currentRecyclerView?.scrollToPosition(position)
-                currentRecyclerView?.post {
+                currentRecyclerView?.doOnPreDraw {
+                    if (root.navigationOpen) return@doOnPreDraw
                     currentRecyclerView?.findViewHolderForAdapterPosition(position)?.itemView?.requestFocus()
                         ?: adapter.viewIdForKey(targetKey)?.let { id -> contentHost.findViewById<View>(id)?.requestFocus() }
                 }
@@ -3908,10 +4239,13 @@ internal class NativeOpahController(
     }
 
     private fun clearActiveSurface() {
+        captureSurfacePosition()
         activeHome?.close()
         activeHome = null
         activeSettings = null
         activeAppearance = null
+        activeAbout = null
+        activeWelcome = null
         activeBrowser = null
         activeMotionSearch?.close()
         activeMotionSearch = null
@@ -3928,15 +4262,26 @@ internal class NativeOpahController(
         activeSurfaceKey = null
     }
 
+    private fun captureSurfacePosition() {
+        activeHome?.let { homeBookmark = it.captureBookmark() }
+        activeSettings?.let { settingsPosition = it.capturePosition() }
+        activeAppearance?.let { appearancePosition = it.capturePosition() }
+        activeMotionSearch?.let { motionBookmark = it.captureBookmark() }
+        activeSurfaceKey?.let { key ->
+            activeBrowser?.let { browserBookmarks[key] = it.captureBookmark() }
+            currentRecyclerView?.layoutManager?.onSaveInstanceState()?.let { listScrollMemory[key] = it }
+        }
+    }
+
     private fun setContentInsets(fullScreen: Boolean) {
         val params = contentHost.layoutParams as FrameLayout.LayoutParams
-        params.marginStart = if (fullScreen) 0 else activity.dp(68)
+        params.marginStart = if (fullScreen) 0 else activity.dp(88)
         contentHost.layoutParams = params
         contentHost.setPadding(
             if (fullScreen) 0 else activity.dp(16),
-            if (fullScreen) 0 else activity.dp(16),
-            if (fullScreen) 0 else activity.dp(20),
-            if (fullScreen) 0 else activity.dp(16),
+            if (fullScreen) 0 else activity.dp(28),
+            if (fullScreen) 0 else activity.dp(36),
+            if (fullScreen) 0 else activity.dp(28),
         )
     }
 
@@ -3958,8 +4303,8 @@ internal class NativeOpahController(
                     bottomMargin = activity.dp(6)
                 }
                 setOnClickListener {
+                    root.closeNavigation(restoreContentFocus = true)
                     navigate(destination)
-                    root.closeNavigation(restoreContentFocus = false)
                 }
             }
             navViews[destination] = item
@@ -4000,8 +4345,9 @@ internal class NativeOpahController(
     }
 
     private fun styleRoot() {
-        root.setBackgroundColor(NativeTheme.palette.background)
-        navigationRail.setBackgroundColor(NativeTheme.palette.panel)
+        root.background = activity.nativeCanvasBackground()
+        navigationRail.background = activity.nativeGlassPanelBackground()
+        navigationAppearanceKey = null
         navViews.values.forEach { view ->
             view.setTextColor(NativeTheme.palette.text)
             view.background = activity.nativeFlatFocusableBackground()
@@ -4013,7 +4359,8 @@ internal class NativeOpahController(
     }
 
     private fun navigate(destination: NativeDestination) {
-        route = NativeRoute(destination)
+        destinationLocations[route.destination] = currentLocation()
+        applyLocation(destinationLocations[destination] ?: NativeLocation(NativeRoute(destination)))
         if (destination == NativeDestination.ACTIVITY) viewModel.loadReview()
         if (destination == NativeDestination.CLIPS) viewModel.loadExports()
         if (currentState.tvAlertPrivacyGateOpen) {
@@ -4030,26 +4377,25 @@ internal class NativeOpahController(
 
     private fun handleBack() {
         when {
+            root.navigationOpen -> root.closeNavigation()
             currentState.tvAlertPrivacyGateOpen -> viewModel.cancelTvAlertPrivacyGate()
-            currentState.playback != null -> viewModel.closePlayback()
-            currentState.monitorMode != null -> viewModel.closeMonitorMode()
-            currentState.cameraGroupView != null -> viewModel.closeCameraGroup()
+            currentState.playback != null -> if (activePlayback?.dismissPlaybackOsd() != true) viewModel.closePlayback()
+            currentState.monitorMode != null -> if (activeMonitor?.dismissPlaybackOsd() != true) viewModel.closeMonitorMode()
+            currentState.cameraGroupView != null -> if (activeCameraGroup?.dismissPlaybackOsd() != true) viewModel.closeCameraGroup()
             currentState.ptz.cameraName != null -> viewModel.closePtzControls()
-            route.destination == NativeDestination.ACTIVITY && activityPage != NativeActivityPage.NEW -> {
-                activityPage = NativeActivityPage.NEW
-                render(currentState)
-            }
-            route.destination == NativeDestination.SETTINGS && route.settingsPage != SettingsPage.MAIN -> {
-                val parent = when (route.settingsPage) {
-                    SettingsPage.PLAYBACK_TEST,
-                    SettingsPage.CAMERA_DIAGNOSTICS,
-                    -> SettingsPage.PLAYBACK
-                    else -> SettingsPage.MAIN
+            else -> {
+                val previous = navigationHistory.back()
+                if (previous != null) {
+                    applyLocation(previous)
+                    render(currentState)
+                } else if (route != NativeRoute()) {
+                    route = NativeRoute()
+                    navigationHistory.reset(currentLocation())
+                    render(currentState)
+                } else {
+                    actions.onExitRequested()
                 }
-                route = NativeRoute(NativeDestination.SETTINGS, parent)
-                render(currentState)
             }
-            else -> root.openNavigation()
         }
     }
 
@@ -4061,6 +4407,9 @@ internal class NativeOpahController(
     private fun updateNavigationAppearance(open: Boolean) {
         val activityCount = currentState.review.counts.unreviewedAlerts
         val activityChecking = currentState.review.countsLoading && !currentState.review.loadedOnce
+        val appearanceKey = "$open:$activityCount:$activityChecking:${currentState.appUpdate.updateAvailable}:${NativeTheme.palette.hashCode()}"
+        if (navigationAppearanceKey == appearanceKey) return
+        navigationAppearanceKey = appearanceKey
         val countLabel = when {
             activityChecking -> "…"
             activityCount > 99 -> "99+"
@@ -4132,7 +4481,12 @@ internal class NativeOpahController(
         if (!visible && root.navigationOpen) root.closeNavigation(restoreContentFocus = false)
     }
 
-    private fun reviewRow(prefix: String, item: ReviewItem, state: Phase0UiState): NativeRowModel {
+    private fun reviewRow(
+        prefix: String,
+        item: ReviewItem,
+        state: Phase0UiState,
+        visibleItemIds: List<String>,
+    ): NativeRowModel {
         val objectLabel = (item.objects + item.audio).distinct().take(3)
             .joinToString(", ") { it.replace('_', ' ').replaceFirstChar(Char::uppercase) }
             .ifBlank { "Camera activity" }
@@ -4148,7 +4502,11 @@ internal class NativeOpahController(
             if (item.recordingAvailable == false) "Details" else "Play",
             thumbnail = NativeThumbnailRequest(NativeThumbnailKind.REVIEW, item.id),
         ) {
-            if (item.recordingAvailable == false) viewModel.selectReviewItem(item) else viewModel.playReview(item)
+            if (item.recordingAvailable == false) {
+                viewModel.selectReviewItem(item)
+            } else {
+                viewModel.playReview(item, visibleActivityItemIds = visibleItemIds)
+            }
         }
     }
 
@@ -4207,7 +4565,7 @@ internal class NativeOpahController(
         onCancelled: () -> Unit = {},
         onComplete: (CharArray) -> Unit,
     ) {
-        val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val dialog = createDialog()
         val entered = StringBuilder()
         val value = TextView(activity).apply {
             textSize = 20f
@@ -4218,7 +4576,7 @@ internal class NativeOpahController(
         val column = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(activity.dp(20), activity.dp(16), activity.dp(20), activity.dp(16))
-            setBackgroundColor(NativeTheme.palette.panel)
+            background = activity.nativeGlassPanelBackground(strong = true)
             addView(TextView(activity).apply {
                 text = title
                 textSize = 21f
@@ -4331,7 +4689,7 @@ internal class NativeOpahController(
         }
         var minute = normalized % 60
         var afternoon = normalized / 60 >= 12
-        val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val dialog = createDialog()
         val selectedTime = TextView(activity).apply {
             textSize = 25f
             gravity = Gravity.CENTER
@@ -4403,7 +4761,7 @@ internal class NativeOpahController(
         val column = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(activity.dp(22), activity.dp(18), activity.dp(22), activity.dp(18))
-            setBackgroundColor(NativeTheme.palette.panel)
+            background = activity.nativeGlassPanelBackground(strong = true)
             addView(TextView(activity).apply {
                 text = title
                 textSize = 22f
@@ -4459,11 +4817,11 @@ internal class NativeOpahController(
         choices: List<Triple<String, String, String>>,
         onComplete: (String) -> Unit,
     ) {
-        val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val dialog = createDialog()
         val container = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(activity.dp(22), activity.dp(18), activity.dp(22), activity.dp(18))
-            setBackgroundColor(NativeTheme.palette.panel)
+            background = activity.nativeGlassPanelBackground(strong = true)
             addView(TextView(activity).apply {
                 text = title
                 textSize = 22f
@@ -4509,7 +4867,7 @@ internal class NativeOpahController(
     }
 
     private fun showReadingDialog(title: String, description: String, value: String) {
-        val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val dialog = createDialog()
         val body = buildList {
             value.takeIf(String::isNotBlank)?.let(::add)
             description.takeIf(String::isNotBlank)?.let(::add)
@@ -4559,7 +4917,7 @@ internal class NativeOpahController(
         val container = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(activity.dp(22), activity.dp(18), activity.dp(22), activity.dp(18))
-            setBackgroundColor(NativeTheme.palette.panel)
+            background = activity.nativeGlassPanelBackground(strong = true)
             addView(TextView(activity).apply {
                 text = title
                 textSize = 22f
@@ -4604,7 +4962,7 @@ internal class NativeOpahController(
         multiline: Boolean = false,
         onComplete: (String) -> Unit,
     ) {
-        val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val dialog = createDialog()
         val input = EditText(activity).apply {
             setText(initial)
             setSelection(text.length)
@@ -4635,7 +4993,7 @@ internal class NativeOpahController(
         val container = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(activity.dp(22), activity.dp(18), activity.dp(22), activity.dp(18))
-            setBackgroundColor(NativeTheme.palette.panel)
+            background = activity.nativeGlassPanelBackground(strong = true)
             addView(TextView(activity).apply {
                 text = title
                 textSize = 22f
@@ -4681,7 +5039,12 @@ internal class NativeOpahController(
         initialRtspHost: String,
         initialRtspPort: String,
     ) {
-        val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        var submission: ConnectionFormSubmission? = null
+        var clearPassword: (() -> Unit)? = null
+        val dialog = createDialog {
+            submission?.close()
+            clearPassword?.invoke()
+        }
         val initialAccountUsername = initialUsername.takeUnless {
             ConnectionProfileFactory.targetsUnauthenticatedFrigatePort(initialUrl)
         }.orEmpty()
@@ -4704,6 +5067,8 @@ internal class NativeOpahController(
             ),
             dialogTextField("8554", initialRtspPort, InputType.TYPE_CLASS_NUMBER),
         )
+        clearPassword = { fields[2].text?.clear() }
+        fields.forEachIndexed { index, field -> field.tag = "connection:field:$index" }
         fields.forEachIndexed { index, field ->
             field.imeOptions = if (index == 0 || index == 1 || index == 3) {
                 android.view.inputmethod.EditorInfo.IME_ACTION_NEXT
@@ -4822,10 +5187,50 @@ internal class NativeOpahController(
             overScrollMode = View.OVER_SCROLL_NEVER
             addView(form, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
+        val feedback = TextView(activity).apply {
+            tag = "connection:feedback"
+            textSize = 14f
+            setTextColor(NativeTheme.palette.text)
+            setPadding(0, activity.dp(4), 0, activity.dp(4))
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            visibility = View.GONE
+        }
+        val cancel = dialogButton("Cancel") { dialog.dismiss() }
+        lateinit var test: TextView
+        lateinit var connect: TextView
+        fun submit(testOnly: Boolean) {
+            submission?.submit(testOnly) { result ->
+                val arguments = fields.map { it.text.toString() }
+                if (testOnly) {
+                    viewModel.testConnection(arguments[0], arguments[1], arguments[2], arguments[3], arguments[4], result)
+                } else {
+                    viewModel.connect(arguments[0], arguments[1], arguments[2], arguments[3], arguments[4], result)
+                }
+            }
+        }
+        test = dialogButton("Test connection") { submit(testOnly = true) }.apply { tag = "connection:test" }
+        connect = dialogButton("Connect") { submit(testOnly = false) }.apply { tag = "connection:connect" }
+        var lastAction: View? = null
+        submission = ConnectionFormSubmission(
+            onStatus = { busy, message ->
+                if (busy) lastAction = dialog.currentFocus
+                fields.forEach { field -> field.isEnabled = !busy }
+                listOf(liveVideoChoice, test, connect).forEach { control ->
+                    control.isEnabled = !busy
+                    control.isFocusable = !busy
+                    control.alpha = if (busy) 0.5f else 1f
+                }
+                if (!busy) updateCredentialFields()
+                feedback.text = message
+                feedback.visibility = View.VISIBLE
+                if (busy) cancel.requestFocus() else lastAction?.requestFocus()
+            },
+            onConnected = { dialog.dismiss() },
+        )
         val column = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(activity.dp(22), activity.dp(18), activity.dp(22), activity.dp(18))
-            setBackgroundColor(NativeTheme.palette.panel)
+            background = activity.nativeGlassPanelBackground(strong = true)
             addView(TextView(activity).apply {
                 setText(R.string.native_frigate_connection)
                 textSize = 22f
@@ -4838,31 +5243,14 @@ internal class NativeOpahController(
                 setTextColor(NativeTheme.palette.secondaryText)
                 setPadding(0, activity.dp(3), 0, activity.dp(6))
             })
-            addView(formScroll, LinearLayout.LayoutParams(activity.dp(640), activity.dp(320)))
+            addView(feedback, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(formScroll, LinearLayout.LayoutParams(activity.dp(640), 0, 1f))
             addView(
                 LinearLayout(activity).apply {
                     gravity = Gravity.END
-                    addView(dialogButton("Cancel") { dialog.dismiss() })
-                    addView(dialogButton("Test connection") {
-                        dialog.dismiss()
-                        viewModel.testConnection(
-                            fields[0].text.toString(),
-                            fields[1].text.toString(),
-                            fields[2].text.toString(),
-                            fields[3].text.toString(),
-                            fields[4].text.toString(),
-                        )
-                    })
-                    addView(dialogButton("Connect") {
-                        dialog.dismiss()
-                        viewModel.connect(
-                            fields[0].text.toString(),
-                            fields[1].text.toString(),
-                            fields[2].text.toString(),
-                            fields[3].text.toString(),
-                            fields[4].text.toString(),
-                        )
-                    })
+                    addView(cancel)
+                    addView(test)
+                    addView(connect)
                 },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, activity.dp(58)).apply { topMargin = activity.dp(12) },
             )
@@ -4870,12 +5258,15 @@ internal class NativeOpahController(
         dialog.setContentView(column)
         dialog.window?.setBackgroundDrawable(Color.TRANSPARENT.toDrawable())
         dialog.show()
-        dialog.window?.setLayout(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            minOf(activity.dp(480), activity.resources.displayMetrics.heightPixels - activity.dp(48)),
+        )
         requestDialogKeyboard(dialog, fields.first())
     }
 
     private fun showRtspRouteDialog(initialHost: String, initialPort: String) {
-        val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val dialog = createDialog()
         val host = dialogTextField(
             "Optional",
             initialHost,
@@ -4885,7 +5276,7 @@ internal class NativeOpahController(
         val column = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(activity.dp(22), activity.dp(18), activity.dp(22), activity.dp(18))
-            setBackgroundColor(NativeTheme.palette.panel)
+            background = activity.nativeGlassPanelBackground(strong = true)
             addView(TextView(activity).apply {
                 setText(R.string.native_live_video_route)
                 textSize = 22f
@@ -5153,6 +5544,7 @@ internal class NativeOpahController(
         value: String,
         description: String = "Use left and right to change",
         indicatorColor: Int? = null,
+        adjustmentRange: NativeAdjustmentRange? = null,
         decrease: () -> Unit,
         increase: () -> Unit,
     ): NativeRowModel {
@@ -5164,6 +5556,7 @@ internal class NativeOpahController(
             description = description,
             value = value,
             kind = NativeRowKind.ADJUSTMENT,
+            adjustmentRange = adjustmentRange,
             enabled = interactionEnabled(key, true),
             indicatorColor = indicatorColor,
         )
@@ -5238,7 +5631,7 @@ internal class NativeOpahController(
     private fun initialRoute(destinationName: String?, settingsPageName: String?): NativeRoute {
         val destination = when (destinationName) {
             "REVIEW", "ACTIVITY" -> NativeDestination.ACTIVITY
-            "SAVED" -> NativeDestination.CLIPS
+            "SAVED", "CLIPS" -> NativeDestination.CLIPS
             "SETTINGS", "INFORMATION", "ABOUT" -> NativeDestination.SETTINGS
             else -> NativeDestination.HOME
         }

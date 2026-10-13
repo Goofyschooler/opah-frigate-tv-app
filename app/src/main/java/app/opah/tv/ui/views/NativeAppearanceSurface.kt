@@ -4,16 +4,20 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.GridLayout
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.core.view.isVisible
+import app.opah.tv.R
 import app.opah.tv.data.model.AppearanceMode
 import app.opah.tv.data.model.CustomThemeColors
 import app.opah.tv.data.model.HslColor
@@ -25,7 +29,10 @@ internal data class NativeAppearanceUiState(
     val reducedMotion: Boolean,
     val highContrast: Boolean,
     val subtleRoundedCorners: Boolean,
+    val reducedTransparency: Boolean = false,
 )
+
+internal data class NativeAppearancePosition(val focusedKey: String?, val scrollY: Int)
 
 private data class ThemePreset(
     val name: String,
@@ -42,7 +49,9 @@ internal class NativeAppearanceSurface(
     private val onHighContrast: (Boolean) -> Unit,
     private val onSubtleRoundedCorners: (Boolean) -> Unit,
     private val onFocused: (String, View) -> Unit,
+    private val onReducedTransparency: (Boolean) -> Unit = {},
 ) : LinearLayout(activity) {
+    private val labels = mutableListOf<TextView>()
     private val preview = NativeThemePreviewView(activity)
     private val modeChoices = linkedMapOf<AppearanceMode, NativeThemeSwatchView>()
     private val presetChoices = linkedMapOf<String, NativeThemeSwatchView>()
@@ -54,10 +63,23 @@ internal class NativeAppearanceSurface(
     private val backgroundBrightness = track("Background brightness") { direction -> adjustBackgroundBrightness(direction) }
     private val reduceMotion = toggle("Reduce motion") { onReducedMotion(!state.reducedMotion) }
     private val highContrast = toggle("High contrast") { onHighContrast(!state.highContrast) }
-    private val subtleCorners = toggle("Soft corners") {
+    private val reduceTransparency = toggle("Reduce transparency") { onReducedTransparency(!state.reducedTransparency) }
+    private val subtleCorners = toggle("Extra rounding") {
         onSubtleRoundedCorners(!state.subtleRoundedCorners)
+    }.apply {
+        // Keep the saved focus key valid for people returning to this preference.
+        tag = "appearance:toggle:soft-corners"
+        onFocusChangeListener = focusListener(tag as String)
     }
+
     private var state = initialState
+    private val customPanel = LinearLayout(activity).apply { orientation = VERTICAL }
+    private val editor = ScrollView(activity).apply {
+        isFocusable = false
+        clipToPadding = true
+        clipChildren = true
+        overScrollMode = View.OVER_SCROLL_NEVER
+    }
 
     private val presets = listOf(
         ThemePreset("Coral", CustomThemeColors(0xFFFF7048.toInt(), 0xFF07111F.toInt())),
@@ -70,105 +92,74 @@ internal class NativeAppearanceSurface(
 
     init {
         orientation = VERTICAL
-        setPadding(activity.dp(10), 0, 0, activity.dp(8))
-        addView(label("Choose a look", 14f, bold = true))
-        addView(
-            LinearLayout(activity).apply {
-                orientation = HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                AppearanceMode.entries.forEach { mode ->
-                    val choice = NativeThemeSwatchView(activity).apply {
-                        tag = "appearance:mode:${mode.name}"
-                        isFocusable = true
-                        isClickable = true
-                        contentDescription = "${modeLabel(mode)} theme"
-                        setOnClickListener { onMode(mode) }
-                        onFocusChangeListener = focusListener(tag as String)
-                    }
-                    modeChoices[mode] = choice
-                    addView(
-                        choice,
-                        LayoutParams(0, activity.dp(58), 1f).apply { marginEnd = activity.dp(5) },
-                    )
+        clipChildren = true
+        clipToPadding = true
+        val content = LinearLayout(activity).apply {
+            orientation = VERTICAL
+            setPadding(activity.dp(3), activity.dp(2), activity.dp(3), activity.dp(8))
+        }
+        content.addView(label("Choose a look", 16f, bold = true))
+        content.addView(LinearLayout(activity).apply {
+            orientation = HORIZONTAL
+            AppearanceMode.entries.forEach { mode ->
+                val choice = NativeThemeSwatchView(activity).apply {
+                    tag = "appearance:mode:" + mode.name
+                    isFocusable = true
+                    isClickable = true
+                    contentDescription = modeLabel(mode) + " theme"
+                    setOnClickListener { onMode(mode) }
+                    onFocusChangeListener = focusListener(tag as String)
                 }
-            },
-            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = activity.dp(4) },
-        )
-        addView(
-            LinearLayout(activity).apply {
-                orientation = HORIZONTAL
-                addView(
-                    LinearLayout(activity).apply {
-                        orientation = VERTICAL
-                        setPadding(0, activity.dp(8), activity.dp(9), 0)
-                        addView(label("Live preview", 13f, bold = true))
-                        addView(
-                            preview,
-                            LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = activity.dp(5) },
-                        )
-                        addView(
-                            LinearLayout(activity).apply {
-                                orientation = HORIZONTAL
-                                addView(reduceMotion, LayoutParams(0, activity.dp(40), 1f).apply { marginEnd = activity.dp(3) })
-                                addView(highContrast, LayoutParams(0, activity.dp(40), 1f).apply { marginEnd = activity.dp(3) })
-                                addView(subtleCorners, LayoutParams(0, activity.dp(40), 1f))
-                            },
-                            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = activity.dp(7) },
-                        )
-                    },
-                    LayoutParams(0, LayoutParams.MATCH_PARENT, 0.95f),
-                )
-                addView(
-                    ScrollView(activity).apply {
-                        isFocusable = false
-                        overScrollMode = View.OVER_SCROLL_NEVER
-                        addView(
-                            LinearLayout(activity).apply {
-                                orientation = VERTICAL
-                                setPadding(activity.dp(9), activity.dp(8), 0, activity.dp(12))
-                                addView(label("Tune the palette", 13f, bold = true))
-                                addView(accentHue)
-                                addView(accentStrength)
-                                addView(accentBrightness)
-                                addView(backgroundHue)
-                                addView(backgroundStrength)
-                                addView(backgroundBrightness)
-                                addView(label("Starting palettes", 13f, bold = true).apply {
-                                    setPadding(0, activity.dp(9), 0, activity.dp(4))
-                                })
-                                addView(
-                                    GridLayout(activity).apply {
-                                        columnCount = 3
-                                        presets.forEach { preset ->
-                                            val swatch = NativeThemeSwatchView(activity).apply {
-                                                tag = "appearance:preset:${preset.name.lowercase()}"
-                                                isFocusable = true
-                                                isClickable = true
-                                                contentDescription = "${preset.name} palette"
-                                                setOnClickListener { onColors(ThemeColorPolicy.sanitize(preset.colors)) }
-                                                onFocusChangeListener = focusListener(tag as String)
-                                            }
-                                            presetChoices[preset.name] = swatch
-                                            addView(
-                                                swatch,
-                                                GridLayout.LayoutParams().apply {
-                                                    width = 0
-                                                    height = activity.dp(46)
-                                                    columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
-                                                    setMargins(0, 0, activity.dp(5), activity.dp(5))
-                                                },
-                                            )
-                                        }
-                                    },
-                                )
-                            },
-                        )
-                    },
-                    LayoutParams(0, LayoutParams.MATCH_PARENT, 1.05f),
-                )
-            },
-            LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f),
-        )
+                modeChoices[mode] = choice
+                addView(choice, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = activity.dp(5) })
+            }
+        }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = activity.dp(5) })
+        content.addView(preview, LayoutParams(LayoutParams.MATCH_PARENT, activity.dp(116)).apply {
+            topMargin = activity.dp(8)
+            bottomMargin = activity.dp(8)
+        })
+        content.addView(label("Comfort and clarity", 16f, bold = true))
+        content.addView(GridLayout(activity).apply {
+            columnCount = 2
+            listOf(reduceMotion, highContrast, reduceTransparency, subtleCorners).forEachIndexed { index, control ->
+                addView(control, GridLayout.LayoutParams(GridLayout.spec(index / 2), GridLayout.spec(index % 2, 1f)).apply {
+                    width = 0
+                    height = LayoutParams.WRAP_CONTENT
+                    setMargins(0, activity.dp(6), activity.dp(5), 0)
+                })
+            }
+        })
+        customPanel.addView(label("Custom palette", 16f, bold = true).apply {
+            setPadding(0, activity.dp(10), 0, activity.dp(6))
+        })
+        customPanel.addView(GridLayout(activity).apply {
+            columnCount = 3
+            presets.forEachIndexed { index, preset ->
+                val swatch = NativeThemeSwatchView(activity).apply {
+                    tag = "appearance:preset:" + preset.name.lowercase()
+                    isFocusable = true
+                    isClickable = true
+                    contentDescription = preset.name + " palette"
+                    setOnClickListener { onColors(ThemeColorPolicy.sanitize(preset.colors)) }
+                    onFocusChangeListener = focusListener(tag as String)
+                }
+                presetChoices[preset.name] = swatch
+                addView(swatch, GridLayout.LayoutParams(GridLayout.spec(index / 3), GridLayout.spec(index % 3, 1f)).apply {
+                    width = 0
+                    height = LayoutParams.WRAP_CONTENT
+                    setMargins(0, 0, activity.dp(5), activity.dp(5))
+                })
+            }
+        })
+        customPanel.addView(label("Fine-tune colors", 16f, bold = true).apply {
+            setPadding(0, activity.dp(8), 0, activity.dp(5))
+        })
+        listOf(accentHue, accentStrength, accentBrightness, backgroundHue, backgroundStrength, backgroundBrightness).forEach {
+            customPanel.addView(it)
+        }
+        content.addView(customPanel)
+        editor.addView(content, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        addView(editor, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         update(initialState)
     }
 
@@ -193,28 +184,61 @@ internal class NativeAppearanceSurface(
         preview.show(NativeTheme.palette.focus, NativeTheme.palette.background)
         val accent = ThemeColorPolicy.toHsl(customAccent)
         val background = ThemeColorPolicy.toHsl(customBackground)
-        accentHue.show("Accent hue", "${accent.hue}°", hueColors(), accent.hue / 30)
-        accentStrength.show("Accent strength", "${accent.saturation}%", saturationColors(accent), accent.saturation / 10)
-        accentBrightness.show("Accent brightness", "${accent.lightness}%", lightnessColors(accent), accent.lightness / 10)
-        backgroundHue.show("Background hue", "${background.hue}°", hueColors(lightness = 28), background.hue / 30)
+        accentHue.show("Accent hue", "${accent.hue}°", hueColors(), accent.hue / 30, NativeAdjustmentRange(0f, 359f, accent.hue.toFloat(), wraps = true))
+        accentStrength.show("Accent strength", "${accent.saturation}%", saturationColors(accent), accent.saturation / 10, NativeAdjustmentRange(0f, 100f, accent.saturation.toFloat()))
+        accentBrightness.show("Accent brightness", "${accent.lightness}%", lightnessColors(accent), accent.lightness / 10, lightnessRange(accent.lightness))
+        backgroundHue.show("Background hue", "${background.hue}°", hueColors(lightness = 28), background.hue / 30, NativeAdjustmentRange(0f, 359f, background.hue.toFloat(), wraps = true))
         backgroundStrength.show(
             "Background strength",
             "${background.saturation}%",
             saturationColors(background),
             background.saturation / 10,
+            NativeAdjustmentRange(0f, 100f, background.saturation.toFloat()),
         )
         backgroundBrightness.show(
             "Background brightness",
             "${background.lightness}%",
             lightnessColors(background),
             background.lightness / 10,
+            lightnessRange(background.lightness),
         )
-        reduceMotion.text = if (state.reducedMotion) "✓  Reduce motion" else "Reduce motion"
+        reduceMotion.text = activity.getString(R.string.native_reduce_motion_state, activity.getString(if (state.reducedMotion) R.string.native_state_on else R.string.native_state_off))
         reduceMotion.isSelected = state.reducedMotion
-        highContrast.text = if (state.highContrast) "✓  High contrast" else "High contrast"
+        highContrast.text = activity.getString(R.string.native_high_contrast_state, activity.getString(if (state.highContrast) R.string.native_state_on else R.string.native_state_off))
         highContrast.isSelected = state.highContrast
-        subtleCorners.text = if (state.subtleRoundedCorners) "✓  Soft corners" else "Soft corners"
+        subtleCorners.text = activity.getString(R.string.native_extra_rounding_state, activity.getString(if (state.subtleRoundedCorners) R.string.native_state_on else R.string.native_state_off))
         subtleCorners.isSelected = state.subtleRoundedCorners
+        reduceTransparency.text = activity.getString(R.string.native_reduce_transparency_state, activity.getString(if (state.reducedTransparency) R.string.native_state_on else R.string.native_state_off))
+        reduceTransparency.isSelected = state.reducedTransparency
+        customPanel.isVisible = state.mode == AppearanceMode.CUSTOM
+        refreshTheme()
+    }
+
+    fun refreshTheme() {
+        labels.forEach { it.setTextColor(NativeTheme.palette.text) }
+        listOf(reduceMotion, highContrast, reduceTransparency, subtleCorners).forEach {
+            it.setTextColor(NativeTheme.palette.text)
+            it.background = activity.nativeFlatFocusableBackground()
+            it.contentDescription = it.text.toString().replace("   ", ", ")
+        }
+        modeChoices.values.forEach { it.refreshTheme() }
+        presetChoices.values.forEach { it.refreshTheme() }
+        listOf(accentHue, accentStrength, accentBrightness, backgroundHue, backgroundStrength, backgroundBrightness).forEach {
+            it.refreshTheme()
+        }
+        preview.show(NativeTheme.palette.focus, NativeTheme.palette.background)
+    }
+
+    fun capturePosition() = NativeAppearancePosition(findFocus()?.tag as? String, editor.scrollY)
+
+    private fun lightnessRange(value: Int) = NativeAdjustmentRange(minOf(5, value).toFloat(), maxOf(95, value).toFloat(), value.toFloat())
+
+    fun restorePosition(position: NativeAppearancePosition) {
+        editor.post {
+            position.focusedKey?.let { findViewWithTag<View>(it) }
+                ?.takeIf { it.isShown && it.isFocusable && it.isEnabled }?.requestFocus()
+            editor.scrollTo(0, position.scrollY.coerceAtLeast(0))
+        }
     }
 
     private fun adjustAccentHue(direction: Int) = onColors(
@@ -245,13 +269,16 @@ internal class NativeAppearanceSurface(
         tag = "appearance:track:${label.lowercase().replace(' ', '-')}"
         setAdjustmentListener(onAdjust)
         onFocusChangeListener = focusListener(tag as String)
-        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, activity.dp(43)).apply { topMargin = activity.dp(3) }
+        layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = activity.dp(5) }
     }
 
     private fun toggle(label: String, onClick: () -> Unit) = TextView(activity).apply {
         text = label
-        textSize = 12f
-        gravity = Gravity.CENTER
+        textSize = 14f
+        gravity = Gravity.CENTER_VERTICAL
+        minHeight = activity.dp(44)
+        maxLines = 2
+        setPadding(activity.dp(10), activity.dp(6), activity.dp(10), activity.dp(6))
         setTextColor(NativeTheme.palette.text)
         background = activity.nativeFlatFocusableBackground()
         isFocusable = true
@@ -259,6 +286,15 @@ internal class NativeAppearanceSurface(
         tag = "appearance:toggle:${label.lowercase().replace(' ', '-')}"
         setOnClickListener { onClick() }
         onFocusChangeListener = focusListener(tag as String)
+        accessibilityDelegate = object : View.AccessibilityDelegate() {
+            override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                info.className = "android.widget.Switch"
+                info.isCheckable = true
+                @Suppress("DEPRECATION")
+                info.isChecked = host.isSelected
+            }
+        }
     }
 
     private fun focusListener(key: String) = OnFocusChangeListener { view, focused ->
@@ -271,19 +307,22 @@ internal class NativeAppearanceSurface(
         textSize = size
         setTextColor(NativeTheme.palette.text)
         if (bold) setTypeface(typeface, Typeface.BOLD)
+        labels.add(this)
     }
 
     private fun modeLabel(mode: AppearanceMode): String = when (mode) {
-        AppearanceMode.SYSTEM -> "TV default"
+        AppearanceMode.SYSTEM -> "System"
         AppearanceMode.DARK -> "Dark"
         AppearanceMode.LIGHT -> "Light"
         AppearanceMode.CUSTOM -> "Custom"
     }
 
     private fun modeSample(mode: AppearanceMode, custom: CustomThemeColors): CustomThemeColors = when (mode) {
-        AppearanceMode.SYSTEM -> CustomThemeColors(0xFFFF7048.toInt(), 0xFF152235.toInt())
-        AppearanceMode.DARK -> CustomThemeColors(0xFFFF7048.toInt(), 0xFF07111F.toInt())
-        AppearanceMode.LIGHT -> CustomThemeColors(0xFF1565C0.toInt(), 0xFFF3F6FA.toInt())
+        AppearanceMode.SYSTEM -> if (
+            resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK == android.content.res.Configuration.UI_MODE_NIGHT_YES
+        ) CustomThemeColors(0xFFFF7048.toInt(), 0xFF101319.toInt()) else CustomThemeColors(0xFFD94B25.toInt(), 0xFFF2F4F7.toInt())
+        AppearanceMode.DARK -> CustomThemeColors(0xFFFF7048.toInt(), 0xFF101319.toInt())
+        AppearanceMode.LIGHT -> CustomThemeColors(0xFFD94B25.toInt(), 0xFFF2F4F7.toInt())
         AppearanceMode.CUSTOM -> custom
     }
 
@@ -300,67 +339,96 @@ internal class NativeAppearanceSurface(
     }
 }
 
-private class NativeThemeSwatchView(context: Context) : View(context) {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val bounds = RectF()
-    private var label = ""
-    private var backgroundColor = NativeTheme.palette.background
-    private var accentColor = NativeTheme.palette.focus
-    private var chosen = false
-
-    fun show(label: String, background: Int, accent: Int, selected: Boolean) {
-        this.label = label
-        backgroundColor = background
-        accentColor = accent
-        chosen = selected
-        invalidate()
+private class NativeThemeSwatchView(context: Context) : LinearLayout(context) {
+    private val sample = View(context)
+    private val labelView = TextView(context).apply {
+        textSize = 14f
+        setTypeface(typeface, Typeface.BOLD)
+        maxLines = 2
+        gravity = Gravity.CENTER
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
     }
 
-    override fun onDraw(canvas: Canvas) {
-        bounds.set(1f, 1f, width - 1f, height - 1f)
-        val radius = if (NativeTheme.subtleRoundedCorners) context.dp(4).toFloat() else 0f
-        paint.style = Paint.Style.FILL
-        paint.color = backgroundColor
-        canvas.drawRoundRect(bounds, radius, radius, paint)
-        paint.color = accentColor
-        canvas.drawRect(1f, height - context.dp(7).toFloat(), width - 1f, height - 1f, paint)
-        paint.color = ThemeColorPolicy.readableForeground(backgroundColor)
-        paint.textSize = context.dp(13).toFloat()
-        paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        canvas.drawText(label, context.dp(9).toFloat(), height / 2f + context.dp(4), paint)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = context.dp(if (hasFocus()) 3 else if (chosen) 2 else 1).toFloat()
-        paint.color = if (hasFocus()) NativeTheme.palette.focus else if (chosen) accentColor else NativeTheme.palette.divider
-        canvas.drawRoundRect(bounds, radius, radius, paint)
+    init {
+        orientation = VERTICAL
+        setPadding(context.dp(7), context.dp(7), context.dp(7), context.dp(7))
+        minimumHeight = context.dp(64)
+        addView(sample, LayoutParams(LayoutParams.MATCH_PARENT, context.dp(17)).apply { bottomMargin = context.dp(5) })
+        addView(labelView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+    }
+
+    fun show(label: String, background: Int, accent: Int, selected: Boolean) {
+        labelView.text = label
+        isSelected = selected
+        sample.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(background, background, accent)).apply {
+            cornerRadius = context.dp(5).toFloat()
+            setStroke(context.dp(1), NativeTheme.palette.divider)
+        }
+        contentDescription = label + if (selected) ", selected" else ", not selected"
+        refreshTheme()
+    }
+
+    fun refreshTheme() {
+        background = context.nativeFlatFocusableBackground()
+        labelView.setTextColor(NativeTheme.palette.text)
+    }
+
+    override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(info)
+        info.className = "android.widget.RadioButton"
+        info.isCheckable = true
+        @Suppress("DEPRECATION")
+        info.isChecked = isSelected
     }
 }
 
-private class NativeColorTrackView(context: Context) : View(context) {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private var label = ""
-    private var value = ""
-    private var colors = intArrayOf(NativeTheme.palette.focus)
-    private var selectedIndex = 0
+private class NativeColorTrackView(context: Context) : LinearLayout(context) {
+    private val labelView = TextView(context).apply {
+        textSize = 14f
+        setTypeface(typeface, Typeface.BOLD)
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+    private val valueView = TextView(context).apply {
+        textSize = 13f
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+    private val ramp = NativeColorRampView(context)
     private var onAdjust: (Int) -> Unit = {}
+    private var fraction = 0f
+    private var adjustmentRange = NativeAdjustmentRange(0f, 1f, 0f)
 
     init {
+        orientation = VERTICAL
         isFocusable = true
         isClickable = true
-        contentDescription = "Color adjustment"
+        descendantFocusability = FOCUS_BLOCK_DESCENDANTS
+        setPadding(context.dp(12), context.dp(9), context.dp(12), context.dp(10))
+        addView(LinearLayout(context).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(labelView, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+            addView(valueView, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply { marginStart = context.dp(10) })
+        })
+        addView(ramp, LayoutParams(LayoutParams.MATCH_PARENT, context.dp(14)).apply { topMargin = context.dp(7) })
         setOnClickListener { onAdjust(1) }
+        refreshTheme()
     }
 
-    fun setAdjustmentListener(listener: (Int) -> Unit) {
-        onAdjust = listener
+    fun setAdjustmentListener(listener: (Int) -> Unit) { onAdjust = listener }
+
+    fun show(label: String, value: String, colors: IntArray, selectedIndex: Int, range: NativeAdjustmentRange) {
+        adjustmentRange = range
+        labelView.text = label
+        valueView.text = value
+        fraction = if (colors.size > 1) selectedIndex.coerceIn(colors.indices).toFloat() / (colors.size - 1) else 0f
+        ramp.show(colors, fraction)
+        contentDescription = label + ", " + value + ", use left and right to change"
     }
 
-    fun show(label: String, value: String, colors: IntArray, selectedIndex: Int) {
-        this.label = label
-        this.value = value
-        this.colors = colors
-        this.selectedIndex = selectedIndex.coerceIn(colors.indices)
-        contentDescription = "$label, $value, use left and right to change"
-        invalidate()
+    fun refreshTheme() {
+        background = context.nativeFlatFocusableBackground()
+        labelView.setTextColor(NativeTheme.palette.text)
+        valueView.setTextColor(NativeTheme.palette.secondaryText)
+        ramp.invalidate()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean = when (keyCode) {
@@ -369,38 +437,50 @@ private class NativeColorTrackView(context: Context) : View(context) {
         else -> super.onKeyDown(keyCode, event)
     }
 
+    override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(info)
+        info.className = "android.widget.SeekBar"
+        info.rangeInfo = AccessibilityNodeInfo.RangeInfo.obtain(AccessibilityNodeInfo.RangeInfo.RANGE_TYPE_FLOAT, adjustmentRange.minimum, adjustmentRange.maximum, adjustmentRange.current)
+        if (isEnabled && adjustmentRange.canAdjust(1)) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
+        if (isEnabled && adjustmentRange.canAdjust(-1)) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
+    }
+
+    override fun performAccessibilityAction(action: Int, arguments: android.os.Bundle?): Boolean = when (action) {
+        AccessibilityNodeInfo.ACTION_SCROLL_FORWARD -> adjustAccessibly(1)
+        AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> adjustAccessibly(-1)
+        else -> super.performAccessibilityAction(action, arguments)
+    }
+
+    private fun adjustAccessibly(direction: Int): Boolean {
+        if (!isEnabled || !adjustmentRange.canAdjust(direction)) return false
+        onAdjust(direction)
+        return true
+    }
+}
+
+private class NativeColorRampView(context: Context) : View(context) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var colors = intArrayOf(NativeTheme.palette.focus)
+    private var fraction = 0f
+
+    init { importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO }
+
+    fun show(colors: IntArray, fraction: Float) {
+        this.colors = colors
+        this.fraction = fraction
+        invalidate()
+    }
+
     override fun onDraw(canvas: Canvas) {
-        val trackLeft = (width * 0.43f).coerceAtLeast(context.dp(150).toFloat())
-        val trackRight = (width - context.dp(46)).toFloat()
-        val trackTop = context.dp(20).toFloat()
-        val segmentWidth = (trackRight - trackLeft) / colors.size
-        paint.style = Paint.Style.FILL
+        val inset = context.dp(4).toFloat()
+        val available = (width - inset * 2).coerceAtLeast(0f)
         colors.forEachIndexed { index, color ->
             paint.color = color
-            canvas.drawRect(
-                trackLeft + index * segmentWidth,
-                trackTop,
-                trackLeft + (index + 1) * segmentWidth + 1,
-                trackTop + context.dp(11),
-                paint,
-            )
+            canvas.drawRect(inset + available * index / colors.size, height * 0.25f, inset + available * (index + 1) / colors.size, height * 0.75f, paint)
         }
-        val markerX = trackLeft + (selectedIndex + 0.5f) * segmentWidth
         paint.color = NativeTheme.palette.text
-        canvas.drawRect(markerX - 2, trackTop - context.dp(3), markerX + 2, trackTop + context.dp(14), paint)
-        paint.textSize = context.dp(12).toFloat()
-        paint.typeface = Typeface.DEFAULT_BOLD
-        paint.color = NativeTheme.palette.text
-        canvas.drawText(label, context.dp(8).toFloat(), context.dp(27).toFloat(), paint)
-        paint.textSize = context.dp(11).toFloat()
-        paint.color = NativeTheme.palette.secondaryText
-        canvas.drawText(value, trackRight + context.dp(7), context.dp(27).toFloat(), paint)
-        if (hasFocus()) {
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = context.dp(2).toFloat()
-            paint.color = NativeTheme.palette.focus
-            val radius = if (NativeTheme.subtleRoundedCorners) context.dp(4).toFloat() else 0f
-            canvas.drawRoundRect(1f, 1f, width - 1f, height - 1f, radius, radius, paint)
-        }
+        canvas.drawCircle(inset + fraction * available, height / 2f, height * 0.4f, paint)
+        paint.color = NativeTheme.palette.background
+        canvas.drawCircle(inset + fraction * available, height / 2f, height * 0.18f, paint)
     }
 }

@@ -16,6 +16,8 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -34,6 +36,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -54,6 +58,7 @@ internal class NativeMonitorSurface(
     private val onAudioEnabled: (Boolean) -> Unit,
     private val onExitMinutes: (Int?) -> Unit,
     private val onBack: () -> Unit,
+    private val imageLoadedAtMillis: (String) -> Long? = { null },
 ) : FrameLayout(activity) {
     private val application = activity.application as OpahApplication
     private val visualHost = FrameLayout(activity)
@@ -64,6 +69,8 @@ internal class NativeMonitorSurface(
     private val controlsScroller = HorizontalScrollView(activity)
     private val presetButtons = linkedMapOf<MonitorPreset, TextView>()
     private val cameraLabels = mutableListOf<View>()
+    private val previewBindings = mutableMapOf<String, MonitorPreviewBinding>()
+    private val recoveryStatus = statusLabel("").apply { visibility = View.GONE }
     private val audioButton: TextView
     private val awakeButton: TextView
     private val exitButton: TextView
@@ -72,22 +79,32 @@ internal class NativeMonitorSurface(
     private var visualJob: Job? = null
     private var chromeHideJob: Job? = null
     private var chromeVisible = true
+    private var revealKeyCode: Int? = null
+    private var heldKeyCode: Int? = null
+    private var lastControlKey: String? = null
+    private var closed = false
 
     init {
         setBackgroundColor(Color.BLACK)
         isFocusable = true
         addView(visualHost, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        addView(recoveryStatus, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END).apply {
+            topMargin = activity.dp(28)
+            rightMargin = activity.dp(32)
+        })
         header.apply {
             orientation = LinearLayout.VERTICAL
             setPadding(activity.dp(12), activity.dp(8), activity.dp(12), activity.dp(8))
-            setBackgroundColor(0xB8000000.toInt())
+            background = activity.nativeGlassOverlayBackground()
             this@NativeMonitorSurface.title.apply {
                 textSize = 20f
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
                 setTextColor(Color.WHITE)
                 setTypeface(typeface, Typeface.BOLD)
             }
             this@NativeMonitorSurface.status.apply {
-                textSize = 13f
+                textSize = 15f
                 setTextColor(0xFFD5DFEC.toInt())
             }
             addView(this@NativeMonitorSurface.title)
@@ -96,14 +113,14 @@ internal class NativeMonitorSurface(
         addView(
             header,
             LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START).apply {
-                leftMargin = activity.dp(16)
-                topMargin = activity.dp(14)
+                leftMargin = activity.dp(32)
+                topMargin = activity.dp(28)
             },
         )
         controls.orientation = LinearLayout.HORIZONTAL
         controls.gravity = Gravity.CENTER_VERTICAL
         controls.setPadding(activity.dp(12), activity.dp(6), activity.dp(12), activity.dp(6))
-        controls.setBackgroundColor(0xD9000000.toInt())
+        controls.background = activity.nativeGlassOverlayBackground()
         controls.addView(controlButton("Exit", R.drawable.ic_chevron_left, onBack))
         controls.addView(panelLabel("View"))
         MonitorPreset.entries.forEach { preset ->
@@ -114,19 +131,27 @@ internal class NativeMonitorSurface(
         controls.addView(divider())
         audioButton = controlButton("", R.drawable.ic_volume_off) { onAudioEnabled(!state.audioEnabled) }
         awakeButton = controlButton("") { onKeepScreenAwake(!state.keepScreenAwake) }
-        exitButton = controlButton("") { onExitMinutes(nextExitMinutes(state.exitAfterMinutes)) }
+        exitButton = controlButton("") { onExitMinutes(nextNativeMonitorExitMinutes(state.exitAfterMinutes)) }
+        audioButton.tag = "monitor:control:audio"
+        awakeButton.tag = "monitor:control:awake"
+        exitButton.tag = "monitor:control:timer"
         controls.addView(audioButton)
         controls.addView(awakeButton)
         controls.addView(exitButton)
         controlsScroller.apply {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
-            isFillViewport = true
+            isFillViewport = false
+            clipToPadding = false
             addView(controls, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
         }
         addView(
             controlsScroller,
-            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM),
+            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                leftMargin = activity.dp(32)
+                rightMargin = activity.dp(32)
+                bottomMargin = activity.dp(24)
+            },
         )
         update(initialState)
         controls.post {
@@ -140,6 +165,8 @@ internal class NativeMonitorSurface(
         keepScreenOn = updated.keepScreenAwake
         title.text = updated.title
         status.text = monitorStatus(updated)
+        recoveryStatus.text = "Reconnecting · Showing previews"
+        recoveryStatus.visibility = if (updated.arbitration.phase == MonitorPhase.RECOVERING) View.VISIBLE else View.GONE
         presetButtons.forEach { (preset, button) -> button.isSelected = preset == updated.preset }
         audioButton.text = if (updated.audioEnabled) "Audio on" else "Audio off"
         audioButton.setCompoundDrawablesRelativeWithIntrinsicBounds(
@@ -170,9 +197,11 @@ internal class NativeMonitorSurface(
             else -> "grid:${visible.joinToString { it.name }}"
         }
         if (nextVisualKey == visualKey) return
+        val focusedTileKey = visualHost.findFocus()?.tag as? String
         visualKey = nextVisualKey
         visualJob?.cancel()
         visualJob = null
+        clearPreviewBindings()
         visualHost.removeAllViews()
         cameraLabels.clear()
         when {
@@ -185,26 +214,60 @@ internal class NativeMonitorSurface(
                 LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER),
             )
         }
+        if (focusedTileKey != null && chromeVisible) post {
+            if (closed) return@post
+            val restored = visualHost.findViewWithTag<View>(focusedTileKey)
+            if (restored?.isFocusable == true) restored.requestFocus()
+            else presetButtons[state.preset]?.requestFocus()
+        }
     }
 
     fun close() {
+        closed = true
         chromeHideJob?.cancel()
         chromeHideJob = null
         visualJob?.cancel()
         visualJob = null
+        clearPreviewBindings()
         keepScreenOn = false
     }
 
+    fun dismissPlaybackOsd(): Boolean {
+        if (closed || !chromeVisible) return false
+        chromeHideJob?.cancel()
+        chromeHideJob = null
+        heldKeyCode = null
+        revealKeyCode = null
+        hideChrome(force = true)
+        return true
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.action == KeyEvent.ACTION_DOWN) {
-            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-                onBack()
-                return true
+        if (closed) return true
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
+                !event.isCanceled && !dismissPlaybackOsd()
+            ) onBack()
+            return true
+        }
+        if (event.keyCode == revealKeyCode) {
+            if (event.action == KeyEvent.ACTION_UP) {
+                revealKeyCode = null
+                heldKeyCode = null
+                scheduleChromeHide()
             }
-            if (!chromeVisible) {
+            return true
+        }
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            heldKeyCode = event.keyCode
+            chromeHideJob?.cancel()
+            if (!chromeVisible && event.keyCode in REVEAL_KEYS) {
+                revealKeyCode = event.keyCode
                 showChrome(requestFocus = true)
                 return true
             }
+        } else if (event.action == KeyEvent.ACTION_UP) {
+            heldKeyCode = null
             scheduleChromeHide()
         }
         return super.dispatchKeyEvent(event)
@@ -218,6 +281,11 @@ internal class NativeMonitorSurface(
             setBackgroundColor(Color.BLACK)
         }
         visualHost.addView(playerView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        val playbackStatus = statusLabel("Connecting").apply { tag = "monitor:live-status" }
+        visualHost.addView(playbackStatus, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.END).apply {
+            bottomMargin = activity.dp(80)
+            rightMargin = activity.dp(24)
+        })
         visualJob = activity.lifecycleScope.launch {
             val session = try {
                 application.container.singleLivePlaybackCoordinator.open(
@@ -232,6 +300,7 @@ internal class NativeMonitorSurface(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
+                playbackStatus.text = "Camera unavailable"
                 onPlaybackFailed()
                 return@launch
             }
@@ -243,9 +312,19 @@ internal class NativeMonitorSurface(
                         is PlaybackCompatibilityState.Verified,
                         is PlaybackCompatibilityState.UnpersistedLive,
                         is PlaybackCompatibilityState.Persisting,
-                        -> if (!readyReported) {
-                            readyReported = true
-                            onPlaybackReady()
+                        -> {
+                            playbackStatus.visibility = View.GONE
+                            if (!readyReported) {
+                                readyReported = true
+                                onPlaybackReady()
+                            }
+                        }
+                        is PlaybackCompatibilityState.Recovering,
+                        is PlaybackCompatibilityState.Attempting,
+                        is PlaybackCompatibilityState.Releasing,
+                        -> {
+                            playbackStatus.text = if (readyReported) "Reconnecting" else "Connecting"
+                            playbackStatus.visibility = View.VISIBLE
                         }
                         is PlaybackCompatibilityState.Finished -> if (
                             playback.result !is PlaybackResult.VerifiedLive &&
@@ -254,6 +333,8 @@ internal class NativeMonitorSurface(
                             !failureReported
                         ) {
                             failureReported = true
+                            playbackStatus.text = "Camera unavailable"
+                            playbackStatus.visibility = View.VISIBLE
                             onPlaybackFailed()
                         }
                         else -> Unit
@@ -266,8 +347,9 @@ internal class NativeMonitorSurface(
     }
 
     private fun showSnapshot(camera: Camera) {
-        val image = snapshotView(camera.name)
-        visualHost.addView(image, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        val host = FrameLayout(activity)
+        visualHost.addView(host, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        addPreview(host, camera, MONITOR_SNAPSHOT_HEIGHT)
         val cameraLabel = statusLabel(camera.displayName).apply {
             visibility = if (chromeVisible) View.GONE else View.VISIBLE
         }
@@ -279,12 +361,6 @@ internal class NativeMonitorSurface(
                 bottomMargin = activity.dp(16)
             },
         )
-        visualJob = activity.lifecycleScope.launch {
-            while (isActive) {
-                refreshBitmap(camera.name, MONITOR_SNAPSHOT_HEIGHT)?.let(image::setImageBitmap)
-                delay(SNAPSHOT_REFRESH_MILLIS)
-            }
-        }
     }
 
     private fun showGrid(cameras: List<Camera>) {
@@ -299,24 +375,15 @@ internal class NativeMonitorSurface(
             rows.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         }
         visualHost.addView(rows, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        visualJob = activity.lifecycleScope.launch {
-            while (isActive) {
-                shown.forEach { camera ->
-                    rows.findViewWithTag<ImageView>("monitor:image:${camera.name}")
-                        ?.let { image -> refreshBitmap(camera.name, MONITOR_GRID_HEIGHT)?.let(image::setImageBitmap) }
-                }
-                delay(SNAPSHOT_REFRESH_MILLIS)
-            }
-        }
     }
 
     private fun cameraTile(camera: Camera): View = FrameLayout(activity).apply {
         tag = "monitor:tile:${camera.name}"
         isFocusable = true
         isClickable = true
-        background = activity.nativeFlatOverlayFocusableBackground()
+        foreground = activity.nativeFlatScrollRegionBackground()
         setPadding(activity.dp(2), activity.dp(2), activity.dp(2), activity.dp(2))
-        addView(snapshotView(camera.name), LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        addPreview(this, camera, MONITOR_GRID_HEIGHT)
         val cameraLabel = statusLabel(camera.displayName).apply {
             visibility = if (chromeVisible) View.GONE else View.VISIBLE
         }
@@ -329,14 +396,83 @@ internal class NativeMonitorSurface(
             },
         )
         setOnClickListener { onManualCamera(camera.name) }
+        onFocusChangeListener = View.OnFocusChangeListener { _, focused ->
+            cameraLabel.visibility = if (focused || !chromeVisible) View.VISIBLE else View.GONE
+        }
     }
 
-    private fun snapshotView(cameraName: String): ImageView = ImageView(activity).apply {
-        tag = "monitor:image:$cameraName"
-        scaleType = ImageView.ScaleType.CENTER_CROP
-        setBackgroundColor(NativeTheme.palette.panel)
-        cachedBitmap(cameraName)?.let(::setImageBitmap)
+    private fun addPreview(host: FrameLayout, camera: Camera, height: Int) {
+        val cached = cachedBitmap(camera.name)
+        val image = ImageView(activity).apply {
+            tag = "monitor:image:${camera.name}"
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setBackgroundColor(NativeTheme.palette.panel)
+            cached?.let(::setImageBitmap)
+        }
+        host.addView(image, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        val badge = statusLabel(cameraPreviewStatus(imageLoadedAtMillis(camera.name), cached != null, false)).apply {
+            tag = "monitor:preview-status:${camera.name}"
+        }
+        host.addView(badge, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END).apply {
+            topMargin = activity.dp(8)
+            rightMargin = activity.dp(8)
+        })
+        val retry = controlButton("Retry preview", R.drawable.ic_retry) {
+            previewBindings[camera.name]?.let(::startPreview)
+        }.apply {
+            tag = "monitor:retry:${camera.name}"
+            contentDescription = "Retry ${camera.displayName} preview"
+            visibility = View.GONE
+        }
+        host.addView(retry, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        val binding = MonitorPreviewBinding(camera, image, badge, retry, height, imageLoadedAtMillis(camera.name), cached != null)
+        previewBindings[camera.name] = binding
+        startPreview(binding)
     }
+
+    private fun startPreview(binding: MonitorPreviewBinding) {
+        binding.job?.cancel()
+        binding.job = activity.lifecycleScope.launch {
+            activity.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                while (isActive && !closed && previewBindings[binding.camera.name] === binding) {
+                    val bitmap = try { refreshBitmap(binding.camera.name, binding.height) }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { null }
+                    currentCoroutineContext().ensureActive()
+                    if (closed || previewBindings[binding.camera.name] !== binding) return@repeatOnLifecycle
+                    if (bitmap != null) {
+                        binding.image.setImageBitmap(bitmap)
+                        binding.hasImage = true
+                        binding.loadedAtMillis = imageLoadedAtMillis(binding.camera.name) ?: System.currentTimeMillis()
+                    }
+                    binding.badge.text = cameraPreviewStatus(binding.loadedAtMillis, binding.hasImage, bitmap == null)
+                    val hadRetryFocus = binding.retry.hasFocus()
+                    binding.retry.visibility = if (bitmap == null) View.VISIBLE else View.GONE
+                    if (hadRetryFocus && bitmap != null) {
+                        val tile = binding.image.parent as? View
+                        if (tile?.isFocusable == true) tile.requestFocus() else presetButtons[state.preset]?.requestFocus()
+                    }
+                    delay(SNAPSHOT_REFRESH_MILLIS)
+                }
+            }
+        }
+    }
+
+    private fun clearPreviewBindings() {
+        previewBindings.values.forEach { it.job?.cancel() }
+        previewBindings.clear()
+    }
+
+    private data class MonitorPreviewBinding(
+        val camera: Camera,
+        val image: ImageView,
+        val badge: TextView,
+        val retry: TextView,
+        val height: Int,
+        var loadedAtMillis: Long?,
+        var hasImage: Boolean,
+        var job: Job? = null,
+    )
 
     private fun monitorStatus(value: MonitorModeUiState): String {
         val promoted = value.arbitration.promotion?.cameraId
@@ -358,7 +494,8 @@ internal class NativeMonitorSurface(
         action: () -> Unit,
     ): TextView = TextView(activity).apply {
         text = label
-        textSize = 13f
+        tag = "monitor:control:$label"
+        textSize = 15f
         gravity = Gravity.CENTER
         setTextColor(Color.WHITE)
         maxLines = 1
@@ -380,6 +517,10 @@ internal class NativeMonitorSurface(
         setOnClickListener {
             action()
             showChrome(requestFocus = false)
+        }
+        onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
+            view.applyNativeFocusMotion(focused, scale = 1.05f)
+            if (focused) lastControlKey = view.tag as? String
         }
     }
 
@@ -406,21 +547,25 @@ internal class NativeMonitorSurface(
         textSize = 14f
         setTextColor(Color.WHITE)
         setPadding(activity.dp(10), activity.dp(7), activity.dp(10), activity.dp(7))
-        setBackgroundColor(0xB3000000.toInt())
+        background = activity.nativeGlassOverlayBackground()
     }
 
     private fun showChrome(requestFocus: Boolean) {
+        if (closed) return
         chromeVisible = true
         header.visibility = View.VISIBLE
         controlsScroller.visibility = View.VISIBLE
         cameraLabels.forEach { it.visibility = View.GONE }
         if (requestFocus || findFocus() == null || findFocus() === this) {
-            presetButtons[state.preset]?.requestFocus()
+            val remembered = lastControlKey?.let { controls.findViewWithTag<View>(it) }
+            if (remembered?.isEnabled == true) remembered.requestFocus()
+            else presetButtons[state.preset]?.requestFocus()
         }
         scheduleChromeHide()
     }
 
-    private fun hideChrome() {
+    private fun hideChrome(force: Boolean = false) {
+        if (!force && previewBindings.values.any { it.retry.hasFocus() }) return
         chromeVisible = false
         header.visibility = View.GONE
         controlsScroller.visibility = View.GONE
@@ -430,6 +575,7 @@ internal class NativeMonitorSurface(
 
     private fun scheduleChromeHide() {
         chromeHideJob?.cancel()
+        if (closed || heldKeyCode != null) return
         chromeHideJob = activity.lifecycleScope.launch {
             delay(CHROME_HIDE_MILLIS)
             hideChrome()
@@ -443,18 +589,15 @@ internal class NativeMonitorSurface(
         MonitorPreset.PATROL -> "Patrol"
     }
 
-    private fun nextExitMinutes(current: Int?): Int? = when (current) {
-        null -> 15
-        15 -> 30
-        30 -> 60
-        60 -> null
-        else -> null
-    }
-
     private companion object {
         const val MONITOR_SNAPSHOT_HEIGHT = 720
         const val MONITOR_GRID_HEIGHT = 360
         const val SNAPSHOT_REFRESH_MILLIS = 5_000L
         const val CHROME_HIDE_MILLIS = 5_000L
+        val REVEAL_KEYS = setOf(
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+        )
     }
 }

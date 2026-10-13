@@ -91,6 +91,13 @@ internal fun Phase0UiState.projectForPrivacy(
             review.counts
         },
         selectedItemId = review.selectedItemId?.takeIf(visibleReviewIds::contains),
+        actionError = review.actionError?.takeIf { error ->
+            val item = (review.items + discovery.recentReviewItems + listOfNotNull(review.playbackItem))
+                .firstOrNull { it.id == error.itemId }
+            item != null && grant(PrivacySurface.ACTIVITY,
+                PrivacyTarget.Review(item.id, item.camera, item.containsRecognition())) != null &&
+                error.cameraNames.all { camera -> grant(PrivacySurface.ACTIVITY, PrivacyTarget.Camera(camera)) != null }
+        },
         queueItemIds = review.queueItemIds.filter(visibleReviewIds::contains),
         playbackItem = review.playbackItem?.let { item ->
             grant(

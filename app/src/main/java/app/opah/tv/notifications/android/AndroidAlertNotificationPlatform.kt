@@ -30,13 +30,34 @@ import app.opah.tv.notifications.NotificationActionKind
 import app.opah.tv.notifications.NotificationAlertBehavior
 import app.opah.tv.notifications.NotificationClass
 import app.opah.tv.data.model.ConnectionProfile
+import app.opah.tv.data.model.AppSettings
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
+
+internal suspend fun readTvAlertOverlayAppearance(settings: Flow<AppSettings>): AppSettings = try {
+    withTimeoutOrNull(500L) { settings.first() } ?: unavailableOverlayAppearance()
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (_: Exception) {
+    // Appearance failure must not suppress the durable alert or reuse a stale UI singleton.
+    unavailableOverlayAppearance()
+}
+
+private fun unavailableOverlayAppearance() = AppSettings(
+    reducedMotion = true,
+    reducedTransparency = true,
+    highContrast = true,
+)
 
 /** Native Android/TV presentation boundary. Thumbnail storage is added behind this boundary. */
 class AndroidAlertNotificationPlatform(
     context: Context,
     client: OkHttpClient,
     profile: suspend (String) -> ConnectionProfile?,
+    private val appearanceSettings: Flow<AppSettings>,
 ) : AlertNotificationPlatform {
     private val appContext = context.applicationContext
     private val notifications = NotificationManagerCompat.from(appContext)
@@ -52,6 +73,9 @@ class AndroidAlertNotificationPlatform(
         val channelId = request.model.notificationClass.channelId()
         if (!channelAvailable(channelId)) return false
         val silent = request.alertBehavior == NotificationAlertBehavior.SILENT_UPDATE
+        // Resolve appearance before any publication, inside the coordinator's serialized post.
+        // A delayed settings read must never enqueue a card after a later cancellation.
+        val appearance = if (silent) null else readTvAlertOverlayAppearance(appearanceSettings)
         val contentIntent = contentIntent(request)
         val thumbnail = request.model.thumbnailContentVersion?.let { version ->
             if (
@@ -109,10 +133,14 @@ class AndroidAlertNotificationPlatform(
                 title = request.model.title,
                 body = request.model.body,
                 thumbnail = thumbnail,
+                appearance = requireNotNull(appearance),
             )
         }
         true
-    }.getOrDefault(false)
+    }.getOrElse { error ->
+        if (error is CancellationException) throw error
+        false
+    }
 
     override suspend fun cancel(identity: AndroidNotificationIdentity): Boolean = runCatching {
         notifications.cancel(identity.tag, identity.id)

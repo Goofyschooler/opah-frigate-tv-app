@@ -5,6 +5,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -12,6 +13,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.graphics.ColorUtils
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
@@ -23,8 +25,15 @@ internal fun RecyclerView.addNativeFlatDividers(startInsetDp: Int = 12) {
 
 internal fun RecyclerView.focusRow(position: Int): Boolean {
     if (position < 0 || position >= (adapter?.itemCount ?: 0)) return false
+    val visible = findViewHolderForAdapterPosition(position)?.itemView
+    if (visible != null) return visible.requestFocus()
     scrollToPosition(position)
-    post { findViewHolderForAdapterPosition(position)?.itemView?.requestFocus() }
+    val itemId = adapter?.takeIf { it.hasStableIds() }?.getItemId(position)
+    post {
+        if (position < (adapter?.itemCount ?: 0) && (itemId == null || adapter?.getItemId(position) == itemId)) {
+            findViewHolderForAdapterPosition(position)?.itemView?.requestFocus()
+        }
+    }
     return true
 }
 
@@ -36,7 +45,8 @@ internal fun RecyclerView.focusAdjacentRow(
     val currentPosition = findContainingViewHolder(focused)?.bindingAdapterPosition
         ?.takeIf { it != RecyclerView.NO_POSITION }
         ?: return false
-    val target = adjacentFocusableRowPosition(rowAdapter.currentList, currentPosition, forward) ?: return false
+    val positions = if (forward) (currentPosition + 1)..rowAdapter.currentList.lastIndex else (currentPosition - 1) downTo 0
+    val target = positions.firstOrNull { rowAdapter.isFocusableRow(rowAdapter.currentList[it]) } ?: return false
     return focusRow(target)
 }
 
@@ -49,6 +59,7 @@ private class NativeFlatDividerDecoration(
     }
 
     override fun onDraw(canvas: Canvas, parent: RecyclerView, state: RecyclerView.State) {
+        paint.color = NativeTheme.palette.divider
         val left = parent.paddingLeft + startInset.toFloat()
         val right = (parent.width - parent.paddingRight).toFloat()
         for (index in 0 until parent.childCount) {
@@ -64,8 +75,13 @@ internal class NativeListAdapter(
     private val onFocused: (String, View) -> Unit,
     private val onAdjust: (String, Int) -> Unit = { _, _ -> },
     private val onThumbnailRequested: (NativeRowModel, ImageView) -> Unit = { _, _ -> },
+    private val compact: Boolean = false,
+    private val focusInformationRows: Boolean = false,
+    private val showCurrentItemMarker: Boolean = false,
 ) : ListAdapter<NativeRowModel, RecyclerView.ViewHolder>(DiffCallback) {
     private val viewIds = mutableMapOf<String, Int>()
+    private var recyclerView: RecyclerView? = null
+    private var currentItemKey: String? = null
 
     init {
         setHasStableIds(true)
@@ -74,6 +90,32 @@ internal class NativeListAdapter(
     override fun getItemId(position: Int): Long = stableNativeItemId(getItem(position).key)
 
     override fun getItemViewType(position: Int): Int = getItem(position).kind.ordinal
+
+    override fun onAttachedToRecyclerView(recyclerView: RecyclerView) {
+        super.onAttachedToRecyclerView(recyclerView)
+        this.recyclerView = recyclerView
+    }
+
+    override fun onDetachedFromRecyclerView(recyclerView: RecyclerView) {
+        this.recyclerView = null
+        super.onDetachedFromRecyclerView(recyclerView)
+    }
+
+    fun setCurrentItem(key: String?) {
+        if (currentItemKey == key) return
+        currentItemKey = key
+        // Focus may change during RecyclerView layout, when adapter notifications
+        // are forbidden. Only drawable/visibility states change; row geometry stays fixed.
+        val list = recyclerView ?: return
+        for (index in 0 until list.childCount) {
+            val holder = list.getChildViewHolder(list.getChildAt(index)) as? RowHolder ?: continue
+            val item = currentList.getOrNull(holder.bindingAdapterPosition) ?: continue
+            holder.showSelection(item, showCurrentItemMarker, item.key == currentItemKey)
+        }
+    }
+
+    fun isFocusableRow(item: NativeRowModel): Boolean = item.focusable ||
+        (focusInformationRows && item.enabled && item.kind in READING_ROW_KINDS)
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return when (viewType) {
@@ -133,11 +175,26 @@ internal class NativeListAdapter(
             is RowHolder -> holder.bind(
                 item = item,
                 viewId = viewId(item.key),
+                secondaryViewId = item.secondaryActionKey?.let(::viewId),
                 onActivate = onActivate,
                 onFocused = onFocused,
                 onAdjust = onAdjust,
                 onThumbnailRequested = onThumbnailRequested,
+                compact = compact,
             )
+        }
+        if (holder is RowHolder) holder.showSelection(item, showCurrentItemMarker, item.key == currentItemKey)
+        if (item.kind in READING_ROW_KINDS) {
+            holder.itemView.apply {
+                id = viewId(item.key)
+                tag = item.key
+                isFocusable = isFocusableRow(item)
+                isClickable = false
+                if (focusInformationRows) background = context.nativeFlatScrollRegionBackground()
+                onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
+                    if (focused) onFocused(item.key, view)
+                }
+            }
         }
     }
 
@@ -149,7 +206,6 @@ internal class NativeListAdapter(
         fun bind(item: NativeRowModel) {
             val palette = NativeTheme.palette
             itemView.background = null
-            itemView.isFocusable = false
             itemView.isClickable = false
             itemView.isEnabled = item.enabled
             itemView.alpha = if (item.enabled) 1f else 0.48f
@@ -183,7 +239,6 @@ internal class NativeListAdapter(
 
         fun bind(item: NativeRowModel) {
             itemView.background = null
-            itemView.isFocusable = false
             itemView.isClickable = false
             title.setTextColor(NativeTheme.palette.text)
             description.setTextColor(NativeTheme.palette.secondaryText)
@@ -204,46 +259,35 @@ internal class NativeListAdapter(
         private val metrics: LinearLayout = view.findViewById(R.id.native_dashboard_metrics)
 
         fun bind(item: NativeRowModel) {
+            itemView.background = itemView.context.nativeGlassPanelBackground(strong = true)
             metrics.removeAllViews()
             item.dashboardMetrics.forEachIndexed { index, metric ->
-                if (index > 0) {
-                    metrics.addView(
-                        View(itemView.context).apply { setBackgroundColor(NativeTheme.palette.divider) },
-                        LinearLayout.LayoutParams(itemView.context.dp(1), LinearLayout.LayoutParams.MATCH_PARENT).apply {
-                            marginStart = itemView.context.dp(10)
-                            marginEnd = itemView.context.dp(10)
-                        },
-                    )
-                }
                 metrics.addView(
                     LinearLayout(itemView.context).apply {
                         orientation = LinearLayout.VERTICAL
-                        addView(
-                            View(itemView.context).apply { setBackgroundColor(metric.color) },
-                            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, itemView.context.dp(3)),
-                        )
+                        setPadding(itemView.context.dp(8), itemView.context.dp(2), itemView.context.dp(8), itemView.context.dp(2))
                         addView(
                             TextView(itemView.context).apply {
                                 text = metric.value
-                                textSize = 23f
+                                textSize = 25f
                                 setTextColor(NativeTheme.palette.text)
                                 setTypeface(typeface, android.graphics.Typeface.BOLD)
-                                setPadding(0, itemView.context.dp(7), 0, 0)
+                                maxLines = 2
                             },
                         )
                         addView(
                             TextView(itemView.context).apply {
                                 text = metric.label
-                                textSize = 12f
+                                textSize = 13f
                                 setTextColor(NativeTheme.palette.secondaryText)
+                                showColorIndicator(metric.color)
                             },
                         )
                     },
-                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f),
+                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
                 )
             }
             itemView.contentDescription = item.dashboardMetrics.joinToString(", ") { "${it.label} ${it.value}" }
-            itemView.isFocusable = false
         }
     }
 
@@ -262,6 +306,10 @@ internal class NativeListAdapter(
 
     fun viewIdForKey(key: String): Int? = viewIds[key]
 
+    fun refreshTheme() {
+        if (itemCount > 0) notifyItemRangeChanged(0, itemCount, "theme")
+    }
+
     private fun viewId(key: String): Int = viewIds.getOrPut(key, View::generateViewId)
 
     private class RowHolder(view: View) : RecyclerView.ViewHolder(view) {
@@ -270,22 +318,56 @@ internal class NativeListAdapter(
         private val description: TextView = view.findViewById(R.id.native_row_description)
         private val value: TextView = view.findViewById(R.id.native_row_value)
         private val affordance: TextView = view.findViewById(R.id.native_row_affordance)
+        private val selection: View = view.findViewById(R.id.native_row_selection)
+
+        fun showSelection(item: NativeRowModel, showMarker: Boolean, current: Boolean) {
+            itemView.isSelected = item.selected || (showMarker && current)
+            selection.visibility = if (!showMarker) View.GONE else if (current) View.VISIBLE else View.INVISIBLE
+            selection.background = GradientDrawable().apply {
+                cornerRadius = itemView.context.dp(2).toFloat()
+                val palette = NativeTheme.palette
+                setColor(if (ColorUtils.calculateContrast(palette.focus, palette.panelSelected) >= 3.0) palette.focus else palette.text)
+            }
+        }
 
         fun bind(
             item: NativeRowModel,
             viewId: Int,
+            secondaryViewId: Int?,
             onActivate: (String) -> Unit,
             onFocused: (String, View) -> Unit,
             onAdjust: (String, Int) -> Unit,
             onThumbnailRequested: (NativeRowModel, ImageView) -> Unit,
+            compact: Boolean,
         ) {
             val palette = NativeTheme.palette
+            itemView.minimumHeight = itemView.context.dp(if (compact) 44 else 48)
+            itemView.setPadding(
+                itemView.context.dp(10), itemView.context.dp(if (compact) 6 else 7),
+                itemView.context.dp(10), itemView.context.dp(if (compact) 6 else 7),
+            )
             itemView.background = itemView.context.nativeFlatFocusableBackground()
             thumbnail.clipToOutline = true
             thumbnail.background = itemView.context.nativeFlatThumbnailBackground()
+            val thumbnailWidth = itemView.context.dp(if (compact) 96 else 112)
+            val thumbnailHeight = itemView.context.dp(if (compact) 54 else 63)
+            if (thumbnail.layoutParams.width != thumbnailWidth || thumbnail.layoutParams.height != thumbnailHeight) {
+                thumbnail.layoutParams = thumbnail.layoutParams.apply {
+                    width = thumbnailWidth
+                    height = thumbnailHeight
+                }
+            }
             title.setTextColor(palette.text)
+            title.textSize = if (compact) 16f else 17f
+            title.maxLines = 2
             description.setTextColor(palette.secondaryText)
+            description.textSize = if (compact) 12f else 13f
+            description.maxLines = if (compact) 1 else 2
             value.setTextColor(palette.secondaryText)
+            affordance.setTextColor(palette.text)
+            listOf(title, description, value, thumbnail).forEach {
+                it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
             itemView.id = viewId
             itemView.tag = item.key
             itemView.isEnabled = item.enabled
@@ -305,10 +387,10 @@ internal class NativeListAdapter(
             value.visibility = if (visibleValue.isBlank()) View.GONE else View.VISIBLE
             affordance.text = item.secondaryActionLabel.ifBlank { when (item.kind) {
                 NativeRowKind.ACTION -> "›"
-                NativeRowKind.TOGGLE -> if (item.selected) "On  ●" else "Off  ○"
-                NativeRowKind.CHOICE -> if (item.selected) "●  Selected" else "○  Choose"
-                NativeRowKind.ADJUSTMENT -> "◀  Change  ▶"
-                NativeRowKind.READING -> "Read"
+                NativeRowKind.TOGGLE -> if (item.selected) "On" else "Off"
+                NativeRowKind.CHOICE -> if (item.selected) "✓" else "›"
+                NativeRowKind.ADJUSTMENT -> "‹  ›"
+                NativeRowKind.READING -> "›"
                     NativeRowKind.INFORMATION,
                     NativeRowKind.VISUAL,
                     NativeRowKind.DASHBOARD,
@@ -319,7 +401,9 @@ internal class NativeListAdapter(
             affordance.visibility = if (affordance.text.isBlank()) View.GONE else View.VISIBLE
             val secondaryKey = item.secondaryActionKey
             if (secondaryKey != null && item.secondaryActionLabel.isNotBlank()) {
-                affordance.tag = item.key
+                affordance.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                affordance.id = requireNotNull(secondaryViewId)
+                affordance.tag = secondaryKey
                 affordance.isFocusable = item.enabled
                 affordance.isClickable = item.enabled
                 affordance.isEnabled = item.enabled
@@ -338,6 +422,7 @@ internal class NativeListAdapter(
                     if (focused) onFocused(secondaryKey, view)
                 }
             } else {
+                affordance.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 affordance.tag = null
                 affordance.isFocusable = false
                 affordance.isClickable = false
@@ -345,9 +430,18 @@ internal class NativeListAdapter(
                 affordance.setPadding(0, 0, 0, 0)
                 affordance.setOnClickListener(null)
                 affordance.onFocusChangeListener = null
+                if (item.kind == NativeRowKind.TOGGLE) {
+                    affordance.background = GradientDrawable().apply {
+                        cornerRadius = itemView.context.dp(14).toFloat()
+                        setColor(if (item.selected) palette.panelSelected else palette.panel)
+                        setStroke(itemView.context.dp(1), if (item.selected) palette.focus else palette.divider)
+                    }
+                    affordance.setPadding(itemView.context.dp(10), itemView.context.dp(4), itemView.context.dp(10), itemView.context.dp(4))
+                }
             }
-            thumbnail.setImageDrawable(null)
-            thumbnail.tag = item.thumbnail?.cacheKey
+            val requestedThumbnail = item.thumbnail?.cacheKey
+            if (thumbnail.tag != requestedThumbnail) thumbnail.setImageDrawable(null)
+            thumbnail.tag = requestedThumbnail
             thumbnail.visibility = if (item.thumbnail == null) View.GONE else View.VISIBLE
             if (item.thumbnail != null) onThumbnailRequested(item, thumbnail)
             itemView.contentDescription = buildList {
@@ -400,6 +494,29 @@ internal class NativeListAdapter(
                             info.isChecked = item.selected
                         }
                     }
+                    if (item.kind == NativeRowKind.ADJUSTMENT) {
+                        item.adjustmentRange?.let { range ->
+                            info.rangeInfo = AccessibilityNodeInfo.RangeInfo.obtain(
+                                AccessibilityNodeInfo.RangeInfo.RANGE_TYPE_FLOAT,
+                                range.minimum, range.maximum, range.current,
+                            )
+                        }
+                        if (item.enabled) {
+                            if (item.adjustmentRange?.canAdjust(1) != false) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
+                            if (item.adjustmentRange?.canAdjust(-1) != false) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
+                        }
+                    }
+                }
+
+                override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean {
+                    val direction = when (action) {
+                        AccessibilityNodeInfo.ACTION_SCROLL_FORWARD -> 1
+                        AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> -1
+                        else -> return super.performAccessibilityAction(host, action, args)
+                    }
+                    if (item.kind != NativeRowKind.ADJUSTMENT || !item.enabled || item.adjustmentRange?.canAdjust(direction) == false) return false
+                    onAdjust(item.key, direction)
+                    return true
                 }
             }
             itemView.setOnClickListener(if (item.actionable) View.OnClickListener { onActivate(item.key) } else null)
@@ -434,6 +551,7 @@ internal class NativeListAdapter(
                 }
             }
         }
+
     }
 
     private class SectionHolder(view: View) : RecyclerView.ViewHolder(view) {
@@ -443,7 +561,6 @@ internal class NativeListAdapter(
         fun bind(item: NativeRowModel) {
             title.setTextColor(NativeTheme.palette.text)
             description.setTextColor(NativeTheme.palette.secondaryText)
-            itemView.isFocusable = false
             itemView.isClickable = false
             title.text = item.title
             description.text = item.description
@@ -457,6 +574,12 @@ internal class NativeListAdapter(
 
         override fun areContentsTheSame(oldItem: NativeRowModel, newItem: NativeRowModel): Boolean =
             oldItem == newItem
+    }
+
+    private companion object {
+        val READING_ROW_KINDS = setOf(
+            NativeRowKind.INFORMATION, NativeRowKind.VISUAL, NativeRowKind.DASHBOARD, NativeRowKind.SECTION,
+        )
     }
 }
 

@@ -93,13 +93,13 @@ internal enum class SettingsPage(
 }
 
 internal val SETTINGS_PAGE_ORDER = listOf(
-    SettingsPage.UPDATE,
     SettingsPage.APPEARANCE,
     SettingsPage.PLAYBACK,
     SettingsPage.TV_ALERTS,
     SettingsPage.PRIVACY,
     SettingsPage.STARTUP,
     SettingsPage.SYSTEM,
+    SettingsPage.UPDATE,
     SettingsPage.ADVANCED,
     SettingsPage.ABOUT,
 )
@@ -1471,7 +1471,7 @@ private val PIN_PAD_KEYS = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", P
 private const val PRIVACY_GATE_FOCUS_ATTEMPTS = 8
 
 internal fun startupTargetLabel(target: StartupTarget, settings: AppSettings): String = when (target.kind) {
-    StartupTargetKind.HOME -> "Home"
+    StartupTargetKind.HOME -> "Cameras"
     StartupTargetKind.LAST_VIEWED -> "Last viewed"
     StartupTargetKind.BIRDSEYE -> "All Cameras"
     StartupTargetKind.CAMERA -> target.value ?: "Home"

@@ -108,7 +108,16 @@ internal fun MonitorModeScreen(
         controlsVisible = false
     }
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
-    BackHandler(onBack = onBack)
+    BackHandler {
+        when (playbackBackAction(controlsVisible, diagnosticsVisible = false, pictureInPictureActive = false)) {
+            PlaybackBackAction.HIDE_OVERLAY -> {
+                controlsVisible = false
+                consumeRevealKeyUp = false
+                focusRequester.requestFocus()
+            }
+            PlaybackBackAction.EXIT -> onBack()
+        }
+    }
 
     Box(
         modifier = Modifier

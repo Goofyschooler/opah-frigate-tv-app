@@ -8,7 +8,7 @@ try when a camera does not play.
 | Item | Tested status |
 | --- | --- |
 | Frigate 0.17.2 | Supported stable version |
-| Frigate 0.18.0 RC1 (`a745070`) | Exact source and authenticated API audits passed; signed-candidate Home, Activity, Clip, and Monitor smoke tests passed on the main TV |
+| Frigate 0.18.0 RC1 (`a745070`) | Verified against this exact prerelease, including camera browsing, Activity, Clips, and Monitor on the main TV |
 | Android TV / Google TV | Android 7.0 or newer |
 | Main test device | 2024 onn. 4K Pro with Android 14 |
 | H.264 camera video | Tested |
@@ -26,7 +26,7 @@ try when a camera does not play.
 | Camera controls | Built for compatible Frigate PTZ cameras; physical-camera testing is still needed |
 | Native TV alerts | Local evaluator, permission, channel, privacy, lifecycle, and reboot paths have automated coverage; physical-TV background testing is pending |
 | Monitor Mode | Deterministic promotion, recovery, privacy, timer, and cleanup paths have automated coverage; ONN endurance testing is pending |
-| Since-you-last-watched briefing | Deterministic 24-hour first load, seven-day bound, PIN/private-camera scoping, Room persistence, and exact progress have automated coverage; documentation and exact final signed-APK TV testing passed |
+| Highlights briefing | Briefing progress, private-camera protection, and review queues have automated coverage and TV checks; a first briefing covers up to 24 hours, with later briefings bounded to seven days |
 | Automatic playback compatibility | Strategy selection, persistence, invalidation, and fallback paths have automated coverage; the full device/codec matrix is pending |
 
 Newer parseable Frigate 0.18 builds are not rejected merely because their exact
@@ -56,12 +56,26 @@ If a camera stays on **Preparing** or does not start:
    may call this the keyframe or I-frame interval.
 6. Try H.264 to determine whether the problem is specific to H.265 support.
 
+## Camera previews and connection problems
+
+The **Cameras** grid shows refreshed still previews. Select a camera to open
+live video. The preview status says when Opah last checked the picture; a
+failed update shows an unavailable message and **Retry preview**.
+
+If one camera in a multi-camera view fails, select its retry action. The other
+cameras keep playing. Monitor also keeps an unavailable message visible after
+playback or a preview fails.
+
+If the whole server is unavailable, check that it can be reached from your
+network, then use **Try again** or **Change connection**. Connection setup
+retains the entries while you test or correct them.
+
 ## Audio and live controls
 
 Opah can play audio from the camera through the TV. It cannot send microphone
 audio back to a camera or doorbell.
 
-Choose **Go back 30 seconds** to open available Frigate recording for the
+Choose **30 seconds earlier** to open available Frigate recording for the
 current camera. Opah returns to live video when that short recording ends.
 This depends on Frigate having recording for that moment.
 
@@ -71,12 +85,22 @@ or fill the screen. The fill choice is saved separately for each camera.
 ## Activity playback
 
 Choose **Next activity** while a saved Activity video is playing to continue
-through the list that opened the player. Opah skips missing items and items
-without a recording, and it does not start over after the last item. Pressing
-Back returns to the original item, filters, and list position.
+through the New or Reviewed list you opened. An explicit Highlights or New
+activity queue stays within its selected items. Opah skips missing items and
+items without a recording, and it does not start over after the last item.
+Pressing Back returns to the Activity browser with its filters and list
+position.
 
 The recorded-video timeline can receive focus. Use left or right on the
 timeline to move by 10 seconds in saved or reviewed activity.
+
+In **Activity** > **History**, use **Date & time** to select a date and hour in
+the TV's local time zone. An empty period can mean Frigate has no recording for
+that hour. Use **Earlier** or **Later** to check nearby hours.
+
+If a save or review change fails, read the message beside the affected action
+and use its retry. If a save involving several cameras has an uncertain result,
+check **Clips** before trying again to avoid saving a second copy.
 
 ## Activity search
 
@@ -105,10 +129,22 @@ notification channel can also be turned off separately in Android settings.
 Some TVs delay background work or reboot delivery even when alerts are enabled.
 Open **Settings** > **TV alerts** to see Opah's current status.
 
-Monitor Mode starts from an existing saved View or Frigate camera group. It
-uses snapshots for the quiet baseline and promotes at most one camera to live
-video. If a TV struggles, use fewer cameras or lower-resolution streams. Audio
-starts off unless you turn it on.
+Start **Monitor** from Cameras, a saved view, or a Frigate camera group. It uses
+snapshots for the quiet baseline and brings at most one camera to live video
+at a time. If a TV struggles, use fewer cameras or lower-resolution streams.
+Audio starts off unless you turn it on. **Timer** cycles through Never, 30,
+60, and 120 minutes.
+
+## Reading and navigating the interface
+
+**Settings** > **Appearance** offers **High contrast**, **Reduce motion**, and
+**Reduce transparency**, as well as System, Dark, Light, and Custom themes.
+Your TV's text-size setting also affects Opah.
+
+Press right on a Settings category to enter that page. Longer information pages
+scroll with the remote. Back closes the nearest dialog or returns to the
+previous screen. During playback, the first center-button press shows hidden
+controls; a second press activates the focused action.
 
 ## Clips and Incidents
 

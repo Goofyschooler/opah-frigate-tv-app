@@ -2,6 +2,50 @@
 
 This page lists the user-visible changes in each Opah release.
 
+## 0.6.0
+
+### A complete visual redesign
+
+- Explore a new glass-style interface with camera pictures at the center,
+  compact controls, clear focus outlines, and less unused space.
+- Open on **Cameras**, with **Activity**, **Clips**, and **Settings** close by
+  in the side navigation. Existing startup choices are kept.
+- Use the new design in System, Dark, Light, and Custom appearance modes
+  without losing saved colors. Reduce transparency joins high contrast and
+  reduced motion options.
+- Read redesigned Settings, Appearance, server information, Device Info, and
+  About pages with more useful layouts and scrolling.
+- See more of the picture through compact live-video controls. Recorded video
+  keeps its selectable timeline.
+
+### Easier browsing and review
+
+- Return to your place, selection, and filters after viewing a camera or
+  recording, with more predictable remote navigation.
+- Press Back to hide visible controls while viewing cameras or recordings.
+  Press Back with the controls hidden to leave the view.
+- Create a saved camera view in two clear steps, and revise its cameras or name
+  without starting over.
+- Open the intended items from Highlights and see which review queue you are
+  watching. Continue through it with **Next activity**.
+- Keep **Next activity** within the New or Reviewed list you opened.
+- Keep the selected Activity item visible while choosing its actions, and use
+  **Load more activity** at the end of the list to reach older activity.
+- Jump directly to a date and hour in History.
+
+### Clearer feedback and useful fixes
+
+- See when a camera preview was checked and retry a failed preview. Camera
+  groups and Monitor show failures clearly, and retrying one group camera
+  keeps the others playing.
+- See an explanation and retry when saving a clip or marking activity fails.
+- Correct connection details or test the connection without losing the form.
+- Set Monitor's timer to Never, 30, 60, or 120 minutes.
+- Read larger text without clipped camera descriptions or overlapping Settings
+  headings. Adjustable controls provide clearer accessibility information.
+- Rounded corners are built into the design; additional rounding is optional
+  and off by default for new settings.
+
 ## 0.5.2 - 2026-09-08
 
 - Made remote navigation predictable across Activity, Clips, Motion Search,

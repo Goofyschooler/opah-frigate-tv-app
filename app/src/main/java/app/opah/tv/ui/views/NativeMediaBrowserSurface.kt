@@ -11,6 +11,9 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.core.view.doOnPreDraw
+import androidx.core.view.isVisible
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import app.opah.tv.R
 
@@ -38,6 +41,7 @@ internal data class NativeBrowserDetail(
     val body: String = "",
     val thumbnail: NativeThumbnailRequest? = null,
     val actions: List<NativeRowModel> = emptyList(),
+    val errorMessage: String? = null,
 )
 
 internal data class NativeBrowserUiState(
@@ -49,6 +53,26 @@ internal data class NativeBrowserUiState(
     val details: Map<String, NativeBrowserDetail>,
     val emptyTitle: String,
     val emptyBody: String,
+    val loading: Boolean = false,
+    val preferredSelectionKey: String? = null,
+)
+
+internal enum class NativeBrowserPane { TABS, TOOLS, LIST, DETAILS }
+
+internal data class NativeBrowserScrollAnchor(
+    val key: String? = null,
+    val position: Int = 0,
+    val offset: Int = 0,
+)
+
+/** Presentation identities only; the controller owns the matching route and filters. */
+internal data class NativeMediaBrowserBookmark(
+    val selectedKey: String? = null,
+    val selectedPosition: Int = 0,
+    val focusedKey: String? = null,
+    val pane: NativeBrowserPane = NativeBrowserPane.LIST,
+    val listAnchor: NativeBrowserScrollAnchor = NativeBrowserScrollAnchor(),
+    val detailAnchor: NativeBrowserScrollAnchor = NativeBrowserScrollAnchor(),
 )
 
 @SuppressLint("ViewConstructor")
@@ -59,12 +83,17 @@ internal class NativeMediaBrowserSurface(
     private val onFocused: (String, View) -> Unit,
     private val onThumbnailRequested: (NativeRowModel, ImageView) -> Unit,
     private val onNavigateOutLeft: () -> Unit,
+    initialBookmark: NativeMediaBrowserBookmark? = null,
 ) : LinearLayout(activity) {
-    private val subtitle = TextView(activity).apply {
-        textSize = 13f
-        setTextColor(NativeTheme.palette.secondaryText)
+    private val pageTitle = text(26f, bold = true)
+    private val subtitle = text(13f, secondary = true)
+    private val tabs = LinearLayout(activity).apply {
+        orientation = HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        background = activity.nativeGlassPanelBackground()
+        setPadding(activity.dp(4), activity.dp(4), activity.dp(4), activity.dp(4))
+        clipChildren = false
     }
-    private val tabs = LinearLayout(activity).apply { orientation = HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
     private val tools = LinearLayout(activity).apply {
         orientation = HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
@@ -75,57 +104,75 @@ internal class NativeMediaBrowserSurface(
         layoutManager = NativeLinearLayoutManager(activity)
         itemAnimator = null
         overScrollMode = View.OVER_SCROLL_NEVER
-        setPadding(0, 0, activity.dp(8), activity.dp(38))
-        addNativeFlatDividers()
+        setPadding(activity.dp(4), activity.dp(4), activity.dp(4), activity.dp(12))
+        clipToPadding = false
     }
     private val detailImage = ImageView(activity).apply {
         scaleType = ImageView.ScaleType.CENTER_CROP
-        setBackgroundColor(NativeTheme.palette.panel)
+        background = activity.nativeGlassPanelBackground(strong = true)
+        clipToOutline = true
     }
-    private val detailTitle = text(21f, bold = true)
-    private val detailSubtitle = text(13f, secondary = true)
-    private val detailBody = text(13f, secondary = true).apply { maxLines = 4 }
+    private val detailTitle = text(17f, bold = true)
+    private val detailSubtitle = text(12f, secondary = true)
+    private val detailBody = text(12f, secondary = true).apply { maxLines = 4 }
+    private val detailError = text(13f).apply {
+        tag = "browser:detail-error"
+        accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        visibility = View.GONE
+    }
     private val detailActions = RecyclerView(activity).apply {
         isFocusable = false
         layoutManager = NativeLinearLayoutManager(activity)
         itemAnimator = null
         overScrollMode = View.OVER_SCROLL_NEVER
-        addNativeFlatDividers()
+        clipToPadding = false
     }
     private val listAdapter = NativeListAdapter(
         onActivate = onActivate,
-        onFocused = { key, view -> select(key); onFocused(key, view) },
+        onFocused = { key, view ->
+            if (currentState.preferredSelectionKey == key) handledPreferredSelectionKey = key
+            select(key)
+            onFocused(key, view)
+        },
         onThumbnailRequested = onThumbnailRequested,
+        compact = true,
+        showCurrentItemMarker = true,
     )
     private val actionAdapter = NativeListAdapter(
         onActivate = onActivate,
         onFocused = onFocused,
         onThumbnailRequested = onThumbnailRequested,
+        compact = true,
     )
     private var currentState = initialState
     private var selectedKey: String? = null
     private var firstUpdate = true
+    private var pendingBookmark = initialBookmark
+    private var pendingFocusMoved = false
+    private var updateGeneration = 0
+    private var handledPreferredSelectionKey: String? = null
 
     init {
         orientation = VERTICAL
+        clipChildren = false
         addView(
             LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 addView(
                     LinearLayout(activity).apply {
                         orientation = VERTICAL
-                        addView(text(26f, bold = true).apply { text = initialState.title })
+                        addView(pageTitle)
                         addView(subtitle)
                     },
                     LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f),
                 )
                 addView(tabs)
             },
-            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = activity.dp(12) },
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = activity.dp(9) },
         )
         addView(
             tools,
-            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = activity.dp(9) },
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = activity.dp(7) },
         )
         list.adapter = listAdapter
         detailActions.adapter = actionAdapter
@@ -134,28 +181,25 @@ internal class NativeMediaBrowserSurface(
                 orientation = HORIZONTAL
                 addView(
                     FrameLayout(activity).apply {
-                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                        setPadding(0, activity.dp(2), activity.dp(4), 0)
+                        background = activity.nativeGlassPanelBackground(strong = true)
+                        setPadding(activity.dp(4), activity.dp(4), activity.dp(4), activity.dp(4))
                         addView(list, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
                     },
-                    LayoutParams(0, LayoutParams.MATCH_PARENT, 1.08f).apply { marginEnd = activity.dp(7) },
-                )
-                addView(
-                    View(activity).apply { setBackgroundColor(NativeTheme.palette.divider) },
-                    LayoutParams(activity.dp(1), LayoutParams.MATCH_PARENT).apply { marginEnd = activity.dp(10) },
+                    LayoutParams(0, LayoutParams.MATCH_PARENT, 1.12f).apply { marginEnd = activity.dp(12) },
                 )
                 addView(
                     LinearLayout(activity).apply {
                         orientation = VERTICAL
-                        setPadding(0, activity.dp(2), 0, activity.dp(8))
-                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                        addView(detailImage, LayoutParams(LayoutParams.MATCH_PARENT, activity.dp(190)))
-                        addView(detailTitle, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = activity.dp(9) })
-                        addView(detailSubtitle)
-                        addView(detailBody, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = activity.dp(5) })
-                        addView(detailActions, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = activity.dp(8) })
+                        setPadding(activity.dp(12), activity.dp(12), activity.dp(12), activity.dp(10))
+                        background = activity.nativeGlassPanelBackground(strong = true)
+                        addView(detailImage, LayoutParams(LayoutParams.MATCH_PARENT, activity.dp(128)))
+                        addView(detailTitle, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+                        addView(detailSubtitle, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = activity.dp(3) })
+                        addView(detailBody, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = activity.dp(4) })
+                        addView(detailError, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = activity.dp(6) })
+                        addView(detailActions, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = activity.dp(6) })
                     },
-                    LayoutParams(0, LayoutParams.MATCH_PARENT, 0.92f),
+                    LayoutParams(0, LayoutParams.MATCH_PARENT, 0.88f),
                 )
             },
             LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f),
@@ -164,33 +208,164 @@ internal class NativeMediaBrowserSurface(
     }
 
     fun update(state: NativeBrowserUiState) {
+        val generation = ++updateGeneration
+        val bookmark = pendingBookmark ?: if (firstUpdate) null else captureBookmark()
+        val restoreFocus = pendingBookmark != null || firstUpdate || hasFocus()
+        val explicitRestore = (pendingBookmark != null && !pendingFocusMoved) || firstUpdate
+        val awaitingRows = state.loading && state.rows.isEmpty()
+        // A loading placeholder is not an authoritative empty result. Keep only
+        // presentation identities until rows arrive; never keep old visible data.
+        pendingBookmark = bookmark.takeIf { awaitingRows }
+        if (!awaitingRows) pendingFocusMoved = false
         currentState = state
+        pageTitle.text = state.title
         subtitle.text = state.subtitle
         updateTabs(state.tabs)
         updateTools(state.tools)
-        val preferred = selectedKey?.takeIf(state.details::containsKey) ?: state.rows.firstOrNull()?.key
+        val availableKeys = state.rows.mapTo(hashSetOf(), NativeRowModel::key)
+        if (state.preferredSelectionKey == null) handledPreferredSelectionKey = null
+        val requestedSelection = state.preferredSelectionKey?.takeIf {
+            it != handledPreferredSelectionKey && it in availableKeys && it in state.details
+        }
+        val preferred = requestedSelection ?: bookmark?.selectedKey?.takeIf { it in availableKeys && it in state.details }
+            ?: selectedKey?.takeIf { it in availableKeys && it in state.details }
+            ?: state.rows.getOrNull((bookmark?.selectedPosition ?: 0).coerceIn(0, (state.rows.size - 1).coerceAtLeast(0)))?.key?.takeIf { it in state.details }
+            ?: state.rows.firstOrNull { it.key in state.details }?.key
+        if (preferred == null) showEmpty(state.emptyTitle, state.emptyBody)
         listAdapter.submitList(state.rows) {
-            if (preferred != null) select(preferred) else showEmpty(state.emptyTitle, state.emptyBody)
-            if (firstUpdate) {
-                firstUpdate = false
-                list.post {
-                    if (state.rows.isNotEmpty()) list.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
-                    else {
-                        val firstTool = (0 until tools.childCount)
-                            .map(tools::getChildAt)
-                            .firstOrNull { it.isFocusable && it.isEnabled }
-                        if (firstTool != null) firstTool.requestFocus()
-                        else {
-                            val selectedTabIndex = state.tabs.indexOfFirst { it.selected }.coerceAtLeast(0)
-                            tabs.getChildAt(selectedTabIndex)?.requestFocus()
+            if (generation != updateGeneration) return@submitList
+            firstUpdate = false
+            val restore: () -> Unit = {
+                if (generation == updateGeneration) {
+                    if (requestedSelection != null) {
+                        list.post {
+                            if (generation == updateGeneration) focusRowKey(list, listAdapter, requestedSelection, 0)
                         }
+                    } else if (awaitingRows) {
+                        if (restoreFocus && !hasFocus()) post { if (generation == updateGeneration) focusDefault() }
+                    } else if (bookmark != null && state.rows.isNotEmpty()) {
+                        restoreBookmarkViews(bookmark, restoreFocus, explicitRestore, generation)
+                    } else if (restoreFocus) post { if (generation == updateGeneration) focusDefault() }
+                }
+            }
+            if (preferred != null) select(preferred, restore)
+            else restore()
+        }
+    }
+
+    fun captureBookmark(): NativeMediaBrowserBookmark {
+        if (currentState.loading && currentState.rows.isEmpty()) pendingBookmark?.let { return it }
+        val focused = findFocus()
+        return NativeMediaBrowserBookmark(
+            selectedKey = selectedKey,
+            selectedPosition = listAdapter.currentList.indexOfFirst { it.key == selectedKey }.coerceAtLeast(0),
+            focusedKey = focused?.tag as? String,
+            pane = when {
+                focused != null && tabs.isAncestorOf(focused) -> NativeBrowserPane.TABS
+                focused != null && tools.isAncestorOf(focused) -> NativeBrowserPane.TOOLS
+                focused != null && detailActions.isAncestorOf(focused) -> NativeBrowserPane.DETAILS
+                else -> NativeBrowserPane.LIST
+            },
+            listAnchor = captureAnchor(list, listAdapter),
+            detailAnchor = captureAnchor(detailActions, actionAdapter),
+        )
+    }
+
+    fun restoreBookmark(bookmark: NativeMediaBrowserBookmark) {
+        pendingBookmark = bookmark
+        pendingFocusMoved = false
+        update(currentState)
+    }
+
+    private fun restoreBookmarkViews(
+        bookmark: NativeMediaBrowserBookmark,
+        requestFocus: Boolean,
+        explicit: Boolean,
+        generation: Int,
+    ) {
+        restoreAnchor(list, listAdapter, bookmark.listAnchor)
+        restoreAnchor(detailActions, actionAdapter, bookmark.detailAnchor)
+        // Restoring focus before RecyclerView applies the anchor would replace its exact offset.
+        doOnPreDraw {
+            if (generation != updateGeneration || !requestFocus) return@doOnPreDraw
+            val focused = activity.currentFocus
+            if (!explicit && focused != null && focused !== this && !isAncestorOf(focused)) return@doOnPreDraw
+            when (bookmark.pane) {
+                NativeBrowserPane.TABS -> if (!focusTagged(tabs, bookmark.focusedKey)) focusSelectedTab()
+                NativeBrowserPane.TOOLS -> if (!focusTagged(tools, bookmark.focusedKey)) focusFirstToolOrList()
+                NativeBrowserPane.DETAILS -> {
+                    if (!focusRowKey(detailActions, actionAdapter, bookmark.focusedKey, bookmark.detailAnchor.position)) {
+                        restoreSelectedListFocus()
                     }
+                }
+                NativeBrowserPane.LIST -> {
+                    if (!focusRowKey(list, listAdapter, bookmark.focusedKey, bookmark.selectedPosition)) focusDefault()
                 }
             }
         }
     }
 
+    private fun captureAnchor(view: RecyclerView, adapter: NativeListAdapter): NativeBrowserScrollAnchor {
+        val manager = view.layoutManager as? LinearLayoutManager ?: return NativeBrowserScrollAnchor()
+        val position = manager.findFirstVisibleItemPosition().coerceAtLeast(0)
+        return NativeBrowserScrollAnchor(
+            adapter.currentList.getOrNull(position)?.key,
+            position,
+            manager.findViewByPosition(position)?.let { manager.getDecoratedTop(it) - view.paddingTop } ?: 0,
+        )
+    }
+
+    private fun restoreAnchor(view: RecyclerView, adapter: NativeListAdapter, anchor: NativeBrowserScrollAnchor) {
+        if (adapter.currentList.isEmpty()) return
+        val position = adapter.currentList.indexOfFirst { it.key == anchor.key }.takeIf { it >= 0 }
+            ?: anchor.position.coerceIn(0, adapter.currentList.lastIndex)
+        (view.layoutManager as? LinearLayoutManager)?.scrollToPositionWithOffset(position, anchor.offset)
+    }
+
+    private fun focusRowKey(view: RecyclerView, adapter: NativeListAdapter, key: String?, fallback: Int): Boolean {
+        val rows = adapter.currentList
+        val exact = rows.indexOfFirst { it.key == key && it.focusable }
+        val position = exact.takeIf { it >= 0 } ?: rows.indices
+            .filter { rows[it].focusable }.minByOrNull { kotlin.math.abs(it - fallback) } ?: return false
+        return view.findViewHolderForAdapterPosition(position)?.itemView?.requestFocus() == true || view.focusRow(position)
+    }
+
+    private fun focusTagged(group: ViewGroup, key: String?): Boolean = key?.let {
+        group.findViewWithTag<View>(it)?.takeIf { target -> target.isFocusable && target.isEnabled }?.requestFocus()
+    } == true
+
+    private fun focusDefault(): Boolean = focusFirstListRow() || focusFirstToolOrList() || focusSelectedTab()
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val trackIntent = event.action == KeyEvent.ACTION_DOWN && when (event.keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> true
+            else -> false
+        }
+        if (trackIntent) rememberLoadingFocusIntent()
+        val handled = dispatchContentKeyEvent(event)
+        if (trackIntent) rememberLoadingFocusIntent()
+        return handled
+    }
+
+    private fun rememberLoadingFocusIntent() {
+        if (!currentState.loading || currentState.rows.isNotEmpty()) return
+        val saved = pendingBookmark ?: return
+        pendingFocusMoved = true
+        val focused = findFocus() ?: return
+        pendingBookmark = saved.copy(
+            focusedKey = focused.tag as? String,
+            pane = when {
+                tabs.isAncestorOf(focused) -> NativeBrowserPane.TABS
+                tools.isAncestorOf(focused) -> NativeBrowserPane.TOOLS
+                detailActions.isAncestorOf(focused) -> NativeBrowserPane.DETAILS
+                else -> NativeBrowserPane.LIST
+            },
+        )
+    }
+
+    private fun dispatchContentKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
             val focused = findFocus()
             when {
@@ -275,11 +450,16 @@ internal class NativeMediaBrowserSurface(
                         id = View.generateViewId()
                         tag = tab.key
                         textSize = 14f
+                        includeFontPadding = false
                         gravity = Gravity.CENTER
                         setTextColor(NativeTheme.palette.text)
                         background = activity.nativeFlatFocusableBackground()
                         setPadding(activity.dp(11), activity.dp(5), activity.dp(11), activity.dp(5))
                         setOnClickListener { onActivate(tab.key) }
+                        onFocusChangeListener = OnFocusChangeListener { view, focused ->
+                            view.applyNativeFocusMotion(focused)
+                            if (focused) onFocused(tab.key, view)
+                        }
                     },
                     LayoutParams(LayoutParams.WRAP_CONTENT, activity.dp(36)).apply { marginStart = activity.dp(3) },
                 )
@@ -309,6 +489,7 @@ internal class NativeMediaBrowserSurface(
                         id = View.generateViewId()
                         tag = tool.key
                         textSize = if (tool.field) 15f else 13f
+                        includeFontPadding = false
                         gravity = if (tool.field) Gravity.CENTER_VERTICAL else Gravity.CENTER
                         setTextColor(NativeTheme.palette.text)
                         if (tool.primary) setTypeface(typeface, Typeface.BOLD)
@@ -319,6 +500,10 @@ internal class NativeMediaBrowserSurface(
                         }
                         setPadding(activity.dp(if (tool.field) 13 else 10), activity.dp(5), activity.dp(if (tool.field) 13 else 10), activity.dp(5))
                         setOnClickListener { onActivate(tool.key) }
+                        onFocusChangeListener = OnFocusChangeListener { view, focused ->
+                            if (!tool.field) view.applyNativeFocusMotion(focused)
+                            if (focused) onFocused(tool.key, view)
+                        }
                     },
                     LayoutParams(
                         if (tool.field) 0 else LayoutParams.WRAP_CONTENT,
@@ -346,28 +531,33 @@ internal class NativeMediaBrowserSurface(
         if (focusedKey != null) tools.post { tools.findViewWithTag<View>(focusedKey)?.requestFocus() }
     }
 
-    private fun select(key: String) {
+    private fun select(key: String, onReady: () -> Unit = {}) {
+        val detail = currentState.details[key]?.takeIf { currentState.rows.any { it.key == key } } ?: run {
+            // Boundary actions such as Load more are focusable but have no media detail.
+            onReady()
+            return
+        }
         selectedKey = key
-        val detail = currentState.details[key] ?: return
-        val focusedActionKey = detailActions.findFocus()?.tag as? String
+        listAdapter.setCurrentItem(key)
         detailTitle.text = detail.title
         detailSubtitle.text = detail.subtitle
+        detailSubtitle.visibility = if (detail.subtitle.isBlank()) View.GONE else View.VISIBLE
         detailBody.text = detail.body
         detailBody.visibility = if (detail.body.isBlank()) View.GONE else View.VISIBLE
+        val error = detail.errorMessage.orEmpty()
+        if (detailError.text.toString() != error) detailError.text = error
+        detailError.isVisible = error.isNotBlank()
         actionAdapter.submitList(detail.actions) {
-            if (focusedActionKey != null) {
-                val position = actionAdapter.currentList.indexOfFirst { it.key == focusedActionKey }
-                if (position >= 0) {
-                    detailActions.scrollToPosition(position)
-                    detailActions.post {
-                        detailActions.findViewHolderForAdapterPosition(position)?.itemView?.requestFocus()
-                    }
-                }
-            }
+            onReady()
         }
-        detailImage.setImageDrawable(null)
         detailImage.visibility = if (detail.thumbnail == null) View.GONE else View.VISIBLE
-        detail.thumbnail?.let { request ->
+        updateDetailTitleSpacing()
+        if (detail.thumbnail == null) {
+            detailImage.tag = null
+            detailImage.setImageDrawable(null)
+        }
+        detail.thumbnail?.takeIf { it.cacheKey != detailImage.tag }?.let { request ->
+            detailImage.setImageDrawable(null)
             detailImage.tag = request.cacheKey
             onThumbnailRequested(
                 NativeRowModel("browser-detail:${detail.key}", detail.title, thumbnail = request),
@@ -378,11 +568,27 @@ internal class NativeMediaBrowserSurface(
 
     private fun showEmpty(title: String, body: String) {
         selectedKey = null
+        listAdapter.setCurrentItem(null)
         detailImage.visibility = View.GONE
+        detailImage.tag = null
+        detailImage.setImageDrawable(null)
         detailTitle.text = title
         detailSubtitle.text = body
+        detailSubtitle.visibility = if (body.isBlank()) View.GONE else View.VISIBLE
         detailBody.visibility = View.GONE
+        detailError.text = ""
+        detailError.visibility = View.GONE
+        updateDetailTitleSpacing()
         actionAdapter.submitList(emptyList())
+    }
+
+    private fun updateDetailTitleSpacing() {
+        val params = detailTitle.layoutParams as LayoutParams
+        val topMargin = if (detailImage.isVisible) activity.dp(7) else 0
+        if (params.topMargin != topMargin) {
+            params.topMargin = topMargin
+            detailTitle.layoutParams = params
+        }
     }
 
     private fun restoreSelectedListFocus() {
@@ -450,6 +656,7 @@ internal class NativeMediaBrowserSurface(
 
     private fun text(size: Float, bold: Boolean = false, secondary: Boolean = false) = TextView(activity).apply {
         textSize = size
+        includeFontPadding = false
         setTextColor(if (secondary) NativeTheme.palette.secondaryText else NativeTheme.palette.text)
         if (bold) setTypeface(typeface, Typeface.BOLD)
     }

@@ -15,7 +15,9 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.core.view.doOnPreDraw
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import app.opah.tv.R
 import kotlinx.coroutines.Job
@@ -38,6 +40,13 @@ internal data class NativeMotionSearchUiState(
     val emptyMessage: String,
 )
 
+internal data class NativeMotionSearchBookmark(
+    val focusedKey: String? = null,
+    val focusedResultPosition: Int = 0,
+    val resultAnchor: NativeBrowserScrollAnchor = NativeBrowserScrollAnchor(),
+    val cameraScrollX: Int = 0,
+)
+
 @SuppressLint("ViewConstructor")
 internal class NativeMotionSearchSurface(
     private val activity: ComponentActivity,
@@ -50,10 +59,22 @@ internal class NativeMotionSearchSurface(
     private val onSearch: () -> Unit,
     private val onFocused: (String, View) -> Unit,
     private val onNavigateOutLeft: () -> Unit,
+    initialBookmark: NativeMotionSearchBookmark? = null,
 ) : LinearLayout(activity) {
     private val subtitle = text(13f, secondary = true)
-    private val tabs = LinearLayout(activity).apply { orientation = HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+    private val tabs = LinearLayout(activity).apply {
+        orientation = HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        background = activity.nativeGlassPanelBackground()
+        setPadding(activity.dp(4), activity.dp(4), activity.dp(4), activity.dp(4))
+    }
     private val cameras = LinearLayout(activity).apply { orientation = HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+    private val cameraScroller = HorizontalScrollView(activity).apply {
+        isFocusable = false
+        isHorizontalScrollBarEnabled = false
+        overScrollMode = View.OVER_SCROLL_NEVER
+        addView(cameras, FrameLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
+    }
     private val preview = ImageView(activity).apply {
         scaleType = ImageView.ScaleType.CENTER_CROP
         setBackgroundColor(NativeTheme.palette.panel)
@@ -92,8 +113,8 @@ internal class NativeMotionSearchSurface(
         layoutManager = NativeLinearLayoutManager(activity)
         itemAnimator = null
         overScrollMode = View.OVER_SCROLL_NEVER
-        setPadding(0, 0, activity.dp(4), activity.dp(20))
-        addNativeFlatDividers()
+        setPadding(0, 0, activity.dp(4), activity.dp(8))
+        clipToPadding = false
     }
     private val resultAdapter = NativeListAdapter(
         onActivate = onActivate,
@@ -103,9 +124,14 @@ internal class NativeMotionSearchSurface(
     private var previewJob: Job? = null
     private var displayedCamera: String? = null
     private var state = initialState
+    private var pendingBookmark = initialBookmark
+    private var pendingFocusMoved = false
+    private var updateGeneration = 0
+    private var closed = false
 
     init {
         orientation = VERTICAL
+        clipChildren = false
         addView(
             LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
@@ -127,15 +153,11 @@ internal class NativeMotionSearchSurface(
                 addView(
                     LinearLayout(activity).apply {
                         orientation = VERTICAL
-                        setPadding(0, 0, activity.dp(10), 0)
+                        background = activity.nativeGlassPanelBackground(strong = true)
+                        setPadding(activity.dp(12), activity.dp(10), activity.dp(12), activity.dp(10))
                         addView(text(14f, bold = true).apply { setText(R.string.native_motion_choose_camera) })
                         addView(
-                            HorizontalScrollView(activity).apply {
-                                isFocusable = false
-                                isHorizontalScrollBarEnabled = false
-                                overScrollMode = View.OVER_SCROLL_NEVER
-                                addView(cameras, FrameLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
-                            },
+                            cameraScroller,
                             LayoutParams(LayoutParams.MATCH_PARENT, activity.dp(43)).apply { topMargin = activity.dp(3) },
                         )
                         addView(text(14f, bold = true).apply {
@@ -144,7 +166,8 @@ internal class NativeMotionSearchSurface(
                         })
                         addView(
                             FrameLayout(activity).apply {
-                                setBackgroundColor(NativeTheme.palette.panel)
+                                background = activity.nativeGlassPanelBackground(strong = true)
+                                clipToOutline = true
                                 addView(preview, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
                                 repeat(9) { index ->
                                     val button = TextView(activity).apply {
@@ -191,15 +214,13 @@ internal class NativeMotionSearchSurface(
                         )
                         addView(progress, LayoutParams(LayoutParams.MATCH_PARENT, activity.dp(3)).apply { topMargin = activity.dp(4) })
                     },
-                    LayoutParams(0, LayoutParams.MATCH_PARENT, 1.12f),
-                )
-                addView(
-                    View(activity).apply { setBackgroundColor(NativeTheme.palette.divider) },
-                    LayoutParams(activity.dp(1), LayoutParams.MATCH_PARENT).apply { marginEnd = activity.dp(10) },
+                    LayoutParams(0, LayoutParams.MATCH_PARENT, 1.12f).apply { marginEnd = activity.dp(10) },
                 )
                 addView(
                     LinearLayout(activity).apply {
                         orientation = VERTICAL
+                        background = activity.nativeGlassPanelBackground(strong = true)
+                        setPadding(activity.dp(12), activity.dp(10), activity.dp(12), activity.dp(10))
                         addView(resultsTitle)
                         addView(
                             FrameLayout(activity).apply {
@@ -216,13 +237,20 @@ internal class NativeMotionSearchSurface(
             LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f),
         )
         update(initialState)
-        post {
+        if (initialBookmark == null) post {
             val selectedTabIndex = initialState.tabs.indexOfFirst { it.selected }.coerceAtLeast(0)
             tabs.getChildAt(selectedTabIndex)?.requestFocus()
         }
     }
 
     fun update(next: NativeMotionSearchUiState) {
+        val generation = ++updateGeneration
+        val explicitRestore = pendingBookmark != null && !pendingFocusMoved
+        val bookmark = pendingBookmark ?: captureBookmark()
+        val resultsHadFocus = results.hasFocus()
+        val awaitingRows = next.searching && next.resultRows.isEmpty()
+        pendingBookmark = bookmark.takeIf { awaitingRows }
+        if (!awaitingRows) pendingFocusMoved = false
         state = next
         subtitle.text = next.subtitle
         updateTabs(next.tabs)
@@ -238,7 +266,14 @@ internal class NativeMotionSearchSurface(
         searchButton.setText(if (next.searching) R.string.native_motion_cancel_search else R.string.native_motion_find)
         progress.visibility = if (next.searching) View.VISIBLE else View.GONE
         progress.progress = ((next.progress ?: 0.0) * progress.max).toInt().coerceIn(0, progress.max)
-        resultAdapter.submitList(next.resultRows)
+        resultAdapter.submitList(next.resultRows) {
+            if (generation != updateGeneration || closed) return@submitList
+            if (awaitingRows) {
+                if ((explicitRestore || resultsHadFocus) && !hasFocus()) searchButton.requestFocus()
+            } else {
+                restorePosition(bookmark, explicitRestore || resultsHadFocus, explicitRestore, generation)
+            }
+        }
         empty.text = next.emptyMessage
         empty.visibility = if (next.resultRows.isEmpty()) View.VISIBLE else View.GONE
         resultsTitle.text = if (next.resultRows.isEmpty()) {
@@ -251,14 +286,88 @@ internal class NativeMotionSearchSurface(
             )
         }
         loadPreview(next.selectedCameraName)
+        if (next.searching && (grid.hasFocus() || cameras.hasFocus())) searchButton.requestFocus()
+    }
+
+    fun captureBookmark(): NativeMotionSearchBookmark {
+        if (state.searching && state.resultRows.isEmpty()) pendingBookmark?.let { return it }
+        val manager = results.layoutManager as? LinearLayoutManager
+        val position = manager?.findFirstVisibleItemPosition()?.coerceAtLeast(0) ?: 0
+        return NativeMotionSearchBookmark(
+            focusedKey = findFocus()?.tag as? String,
+            focusedResultPosition = results.findFocus()?.let { results.findContainingViewHolder(it)?.bindingAdapterPosition }
+                ?.coerceAtLeast(0) ?: position,
+            resultAnchor = NativeBrowserScrollAnchor(
+                resultAdapter.currentList.getOrNull(position)?.key,
+                position,
+                manager?.findViewByPosition(position)?.let { manager.getDecoratedTop(it) - results.paddingTop } ?: 0,
+            ),
+            cameraScrollX = cameraScroller.scrollX,
+        )
+    }
+
+    fun restoreBookmark(bookmark: NativeMotionSearchBookmark) {
+        pendingBookmark = bookmark
+        pendingFocusMoved = false
+        update(state)
+    }
+
+    private fun restorePosition(
+        bookmark: NativeMotionSearchBookmark,
+        restoreFocus: Boolean,
+        explicit: Boolean,
+        generation: Int,
+    ) {
+        val anchor = bookmark.resultAnchor
+        val rows = resultAdapter.currentList
+        if (rows.isNotEmpty()) {
+            val position = rows.indexOfFirst { it.key == anchor.key }.takeIf { it >= 0 }
+                ?: anchor.position.coerceIn(0, rows.lastIndex)
+            (results.layoutManager as? LinearLayoutManager)?.scrollToPositionWithOffset(position, anchor.offset)
+        }
+        doOnPreDraw {
+            if (closed || generation != updateGeneration) return@doOnPreDraw
+            cameraScroller.scrollTo(bookmark.cameraScrollX, 0)
+            if (!restoreFocus) return@doOnPreDraw
+            val currentFocus = activity.currentFocus
+            if (!explicit && currentFocus != null && currentFocus !== this && !isAncestorOf(currentFocus)) return@doOnPreDraw
+            val exact = bookmark.focusedKey?.let { findViewWithTag<View>(it) }
+                ?.takeIf { it.isFocusable && it.isEnabled && it.isShown }
+            if (exact?.requestFocus() == true) return@doOnPreDraw
+            val rowIndex = rows.indexOfFirst { it.key == bookmark.focusedKey && it.focusable }.takeIf { it >= 0 }
+                ?: rows.indices.filter { rows[it].focusable }.minByOrNull { kotlin.math.abs(it - bookmark.focusedResultPosition) }
+            if (rowIndex != null) results.focusRow(rowIndex)
+            else if (!searchButton.requestFocus()) focusSelectedTab()
+        }
     }
 
     fun close() {
+        closed = true
         previewJob?.cancel()
         previewJob = null
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val trackIntent = event.action == KeyEvent.ACTION_DOWN && when (event.keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> true
+            else -> false
+        }
+        if (trackIntent) rememberLoadingFocusIntent()
+        val handled = dispatchContentKeyEvent(event)
+        if (trackIntent) rememberLoadingFocusIntent()
+        return handled
+    }
+
+    private fun rememberLoadingFocusIntent() {
+        if (!state.searching || state.resultRows.isNotEmpty()) return
+        val saved = pendingBookmark ?: return
+        pendingFocusMoved = true
+        findFocus()?.let { focused -> pendingBookmark = saved.copy(focusedKey = focused.tag as? String) }
+    }
+
+    private fun dispatchContentKeyEvent(event: KeyEvent): Boolean {
         if (event.action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event)
         val focused = findFocus() ?: return super.dispatchKeyEvent(event)
         when {
@@ -452,6 +561,7 @@ internal class NativeMotionSearchSurface(
     }
 
     private fun focusListener(key: String) = OnFocusChangeListener { view, focused ->
+        view.applyNativeFocusMotion(focused)
         if (focused) onFocused(key, view)
     }
 

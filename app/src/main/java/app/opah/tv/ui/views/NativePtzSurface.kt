@@ -42,10 +42,11 @@ internal class NativePtzSurface(
         setTextColor(NativeTheme.palette.secondaryText)
     }
     private var imageJob: Job? = null
+    private var heldControl: View? = null
 
     init {
         orientation = VERTICAL
-        setPadding(activity.dp(20), activity.dp(16), activity.dp(20), activity.dp(18))
+        setPadding(activity.dp(36), activity.dp(24), activity.dp(36), activity.dp(24))
         setBackgroundColor(NativeTheme.palette.background)
         addView(
             LinearLayout(activity).apply {
@@ -68,12 +69,20 @@ internal class NativePtzSurface(
         )
         val preview = ImageView(activity).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            setBackgroundColor(NativeTheme.palette.panel)
+            background = activity.nativeGlassPanelBackground(strong = true)
+            clipToOutline = true
             setImageBitmap(cachedBitmap)
         }
         val controlPanel = LinearLayout(activity).apply {
             orientation = VERTICAL
             setPadding(activity.dp(14), activity.dp(12), activity.dp(14), activity.dp(18))
+            addView(TextView(activity).apply {
+                text = "Hold Select to move, release to stop"
+                textSize = 13f
+                setTextColor(NativeTheme.palette.secondaryText)
+                setPadding(0, 0, 0, activity.dp(10))
+                visibility = if (info.canMove || info.canZoom || info.canFocus) View.VISIBLE else View.GONE
+            })
             if (info.canMove) {
                 addView(TextView(activity).apply {
                     text = "Move camera"
@@ -119,17 +128,14 @@ internal class NativePtzSurface(
         val controlScroller = ScrollView(activity).apply {
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_NEVER
-            setBackgroundColor(NativeTheme.palette.panel)
+            background = activity.nativeGlassPanelBackground(strong = true)
+            clipToOutline = true
             addView(controlPanel, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         }
         addView(
             LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                addView(preview, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply { marginEnd = activity.dp(12) })
-                addView(
-                    View(activity).apply { setBackgroundColor(NativeTheme.palette.divider) },
-                    LayoutParams(activity.dp(1), LayoutParams.MATCH_PARENT).apply { marginEnd = activity.dp(12) },
-                )
+                addView(preview, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f).apply { marginEnd = activity.dp(18) })
                 addView(controlScroller, LayoutParams(activity.dp(340), LayoutParams.MATCH_PARENT))
             },
             LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = activity.dp(10) },
@@ -150,7 +156,29 @@ internal class NativePtzSurface(
         }
     }
 
-    fun close() { imageJob?.cancel(); onCommand(PtzCommand.Stop) }
+    fun close() {
+        imageJob?.cancel()
+        heldControl?.isPressed = false
+        heldControl = null
+        onCommand(PtzCommand.Stop)
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (!hasWindowFocus) stopHeldControl()
+    }
+
+    override fun onDetachedFromWindow() {
+        stopHeldControl()
+        super.onDetachedFromWindow()
+    }
+
+    private fun stopHeldControl() {
+        val held = heldControl ?: return
+        heldControl = null
+        held.isPressed = false
+        onCommand(PtzCommand.Stop)
+    }
 
     private fun controlRow(label: String, decrease: PtzCommand, increase: PtzCommand) = LinearLayout(activity).apply {
         gravity = Gravity.CENTER_VERTICAL
@@ -166,23 +194,42 @@ internal class NativePtzSurface(
 
     private fun holdButton(label: String, description: String, command: PtzCommand) =
         controlButton(label, action = { Unit }).apply {
+        textSize = 24f
+        setTypeface(typeface, Typeface.BOLD)
         contentDescription = description
         layoutParams = LayoutParams(activity.dp(72), activity.dp(40)).apply {
             marginStart = activity.dp(2)
             marginEnd = activity.dp(2)
         }
-        setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> onCommand(command)
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> onCommand(PtzCommand.Stop)
-            }
-            false
+        onFocusChangeListener = OnFocusChangeListener { view, focused ->
+            view.applyNativeFocusMotion(focused)
+            if (!focused && heldControl === view) stopHeldControl()
         }
-        setOnKeyListener { _, keyCode, event ->
-            if (keyCode != KeyEvent.KEYCODE_DPAD_CENTER && keyCode != KeyEvent.KEYCODE_ENTER) return@setOnKeyListener false
+        setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    stopHeldControl()
+                    heldControl = view
+                    view.isPressed = true
+                    onCommand(command)
+                }
+                MotionEvent.ACTION_UP -> { stopHeldControl(); view.performClick() }
+                MotionEvent.ACTION_CANCEL -> stopHeldControl()
+            }
+            true
+        }
+        setOnKeyListener { view, keyCode, event ->
+            if (keyCode != KeyEvent.KEYCODE_DPAD_CENTER && keyCode != KeyEvent.KEYCODE_ENTER &&
+                keyCode != KeyEvent.KEYCODE_NUMPAD_ENTER
+            ) return@setOnKeyListener false
             when (event.action) {
-                KeyEvent.ACTION_DOWN -> if (event.repeatCount == 0) onCommand(command)
-                KeyEvent.ACTION_UP -> onCommand(PtzCommand.Stop)
+                KeyEvent.ACTION_DOWN -> if (event.repeatCount == 0) {
+                    stopHeldControl()
+                    heldControl = view
+                    view.isPressed = true
+                    onCommand(command)
+                }
+                KeyEvent.ACTION_UP -> stopHeldControl()
             }
             true
         }
@@ -214,6 +261,7 @@ internal class NativePtzSurface(
             marginEnd = activity.dp(2)
         }
         setOnClickListener { action() }
+        onFocusChangeListener = OnFocusChangeListener { view, focused -> view.applyNativeFocusMotion(focused) }
     }
 
     private fun actionRow(label: String, action: () -> Unit) = TextView(activity).apply {

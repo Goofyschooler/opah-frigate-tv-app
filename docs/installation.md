@@ -22,7 +22,7 @@ This link always downloads `opah-latest.apk` from the newest published release.
 You can also open the project's [GitHub Releases page](https://github.com/VibeCodingAntagonist/opah-frigate-tv-app/releases),
 choose the newest release, and download the versioned file named like
 `opah-vX.Y.Z.apk`. The letters stand for the release version; for example,
-version 0.4.0 is named `opah-v0.4.0.apk`. Both APK names in that release contain
+version 0.6.0 is named `opah-v0.6.0.apk`. Both APK names in that release contain
 the same app.
 
 Do not download Opah from an unofficial mirror or APK website.
@@ -50,10 +50,11 @@ Keep **Live video address** set to **Same as Frigate (recommended)** unless live
 video must use a different local host or port. If you choose a separate
 address, Opah shows the additional fields and explains what they affect.
 
-Select an address or sign-in field to open the on-screen keyboard. Opah asks
-Android to show it immediately and retries if the TV is slow to respond. After
-the first successful sign-in, Opah can remember the connection and sign in
-automatically.
+Select an address or sign-in field to open the on-screen keyboard. Choose
+**Test connection** to check your entries or **Connect** to sign in. The form
+stays open if a detail needs correcting, so you can fix it without entering
+everything again. After the first successful sign-in, Opah can remember the
+connection and sign in automatically.
 
 If the TV and Frigate server are on the same trusted private network, you can
 instead enter Frigate's direct port `5000` address, such as
@@ -61,6 +62,21 @@ instead enter Frigate's direct port `5000` address, such as
 does not use an account and gives the TV full Frigate access. Never expose port
 `5000` to the internet; use Frigate's authenticated address for ordinary or
 remote connections.
+
+## Get started with the remote
+
+After connecting, **Cameras** shows your camera previews. Select one to watch
+live video. Move left from the edge of the grid to open the side navigation
+and choose **Activity**, **Clips**, or **Settings**.
+
+Press Back to close a dialog or return to the previous screen. In camera views
+and playback, Back hides visible controls first. Press Back while the controls
+are hidden to leave the view. Press the center button to reveal the controls,
+then press it again to activate the focused control.
+
+Choose **New view** on Cameras to save two to four cameras together. In
+**Settings** > **Appearance**, choose a theme or turn on **High contrast**,
+**Reduce motion**, or **Reduce transparency**.
 
 ## Optional TV alerts
 
@@ -88,7 +104,7 @@ your action.
 
 You can also download the newer APK from the Releases page above, send it to the
 TV, and open it yourself. Android should offer to update the existing app. Your
-saved server, sign-in, camera groups, and display choices should remain in
+saved server, sign-in, camera views, and display choices should remain in
 place.
 
 ### One-time step when moving from 0.2.0 to 0.2.1

@@ -130,6 +130,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -522,10 +523,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     private val operationsRepository = container.frigateOperationsRepository
     private val briefingCoordinator = container.briefingCoordinator
     private val briefingScopeFactory = container.briefingScopeFactory
-    private val documentationImages = DocumentationImageStore(application)
+    private val documentationImages by lazy { DocumentationSupport.images(application) }
     private var reviewLoadJob: Job? = null
+    private var reviewLoadMoreJob: Job? = null
+    private var reviewLoadGeneration = 0L
     private var reviewDetailJob: Job? = null
     private var reviewPlaybackNavigationJob: Job? = null
+    private var reviewWriteRequestId = 0L
     private var historyLoadJob: Job? = null
     private var historyPrefetchJob: Job? = null
     private val historyRangeCache = linkedMapOf<String, HistoryLoadResult>()
@@ -533,6 +537,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     private var activitySearchJob: Job? = null
     private var activitySearchRequestId: Long = 0
     private var enrichmentJob: Job? = null
+    private var connectionRequestGeneration = 0L
     private var briefingRefreshJob: Job? = null
     private var updateCheckJob: Job? = null
     private var automaticUpdateCheckJob: Job? = null
@@ -546,13 +551,55 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     private val monitorMutex = Mutex()
     private val monitorArbiter = MonitorArbiter()
     private val documentationReviewStatuses = mutableMapOf<String, Boolean>()
+    private val nativeBrowseRestoration = NativeBrowseRestorationGate()
 
     private val _state = MutableStateFlow(Phase0UiState())
     val state: StateFlow<Phase0UiState> = _state.asStateFlow()
 
+    internal fun attachNativeBrowseSelections(saved: NativeBrowseSelections?) {
+        nativeBrowseRestoration.attach(saved)
+    }
+
+    internal fun captureNativeBrowseSelections(): NativeBrowseSelections =
+        nativeBrowseRestoration.pending ?: _state.value.captureAuthorizedNativeBrowseSelections(nativeBrowseAccess())
+
+    internal fun restoreNativeBrowseSelectionsIfReady(): NativeBrowseRestoreResult {
+        if (nativeBrowseRestoration.pending == null) return NativeBrowseRestoreResult.NO_PENDING
+        return nativeBrowseRestoration.restore(nativeBrowseAccess()) { valid ->
+            _state.update { it.withRestoredNativeBrowseSelections(valid) }
+        }
+    }
+
+    internal fun validatedNativeBrowseSelections(saved: NativeBrowseSelections): NativeBrowseSelections? =
+        nativeBrowseAccess()?.let(saved::authorizedFor)
+
+    private fun nativeBrowseProfileKey(): String? = _state.value.activeProfile?.let { profile ->
+        runCatching {
+            container.compatibilityIdentityFactory.derive(
+                CompatibilityIdentityDomain.PROFILE,
+                profile.compatibilityIdentityComponents(),
+            ).value
+        }.getOrNull()
+    }
+
+    private fun nativeBrowseAccess(): NativeBrowseAccess? {
+        val current = _state.value
+        val snapshot = current.snapshot ?: return null
+        if (current.activeProfile == null || current.privacy.loading) return null
+        val cameraIds = snapshot.cameras.mapTo(mutableSetOf(), Camera::name)
+        return NativeBrowseAccess(
+            profileKey = nativeBrowseProfileKey(),
+            reviewCameraIds = visibleCameraNames(PrivacySurface.ACTIVITY).intersect(cameraIds),
+            historyCameraIds = visibleCameraNames(PrivacySurface.HISTORY).intersect(cameraIds),
+            searchCameraIds = visibleCameraNames(PrivacySurface.SEARCH).intersect(cameraIds),
+            features = FrigateFeature.entries.filterTo(mutableSetOf(), snapshot.capabilities::supports),
+            nowSeconds = System.currentTimeMillis() / 1_000.0,
+        )
+    }
+
     init {
         if (BuildConfig.DOCUMENTATION_MODE) {
-            _state.value = DocumentationFixtures.state(null)
+            _state.value = DocumentationSupport.data.state(null)
         } else {
             _state.update { current ->
                 current.copy(
@@ -732,7 +779,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     fun setDocumentationScenario(scenario: String?) {
         if (!BuildConfig.DOCUMENTATION_MODE) return
         documentationReviewStatuses.clear()
-        _state.value = DocumentationFixtures.state(scenario)
+        _state.value = DocumentationSupport.data.state(scenario)
     }
 
     fun checkForUpdates(forceRefresh: Boolean = false) {
@@ -847,31 +894,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         rtspHostOverride: String,
         rtspPortText: String,
     ) {
-        if (_state.value.loading) return
-        val profileResult = ConnectionProfileFactory.create(
-            rawApiBaseUrl = rawUrl,
-            username = username,
-            rtspHostOverride = rtspHostOverride,
-            rtspPort = rtspPortText.toIntOrNull() ?: -1,
-        )
-        val profile = profileResult.getOrElse { error ->
-            _state.update { it.copy(errorMessage = error.message ?: "Invalid connection settings") }
-            return
-        }
-
-        viewModelScope.launch {
-            enrichmentJob?.cancel()
-            beginConnectionWork("Connecting…")
-            try {
-                val user = sessionManager.signIn(profile, password)
-                val bootstrap = repository.discoverEssential(profile, user)
-                clearImageCaches()
-                publishConnected(profile, bootstrap)
-                startEnrichment(profile, bootstrap)
-            } catch (error: Throwable) {
-                showFailure(error)
-            }
-        }
+        submitConnection(rawUrl, username, password, rtspHostOverride, rtspPortText, testOnly = false)
     }
 
     fun testConnection(
@@ -881,39 +904,115 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         rtspHostOverride: String,
         rtspPortText: String,
     ) {
-        if (_state.value.loading) return
-        val profile = createProfile(
-            rawUrl = rawUrl,
+        submitConnection(rawUrl, username, password, rtspHostOverride, rtspPortText, testOnly = true)
+    }
+
+    internal fun connect(
+        rawUrl: String,
+        username: String,
+        password: String,
+        rtspHostOverride: String,
+        rtspPortText: String,
+        onResult: (Result<String>) -> Unit,
+    ): Job? = submitConnection(rawUrl, username, password, rtspHostOverride, rtspPortText, false, onResult)
+
+    internal fun testConnection(
+        rawUrl: String,
+        username: String,
+        password: String,
+        rtspHostOverride: String,
+        rtspPortText: String,
+        onResult: (Result<String>) -> Unit,
+    ): Job? = submitConnection(rawUrl, username, password, rtspHostOverride, rtspPortText, true, onResult)
+
+    private fun submitConnection(
+        rawUrl: String,
+        username: String,
+        password: String,
+        rtspHostOverride: String,
+        rtspPortText: String,
+        testOnly: Boolean,
+        onResult: ((Result<String>) -> Unit)? = null,
+    ): Job? {
+        if (_state.value.loading) {
+            onResult?.invoke(Result.failure(IllegalStateException("Wait for the current connection attempt")))
+            return null
+        }
+        val profile = ConnectionProfileFactory.create(
+            rawApiBaseUrl = rawUrl,
             username = username,
             rtspHostOverride = rtspHostOverride,
-            rtspPortText = rtspPortText,
-        ) ?: return
-
-        viewModelScope.launch {
-            beginConnectionWork("Testing connection…")
-            runCatching {
-                sessionManager.testConnection(profile, password) { user ->
-                    repository.discover(profile, user)
-                }
+            rtspPort = rtspPortText.toIntOrNull() ?: -1,
+        ).getOrElse { error ->
+            if (onResult == null) {
+                _state.update { it.copy(errorMessage = error.message ?: "Invalid connection settings") }
+            } else {
+                onResult(Result.failure(error))
             }
-                .onSuccess { snapshot ->
+            return null
+        }
+        val generation = ++connectionRequestGeneration
+        val previousStatus = _state.value.statusMessage
+        if (!testOnly) enrichmentJob?.cancel()
+        beginConnectionWork(if (testOnly) "Testing connection…" else "Connecting…")
+        return viewModelScope.launch {
+            try {
+                val message = if (testOnly) {
+                    val snapshot = sessionManager.testConnection(profile, password) { user ->
+                        repository.discover(profile, user)
+                    }
+                    if (!isActive || generation != connectionRequestGeneration) return@launch
+                    val testedMessage = "Connected • ${snapshot.cameras.size} cameras"
                     _state.update {
                         it.copy(
                             loading = false,
                             connectionWorkInProgress = false,
-                            statusMessage = "Connected • ${snapshot.cameras.size} cameras",
+                            statusMessage = testedMessage,
                             errorMessage = null,
                         )
                     }
+                    testedMessage
+                } else {
+                    val user = sessionManager.signIn(profile, password)
+                    val bootstrap = repository.discoverEssential(profile, user)
+                    if (!isActive || generation != connectionRequestGeneration) return@launch
+                    clearImageCaches()
+                    publishConnected(profile, bootstrap)
+                    startEnrichment(profile, bootstrap)
+                    "Connected"
                 }
-                .onFailure(::showFailure)
+                onResult?.invoke(Result.success(message))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (!isActive || generation != connectionRequestGeneration) return@launch
+                if (onResult == null) {
+                    showFailure(error)
+                } else {
+                    logger.warning("Frigate operation failed", error)
+                    _state.update {
+                        it.copy(loading = false, connectionWorkInProgress = false, statusMessage = previousStatus)
+                    }
+                    onResult(Result.failure(IllegalStateException(error.toOpahFailure().userMessage)))
+                }
+            }
+        }.also { request ->
+            request.invokeOnCompletion { cause ->
+                if (cause is CancellationException && generation == connectionRequestGeneration) {
+                    _state.update {
+                        if (it.connectionWorkInProgress) {
+                            it.copy(loading = false, connectionWorkInProgress = false, statusMessage = previousStatus)
+                        } else it
+                    }
+                }
+            }
         }
     }
 
     fun refresh() {
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update { current ->
-                DocumentationFixtures.state(null).copy(settings = current.settings)
+                DocumentationSupport.data.state(null).copy(settings = current.settings)
             }
             return
         }
@@ -963,7 +1062,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         container.onSignedOut()
         val beforeLogout = _state.value
         val profile = beforeLogout.activeProfile ?: beforeLogout.savedProfile
-        reviewLoadJob?.cancel()
+        cancelReviewLoads()
         reviewDetailJob?.cancel()
         reviewPlaybackNavigationJob?.cancel()
         historyLoadJob?.cancel()
@@ -1504,7 +1603,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
-                    playback = DocumentationFixtures.livePlayback(camera),
+                    playback = DocumentationSupport.data.livePlayback(camera),
                     activeCameraName = camera.name,
                     errorMessage = null,
                 )
@@ -1531,7 +1630,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
-                    playback = DocumentationFixtures.historyPlayback(camera, start, end).copy(
+                    playback = DocumentationSupport.data.historyPlayback(camera, start, end).copy(
                         detail = "30 seconds earlier",
                         recordingStartTime = start,
                         recordingEndTime = end,
@@ -1649,7 +1748,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             _state.update {
                 it.copy(
                     liveActions = it.liveActions.copy(
-                        recordingEventId = "documentation-event",
+                        recordingEventId = DocumentationSupport.data.recordingEventId(),
                         recordingCameraName = cameraName,
                         message = "Recording started • stops automatically after 5 minutes",
                         errorMessage = null,
@@ -1991,7 +2090,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
-                    playback = DocumentationFixtures.livePlayback(camera).copy(
+                    playback = DocumentationSupport.data.livePlayback(camera).copy(
                         detail = "${option.label} • Explicit stream selection",
                     ),
                     activeCameraName = camera.name,
@@ -2009,7 +2108,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
-                    playback = DocumentationFixtures.birdseyePlayback(),
+                    playback = DocumentationSupport.data.birdseyePlayback(),
                     activeCameraName = null,
                     errorMessage = null,
                 )
@@ -2053,13 +2152,19 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             .onFailure { _state.update { state -> state.copy(errorMessage = it.message) } }
     }
 
-    fun playReview(item: ReviewItem, useHomeActivityContext: Boolean = false) {
-        val current = _state.value
+    fun playReview(
+        item: ReviewItem,
+        useHomeActivityContext: Boolean = false,
+        visibleActivityItemIds: List<String>? = null,
+    ) {
+        val current = if (visibleActivityItemIds != null) _state.value.projectForPrivacy() else _state.value
+        if (visibleActivityItemIds != null && current.review.items.none { it.id == item.id }) return
         val context = reviewPlaybackContext(
             itemId = item.id,
             review = current.review,
             homeItems = current.snapshot?.recentReviewItems.orEmpty(),
             useHomeActivityContext = useHomeActivityContext,
+            visibleActivityItemIds = visibleActivityItemIds,
         )
         openReviewPlayback(item, context.itemIds, context.queue)
     }
@@ -2082,16 +2187,22 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             .map(BriefingEntry::item)
             .filter { it.camera in allowed }
         val first = items.firstOrNull() ?: return
+        cancelReviewLoads()
         _state.update { state ->
             state.copy(
                 review = state.review.copy(
                     items = items,
                     loadedOnce = true,
                     loading = false,
+                    loadingMore = false,
+                    countsLoading = false,
+                    hasMore = false,
+                    nextBeforeBySeverity = emptyMap(),
                     queueItemIds = items.map(ReviewItem::id),
                     queueIndex = 0,
                     queueActive = true,
                     queueCompleted = false,
+                    queueTitle = "Highlights",
                     selectedItemId = null,
                     errorMessage = null,
                 ),
@@ -2113,7 +2224,27 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val current = _state.value
         val latestItem = reviewPlaybackItems(current).firstOrNull { it.id == item.id } ?: item
         if (!latestItem.hasBeenReviewed && current.settings.autoMarkReviewedAfterPlayback) {
-            setReviewReviewed(latestItem, true)
+            if (!current.review.hasPendingWrite()) {
+                setReviewReviewed(latestItem, true)
+            } else {
+                // A pending Save must not discard the automatic watched acknowledgement.
+                viewModelScope.launch {
+                    while (_state.value.review.hasPendingWrite()) {
+                        val waiting = _state.value
+                        if (waiting.activeProfile != current.activeProfile || waiting.privacy.epoch != current.privacy.epoch) return@launch
+                        _state.first { next ->
+                            !next.review.hasPendingWrite() || next.activeProfile != current.activeProfile ||
+                                next.privacy.epoch != current.privacy.epoch
+                        }
+                    }
+                    val latest = _state.value
+                    if (latest.activeProfile == current.activeProfile && latest.privacy.epoch == current.privacy.epoch &&
+                        latest.settings.autoMarkReviewedAfterPlayback) {
+                        val visibleItem = reviewPlaybackItems(latest).firstOrNull { it.id == item.id }
+                        if (visibleItem != null && !visibleItem.hasBeenReviewed) setReviewReviewed(visibleItem, true)
+                    }
+                }
+            }
         }
     }
 
@@ -2242,6 +2373,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     fun closePlayback() {
         reviewPlaybackNavigationJob?.cancel()
         reviewPlaybackNavigationJob = null
+        if (_state.value.playback?.activityItemId != null) reviewDetailJob?.cancel()
         _state.update { state ->
             val returningFromActivity = state.playback?.activityItemId != null
             val returningFromBriefing = state.playback?.briefingHighlight == true
@@ -2249,19 +2381,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 playback = null,
                 activeCameraName = null,
                 review = if (returningFromActivity) {
-                    state.review.copy(
-                        selectedItemId = null,
-                        recordingState = ReviewRecordingState.IDLE,
-                        detailErrorMessage = null,
-                        detailLoading = false,
-                        queueItemIds = emptyList(),
-                        queueIndex = 0,
-                        queueActive = false,
-                        queueCompleted = false,
-                        playbackItem = null,
-                        advancingPlayback = false,
-                        playbackNavigationMessage = null,
-                    )
+                    state.review.afterActivityPlaybackClosed(requireNotNull(state.playback))
                 } else {
                     state.review
                 },
@@ -2289,7 +2409,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         ) return
         val current = _state.value
         val request = if (BuildConfig.DOCUMENTATION_MODE) {
-            DocumentationFixtures.recordedPlayback(item).copy(
+            DocumentationSupport.data.recordedPlayback(item).copy(
                 activityContextItemIds = contextItemIds,
                 activityQueueContext = queueContext,
                 briefingHighlight = briefingHighlight,
@@ -2837,15 +2957,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
-                    modes = ModesUiState(
-                        loadedOnce = true,
-                        modes = listOf(
-                            FrigateMode("home", "Home"),
-                            FrigateMode("away", "Away"),
-                            FrigateMode("night", "Night"),
-                        ),
-                        activeMode = "home",
-                    ),
+                    modes = DocumentationSupport.data.modes(),
                 )
             }
             return
@@ -3027,6 +3139,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
 
     fun updateHighContrast(enabled: Boolean) = updateSettings { it.copy(highContrast = enabled) }
 
+    fun updateReducedTransparency(enabled: Boolean) = updateSettings { it.copy(reducedTransparency = enabled) }
+
     fun updateSubtleRoundedCorners(enabled: Boolean) = updateSettings {
         it.copy(subtleRoundedCorners = enabled)
     }
@@ -3040,7 +3154,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 it.copy(
                     information = InformationUiState(
                         loadedOnce = true,
-                        summary = DocumentationFixtures.information(),
+                        summary = DocumentationSupport.data.information(),
                     ),
                 )
             }
@@ -3161,7 +3275,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
-                    playback = DocumentationFixtures.compatibilityPlayback(camera),
+                    playback = DocumentationSupport.data.compatibilityPlayback(camera),
                     activeCameraName = camera.name,
                     errorMessage = null,
                 )
@@ -3361,10 +3475,25 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun cancelReviewLoads(): Long {
+        reviewLoadGeneration += 1
+        reviewLoadJob?.cancel()
+        reviewLoadJob = null
+        reviewLoadMoreJob?.cancel()
+        reviewLoadMoreJob = null
+        return reviewLoadGeneration
+    }
+
     fun loadReview() {
+        val generation = cancelReviewLoads()
+        // A deliberate browse/refresh leaves a temporary review queue.
+        _state.update { it.copy(review = it.review.copy(
+            queueActive = false, queueCompleted = false, queueItemIds = emptyList(),
+            loading = false, loadingMore = false, countsLoading = false,
+        )) }
         if (BuildConfig.DOCUMENTATION_MODE) {
             val filters = _state.value.review.filters
-            val allItems = DocumentationFixtures.reviewItems().withReviewStatuses(documentationReviewStatuses)
+            val allItems = DocumentationSupport.data.reviewItems().withReviewStatuses(documentationReviewStatuses)
             val items = allItems.filter { item ->
                 (filters.severity == null || item.severity == filters.severity) &&
                     (filters.camera == null || item.camera == filters.camera) &&
@@ -3379,8 +3508,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 it.copy(
                     review = it.review.copy(
                         items = items,
-                        knownLabels = DocumentationFixtures.reviewItems().flatMap(ReviewItem::objects).toSet(),
-                        knownZones = DocumentationFixtures.reviewItems().flatMap(ReviewItem::zones).toSet(),
+                        knownLabels = DocumentationSupport.data.reviewItems().flatMap(ReviewItem::objects).toSet(),
+                        knownZones = DocumentationSupport.data.reviewItems().flatMap(ReviewItem::zones).toSet(),
                         counts = app.opah.tv.data.model.ReviewCounts(
                             reviewedAlerts = alertItems.count(ReviewItem::hasBeenReviewed),
                             reviewedDetections = detectionItems.count(ReviewItem::hasBeenReviewed),
@@ -3405,7 +3534,6 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val allowedCameras = visibleCameraNames(PrivacySurface.ACTIVITY)
         if (allowedCameras.isEmpty()) return
         val filters = current.review.filters
-        reviewLoadJob?.cancel()
         reviewDetailJob?.cancel()
         reviewLoadJob = viewModelScope.launch {
             _state.update {
@@ -3436,6 +3564,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     discovery.await() to counts.await()
                 }
             }.onSuccess { (discovery, countsResult) ->
+                if (!isActive || generation != reviewLoadGeneration) return@launch
                 _state.update { state ->
                     val labels = discovery.items.flatMap(ReviewItem::objects)
                         .filter(String::isNotBlank)
@@ -3459,6 +3588,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
             }.onFailure { error ->
+                if (error is CancellationException) throw error
+                if (!isActive || generation != reviewLoadGeneration) return@launch
                 if (error is AuthenticationExpiredException) {
                     handleConnectedFailure(error)
                 } else {
@@ -3485,12 +3616,14 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val current = _state.value
         if (
             BuildConfig.DOCUMENTATION_MODE || current.review.loading || current.review.loadingMore ||
-            !current.review.hasMore
+            !current.review.hasMore || current.review.queueActive || reviewLoadMoreJob?.isActive == true
         ) return
         val profile = current.activeProfile ?: return
-        val allowedCameras = current.snapshot?.user?.allowedCameras.orEmpty()
+        val allowedCameras = visibleCameraNames(PrivacySurface.ACTIVITY)
+        if (allowedCameras.isEmpty()) return
         val filters = current.review.filters
-        viewModelScope.launch {
+        val generation = reviewLoadGeneration
+        reviewLoadMoreJob = viewModelScope.launch {
             _state.update { it.copy(review = it.review.copy(loadingMore = true, errorMessage = null)) }
             runCatching {
                 repository.searchReview(
@@ -3503,6 +3636,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     beforeBySeverity = current.review.nextBeforeBySeverity,
                 )
             }.onSuccess { discovery ->
+                if (!isActive || generation != reviewLoadGeneration) return@launch
                 _state.update { state ->
                     val combined = (state.review.items + discovery.items).distinctBy(ReviewItem::id)
                     state.copy(
@@ -3517,6 +3651,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
             }.onFailure { error ->
+                if (error is CancellationException) throw error
+                if (!isActive || generation != reviewLoadGeneration) return@launch
                 if (error is AuthenticationExpiredException) {
                     handleConnectedFailure(error)
                 } else {
@@ -3634,6 +3770,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
 
     fun startReviewQueue() {
         val items = _state.value.review.items.filterNot(ReviewItem::hasBeenReviewed)
+        cancelReviewLoads()
+        _state.update { it.copy(review = it.review.copy(loading = false, loadingMore = false, countsLoading = false, errorMessage = null)) }
         if (items.isEmpty()) {
             _state.update {
                 it.copy(
@@ -3655,6 +3793,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     queueIndex = 0,
                     queueActive = true,
                     queueCompleted = false,
+                    queueTitle = "New activity",
                 ),
             )
         }
@@ -3703,23 +3842,29 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setReviewReviewed(item: ReviewItem, reviewed: Boolean) {
-        if (item.hasBeenReviewed == reviewed || _state.value.review.markingReviewedItemId != null) return
+        if (item.hasBeenReviewed == reviewed || _state.value.review.hasPendingWrite()) return
         if (BuildConfig.DOCUMENTATION_MODE) {
             publishReviewStatus(item.id, reviewed)
             return
         }
         val profile = _state.value.activeProfile ?: return
+        val grant = issuePrivacyGrant(PrivacySurface.ACTIVITY,
+            PrivacyTarget.Review(item.id, item.camera, item.subLabels.isNotEmpty())) ?: return
+        val requestId = ++reviewWriteRequestId
         _state.update {
             it.copy(
                 review = it.review.copy(
                     markingReviewedItemId = item.id,
                     detailErrorMessage = null,
+                    actionError = it.review.actionError?.takeUnless { error -> error.itemId == item.id && error.action == ReviewAction.MARK_REVIEWED },
                 ),
             )
         }
         viewModelScope.launch {
+            if (!revalidateReviewWrite(requestId, profile, listOf(grant))) return@launch
             runCatching { repository.setReviewReviewed(profile, item, reviewed) }
                 .onSuccess {
+                    if (!revalidateReviewWrite(requestId, profile, listOf(grant))) return@onSuccess
                     publishReviewStatus(item.id, reviewed)
                     if (reviewed) {
                         val briefingEntry = _state.value.briefing.summary?.entries.orEmpty()
@@ -3733,6 +3878,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
                 .onFailure { error ->
+                    if (error is CancellationException) { clearReviewWrite(requestId); throw error }
+                    if (!revalidateReviewWrite(requestId, profile, listOf(grant))) return@onFailure
                     if (error is AuthenticationExpiredException) {
                         handleConnectedFailure(error)
                     } else {
@@ -3742,6 +3889,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                                 review = state.review.copy(
                                     markingReviewedItemId = null,
                                     detailErrorMessage = "Frigate couldn't update this activity",
+                                    actionError = ReviewActionError(item.id, ReviewAction.MARK_REVIEWED,
+                                        "Couldn’t update this activity", reviewed = reviewed),
                                 ),
                             )
                         }
@@ -3752,19 +3901,26 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
 
     fun markAllShownActivityReviewed() {
         val current = _state.value
-        val items = current.review.unreviewedShownActivity()
-        if (items.isEmpty() || current.review.markingAllReviewed) return
+        val items = current.projectForPrivacy().review.unreviewedShownActivity()
+        if (items.isEmpty() || current.review.hasPendingWrite()) return
         if (BuildConfig.DOCUMENTATION_MODE) {
             publishReviewStatuses(items.map(ReviewItem::id).toSet(), reviewed = true)
             return
         }
         val profile = current.activeProfile ?: return
+        val grants = items.map { item ->
+            issuePrivacyGrant(PrivacySurface.ACTIVITY,
+                PrivacyTarget.Review(item.id, item.camera, item.subLabels.isNotEmpty())) ?: return
+        }
+        val requestId = ++reviewWriteRequestId
         _state.update {
             it.copy(review = it.review.copy(markingAllReviewed = true, errorMessage = null))
         }
         viewModelScope.launch {
+            if (!revalidateReviewWrite(requestId, profile, grants)) return@launch
             runCatching { repository.setReviewsReviewed(profile, items, reviewed = true) }
                 .onSuccess {
+                    if (!revalidateReviewWrite(requestId, profile, grants)) return@onSuccess
                     val ids = items.map(ReviewItem::id).toSet()
                     publishReviewStatuses(ids, reviewed = true)
                     val briefingEntries = _state.value.briefing.summary?.entries.orEmpty()
@@ -3777,6 +3933,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
                 .onFailure { error ->
+                    if (error is CancellationException) { clearReviewWrite(requestId); throw error }
+                    if (!revalidateReviewWrite(requestId, profile, grants)) return@onFailure
                     if (error is AuthenticationExpiredException) {
                         handleConnectedFailure(error)
                     } else {
@@ -3820,6 +3978,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val started = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
             .format(Date((item.startTime * 1_000).toLong()))
         val clipName = "$cameraName activity $started".take(256)
+        val grants = listOf(reviewPrivacyGrant, actionPrivacyGrant)
+        val requestId = ++reviewWriteRequestId
         _state.update {
             it.copy(
                 review = it.review.copy(
@@ -3827,30 +3987,15 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     savedClipItemId = null,
                     savedClipMessage = null,
                     detailErrorMessage = null,
+                    actionError = it.review.actionError?.takeUnless { error -> error.itemId == item.id && error.action == ReviewAction.SAVE_CLIP },
                 ),
             )
         }
         viewModelScope.launch {
-            if (
-                !revalidatePrivacyGrant(reviewPrivacyGrant) ||
-                !revalidatePrivacyGrant(actionPrivacyGrant)
-            ) {
-                _state.update { state ->
-                    state.copy(review = state.review.copy(savingClipItemId = null))
-                }
-                return@launch
-            }
+            if (!revalidateReviewWrite(requestId, profile, grants)) return@launch
             runCatching { repository.saveReviewClip(profile, allowed, item, clipName) }
                 .onSuccess {
-                    if (
-                        !revalidatePrivacyGrant(reviewPrivacyGrant) ||
-                        !revalidatePrivacyGrant(actionPrivacyGrant)
-                    ) {
-                        _state.update { state ->
-                            state.copy(review = state.review.copy(savingClipItemId = null))
-                        }
-                        return@onSuccess
-                    }
+                    if (!revalidateReviewWrite(requestId, profile, grants)) return@onSuccess
                     _state.update { state ->
                         state.copy(
                             review = state.review.afterClipSaved(item.id),
@@ -3859,6 +4004,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
                 .onFailure { error ->
+                    if (error is CancellationException) { clearReviewWrite(requestId); throw error }
+                    if (!revalidateReviewWrite(requestId, profile, grants)) return@onFailure
                     if (error is AuthenticationExpiredException) {
                         handleConnectedFailure(error)
                     } else {
@@ -3868,6 +4015,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                                 review = state.review.copy(
                                     savingClipItemId = null,
                                     detailErrorMessage = error.toOpahFailure().userMessage,
+                                    actionError = ReviewActionError(item.id, ReviewAction.SAVE_CLIP,
+                                        error.toOpahFailure().userMessage),
                                 ),
                             )
                         }
@@ -3880,16 +4029,18 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val current = _state.value
         val snapshot = current.snapshot ?: return
         if (
-            current.review.savingClipItemId != null ||
+            current.review.hasPendingWrite() ||
             !snapshot.capabilities.supports(FrigateFeature.MULTI_CAMERA_EXPORT)
         ) return
         val selected = cameraNames.intersect(snapshot.user.allowedCameras)
-        if (selected.isEmpty() || item.camera !in selected) return
+        if (selected.isEmpty()) return
         if (selected.size > MAX_BATCH_EXPORT_ITEMS) {
             _state.update { state ->
                 state.copy(
                     review = state.review.copy(
                         detailErrorMessage = "Choose no more than $MAX_BATCH_EXPORT_ITEMS camera angles",
+                        actionError = ReviewActionError(item.id, ReviewAction.SAVE_ALL_ANGLES,
+                            "Choose no more than $MAX_BATCH_EXPORT_ITEMS camera angles"),
                     ),
                 )
             }
@@ -3898,7 +4049,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
-                    review = it.review.afterClipSaved(item.id).copy(
+                    review = it.review.afterClipSaved(item.id, ReviewAction.SAVE_ALL_ANGLES).copy(
                         savedClipMessage = "${selected.size} camera angles are being saved",
                     ),
                 )
@@ -3936,6 +4087,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                 )
             },
         )
+        val grants = listOf(reviewPrivacyGrant, cameraPrivacyGrant, actionPrivacyGrant)
+        val requestId = ++reviewWriteRequestId
         _state.update {
             it.copy(
                 review = it.review.copy(
@@ -3943,20 +4096,12 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     savedClipItemId = null,
                     savedClipMessage = null,
                     detailErrorMessage = null,
+                    actionError = it.review.actionError?.takeUnless { error -> error.itemId == item.id && error.action == ReviewAction.SAVE_ALL_ANGLES },
                 ),
             )
         }
         viewModelScope.launch {
-            if (
-                !revalidatePrivacyGrant(reviewPrivacyGrant) ||
-                !revalidatePrivacyGrant(cameraPrivacyGrant) ||
-                !revalidatePrivacyGrant(actionPrivacyGrant)
-            ) {
-                _state.update { state ->
-                    state.copy(review = state.review.copy(savingClipItemId = null))
-                }
-                return@launch
-            }
+            if (!revalidateReviewWrite(requestId, profile, grants)) return@launch
             runCatching {
                 operationsRepository.startBatchExport(
                     profile,
@@ -3965,37 +4110,36 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     request,
                 )
             }.onSuccess { result ->
-                if (
-                    !revalidatePrivacyGrant(reviewPrivacyGrant) ||
-                    !revalidatePrivacyGrant(cameraPrivacyGrant) ||
-                    !revalidatePrivacyGrant(actionPrivacyGrant)
-                ) {
-                    _state.update { state ->
-                        state.copy(review = state.review.copy(savingClipItemId = null))
-                    }
-                    return@onSuccess
+                if (!revalidateReviewWrite(requestId, profile, grants)) return@onSuccess
+                val outcome = reviewBatchSaveOutcome(selected, result.results)
+                val savedCount = outcome.savedCameraNames.size
+                val failedCount = outcome.retryCameraNames.size
+                val unconfirmedCount = outcome.unconfirmedCameraNames.size
+                val feedback = when {
+                    unconfirmedCount > 0 -> "$unconfirmedCount camera angles weren’t confirmed · Check Clips before trying them again"
+                    failedCount > 0 && savedCount > 0 -> "$savedCount angles are saving · $failedCount could not be started"
+                    failedCount > 0 -> "Couldn’t save these camera angles"
+                    else -> "$savedCount camera angles are being saved"
                 }
-                val savedCount = result.results.count { it.success && it.exportId != null }
-                val failedCount = result.results.size - savedCount
                 _state.update { state ->
                     state.copy(
-                        review = state.review.afterClipSaved(item.id).copy(
-                            savedClipMessage = when {
-                                savedCount == 0 -> "Frigate could not save those camera angles"
-                                failedCount > 0 -> "$savedCount angles are saving • $failedCount could not be started"
-                                else -> "$savedCount camera angles are being saved"
-                            },
-                            detailErrorMessage = if (savedCount == 0) {
-                                result.results.firstNotNullOfOrNull { it.error }
-                                    ?: "Frigate could not start the multi-camera clip"
-                            } else {
-                                null
-                            },
+                        review = (if (item.camera in outcome.savedCameraNames) state.review.afterClipSaved(item.id, ReviewAction.SAVE_ALL_ANGLES) else
+                            state.review.copy(savingClipItemId = null)).copy(
+                            savedClipItemId = item.id,
+                            savedClipMessage = feedback,
+                            detailErrorMessage = feedback.takeIf { failedCount > 0 || unconfirmedCount > 0 },
+                            actionError = if (failedCount > 0 || unconfirmedCount > 0) ReviewActionError(
+                                item.id, ReviewAction.SAVE_ALL_ANGLES, feedback,
+                                cameraNames = outcome.retryCameraNames,
+                                canRetry = outcome.retryCameraNames.isNotEmpty(),
+                            ) else state.review.actionError?.takeUnless { it.itemId == item.id && it.action == ReviewAction.SAVE_ALL_ANGLES },
                         ),
                         exports = ExportsUiState(),
                     )
                 }
             }.onFailure { error ->
+                if (error is CancellationException) { clearReviewWrite(requestId); throw error }
+                if (!revalidateReviewWrite(requestId, profile, grants)) return@onFailure
                 if (error is AuthenticationExpiredException) {
                     handleConnectedFailure(error)
                 } else {
@@ -4005,11 +4149,27 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                             review = state.review.copy(
                                 savingClipItemId = null,
                                 detailErrorMessage = error.toOpahFailure().userMessage,
+                                actionError = ReviewActionError(item.id, ReviewAction.SAVE_ALL_ANGLES,
+                                    "Saving wasn’t confirmed · Check Clips before trying again", canRetry = false),
                             ),
                         )
                     }
                 }
             }
+        }
+    }
+
+    private fun revalidateReviewWrite(requestId: Long, profile: ConnectionProfile, grants: List<BoundPrivacyGrant>): Boolean {
+        if (requestId != reviewWriteRequestId) return false
+        if (_state.value.activeProfile == profile && grants.all(::revalidatePrivacyGrant)) return true
+        clearReviewWrite(requestId)
+        return false
+    }
+
+    private fun clearReviewWrite(requestId: Long) {
+        if (requestId != reviewWriteRequestId) return
+        _state.update { state ->
+            state.copy(review = state.review.copy(savingClipItemId = null, markingReviewedItemId = null, markingAllReviewed = false))
         }
     }
 
@@ -4305,12 +4465,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val current = _state.value
         if (normalizedName.isEmpty() || current.exports.operationBusy) return
         if (BuildConfig.DOCUMENTATION_MODE) {
-            val id = "documentation-incident-${UUID.randomUUID()}"
+            val incident = DocumentationSupport.data.incident(normalizedName, normalizedDescription)
+            val id = incident.id
             _state.update { state ->
                 state.copy(
                     exports = state.exports.copy(
                         incidents = listOf(
-                            ExportIncident(id, normalizedName, normalizedDescription, null, null),
+                            incident,
                         ) + state.exports.incidents,
                         explicitlyCreatedEmptyIncidentIds = state.exports.explicitlyCreatedEmptyIncidentIds + id,
                         operationMessage = "Incident created",
@@ -4719,17 +4880,8 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
-                    motionReview = MotionReviewUiState(
-                        cameraName = selectedCamera,
-                        regionIndex = current.motionReview.regionIndex,
-                        jobId = "documentation-motion-job",
-                        jobState = MotionSearchJobState.SUCCESS,
-                        results = listOf(
-                            MotionSearchResult(end - 410, 18.4),
-                            MotionSearchResult(end - 185, 11.2),
-                        ),
-                        progress = 1.0,
-                        searchedOnce = true,
+                    motionReview = DocumentationSupport.data.motionReview(
+                        selectedCamera, current.motionReview.regionIndex, end,
                     ),
                 )
             }
@@ -4910,22 +5062,23 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val now = System.currentTimeMillis() / 1000.0
         val cameraChanged = selectedCamera != current.history.cameraName
         if (BuildConfig.DOCUMENTATION_MODE) {
-            val summaries = documentationHistorySummaries(now)
-            val selectedHour = (
-                requestedHourStartSeconds
-                    ?: current.history.hourStartSeconds?.takeUnless { cameraChanged }
+            val summaries = DocumentationSupport.data.historySummaries(now)
+            val selectedHour = requestedHistoryHour(
+                requestedHourStartSeconds,
+                current.history.hourStartSeconds?.takeUnless { cameraChanged }
                     ?: summaries.maxOfOrNull(::recordingHourStart)
-                    ?: hourStart(now)
-                ).coerceAtMost(hourStart(now))
+                    ?: hourStart(now),
+                now,
+            )
             val end = (selectedHour + HISTORY_HOUR_SECONDS).coerceAtMost(now)
             _state.update {
                 it.copy(
                     history = HistoryBrowserState(
                         cameraName = selectedCamera,
                         hourStartSeconds = selectedHour,
-                        segments = DocumentationFixtures.recordingHistory(selectedHour, end),
+                        segments = DocumentationSupport.data.recordingHistory(selectedHour, end),
                         hourSummaries = summaries,
-                        motion = documentationMotionActivity(selectedCamera, selectedHour),
+                        motion = DocumentationSupport.data.motionActivity(selectedCamera, selectedHour),
                         loadedOnce = true,
                         savedSlotKeys = it.history.savedSlotKeys,
                         cursorTimeSeconds = it.history.cursorTimeSeconds,
@@ -4964,12 +5117,13 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     } else {
                         current.history.hourSummaries
                     }
-                    val selectedHour = (
-                        requestedHourStartSeconds
-                            ?: current.history.hourStartSeconds?.takeUnless { cameraChanged }
+                    val selectedHour = requestedHistoryHour(
+                        requestedHourStartSeconds,
+                        current.history.hourStartSeconds?.takeUnless { cameraChanged }
                             ?: summaries.maxOfOrNull(::recordingHourStart)
-                            ?: hourStart(now)
-                        ).coerceAtMost(hourStart(now))
+                            ?: hourStart(now),
+                        now,
+                    )
                     val end = (selectedHour + HISTORY_HOUR_SECONDS).coerceAtMost(now)
                     historyRangeCache[historyRangeCacheKey(selectedCamera, selectedHour)]?.let { cached ->
                         return@coroutineScope cached.copy(summaries = summaries)
@@ -5058,7 +5212,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             .coerceAtMost(System.currentTimeMillis() / 1_000.0)
         if (rangeEnd <= rangeStart) return null
         val request = if (BuildConfig.DOCUMENTATION_MODE) {
-            DocumentationFixtures.historyPlayback(camera, rangeStart, rangeEnd)
+            DocumentationSupport.data.historyPlayback(camera, rangeStart, rangeEnd)
         } else {
             issuePrivacyGrant(PrivacySurface.HISTORY, PrivacyTarget.Camera(cameraName)) ?: return null
             val profile = current.activeProfile ?: return null
@@ -5084,7 +5238,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
-                    playback = DocumentationFixtures.historyPlayback(camera, playbackStart, slot.endTime).copy(
+                    playback = DocumentationSupport.data.historyPlayback(camera, playbackStart, slot.endTime).copy(
                         recordingStartTime = playbackStart,
                         recordingEndTime = slot.endTime,
                         recordingSaveKey = historySlotKey(cameraName, slot),
@@ -5270,7 +5424,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val after = bounds.afterSeconds
         val requestId = ++activitySearchRequestId
         if (BuildConfig.DOCUMENTATION_MODE) {
-            val results = DocumentationFixtures.searchEvents(
+            val results = DocumentationSupport.data.searchEvents(
                 queryText.ifBlank { similarLabel.orEmpty() },
                 cameras,
             ).filter { event ->
@@ -5391,7 +5545,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (BuildConfig.DOCUMENTATION_MODE) {
             _state.update {
                 it.copy(
-                    playback = DocumentationFixtures.searchPlayback(camera, event).copy(
+                    playback = DocumentationSupport.data.searchPlayback(camera, event).copy(
                         recordingStartTime = start,
                         recordingEndTime = end,
                     ),
@@ -5420,7 +5574,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun cachedSearchImage(event: SearchEvent) = if (BuildConfig.DOCUMENTATION_MODE) {
-        DocumentationFixtures.reviewItemForEvent(event)?.let(documentationImages::review)
+        DocumentationSupport.data.reviewItemForEvent(event)?.let(documentationImages::review)
     } else {
         issuePrivacyGrant(PrivacySurface.SEARCH, PrivacyTarget.Camera(event.camera))
             ?.let { _state.value.activeProfile }
@@ -5429,7 +5583,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
 
     suspend fun refreshSearchImage(event: SearchEvent, height: Int = 360): Result<ReviewImage> {
         return if (BuildConfig.DOCUMENTATION_MODE) {
-            DocumentationFixtures.reviewItemForEvent(event)?.let(documentationImages::review)
+            DocumentationSupport.data.reviewItemForEvent(event)?.let(documentationImages::review)
                 ?.let(Result.Companion::success)
                 ?: Result.failure(IllegalStateException("Documentation image is unavailable"))
         } else {
@@ -6248,8 +6402,11 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val clipCameras = visibleCameraNames(PrivacySurface.CLIP)
         val current = _state.value
 
+        // Every privacy epoch can narrow a still non-empty Activity camera scope.
+        // Invalidate before filtering state so a late full load or page cannot
+        // reintroduce rows fetched under the previous scope or publish its error.
+        cancelReviewLoads()
         if (activityCameras.isEmpty()) {
-            reviewLoadJob?.cancel()
             reviewDetailJob?.cancel()
             reviewPlaybackNavigationJob?.cancel()
         }
@@ -6295,13 +6452,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     ) != null
                 },
                 ptz = state.ptz.takeIf { ptzAllowed } ?: PtzUiState(),
-                review = state.review.copy(
-                    items = state.review.items.filter { it.camera in activityCameras },
-                    playbackItem = state.review.playbackItem?.takeIf { it.camera in activityCameras },
-                    selectedItemId = state.review.selectedItemId?.takeIf { selected ->
-                        state.review.items.any { it.id == selected && it.camera in activityCameras }
-                    },
-                ),
+                review = state.review.afterActivityScopeChanged(activityCameras),
                 history = state.history.takeIf { historyAllowed } ?: HistoryBrowserState(),
                 activitySearch = state.activitySearch.copy(
                     results = state.activitySearch.results.filter { it.camera in searchCameras },
@@ -6468,7 +6619,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             documentationReviewStatuses[reviewId] = reviewed
         }
         _state.update { state ->
-            val removeFromCurrentResults = state.review.filters.reviewStatus.apiValue?.let {
+            val removeFromCurrentResults = state.review.collectionReviewStatus.apiValue?.let {
                 it != reviewed
             } == true
             val changedItem = state.review.items.firstOrNull { it.id == reviewId }
@@ -6482,10 +6633,10 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                     items = state.review.items.afterReviewStatusChanged(
                         reviewId = reviewId,
                         reviewed = reviewed,
-                        reviewStatus = state.review.filters.reviewStatus,
+                        reviewStatus = state.review.collectionReviewStatus,
                     ),
-                    selectedItemId = if (removeFromCurrentResults) null else state.review.selectedItemId,
-                    recordingState = if (removeFromCurrentResults) {
+                    selectedItemId = state.review.selectedItemId?.takeUnless { removeFromCurrentResults && it == reviewId },
+                    recordingState = if (removeFromCurrentResults && state.review.selectedItemId == reviewId) {
                         ReviewRecordingState.IDLE
                     } else {
                         state.review.recordingState
@@ -6504,6 +6655,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                         }
                     },
                     detailErrorMessage = null,
+                    actionError = state.review.actionError?.takeUnless { it.itemId == reviewId && it.action == ReviewAction.MARK_REVIEWED },
                 ),
             )
         }
@@ -6516,7 +6668,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         }
         _state.update { state ->
             val changed = state.review.items.filter { it.id in reviewIds && it.hasBeenReviewed != reviewed }
-            val removeFromCurrentResults = state.review.filters.reviewStatus.apiValue?.let {
+            val removeFromCurrentResults = state.review.collectionReviewStatus.apiValue?.let {
                 it != reviewed
             } == true
             val updatedItems = state.review.items.map { item ->
@@ -6550,6 +6702,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
                         }
                     },
                     detailErrorMessage = null,
+                    actionError = state.review.actionError?.takeUnless { it.itemId in reviewIds && it.action == ReviewAction.MARK_REVIEWED },
                 ),
             )
         }
@@ -6559,7 +6712,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         if (_state.value.monitorMode != null) closeMonitorMode()
         container.revokeSingleLivePlayback()
         container.onSignedOut()
-        reviewLoadJob?.cancel()
+        cancelReviewLoads()
         reviewDetailJob?.cancel()
         reviewPlaybackNavigationJob?.cancel()
         historyLoadJob?.cancel()
@@ -6597,7 +6750,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun showSavedSessionRecovery(error: Throwable) {
         if (_state.value.monitorMode != null) closeMonitorMode()
-        reviewLoadJob?.cancel()
+        cancelReviewLoads()
         reviewDetailJob?.cancel()
         reviewPlaybackNavigationJob?.cancel()
         historyLoadJob?.cancel()
@@ -6683,22 +6836,6 @@ private fun recordingHourStart(summary: RecordingHourSummary): Double {
         ?.div(1_000.0)
         ?: 0.0
 }
-
-private fun documentationHistorySummaries(nowSeconds: Double): List<RecordingHourSummary> {
-    val format = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-    return (0..2).flatMap { dayOffset ->
-        val daySeconds = nowSeconds - dayOffset * 24 * 60 * 60.0
-        val day = format.format(Date((daySeconds * 1_000).toLong()))
-        listOf(8, 12, 16, 20).map { hour ->
-            RecordingHourSummary(day, hour, 3_300, 420.0 + hour, 180.0, 2 + hour % 3)
-        }
-    }.filter { recordingHourStart(it) <= hourStart(nowSeconds) }
-}
-
-private fun documentationMotionActivity(camera: String, hourStartSeconds: Double): List<MotionActivity> =
-    listOf(4, 7, 18, 22, 36, 37, 48, 52).map { minute ->
-        MotionActivity(hourStartSeconds + minute * 60, 6.0 + minute % 5, camera)
-    }
 
 private fun CameraPtzInfo.supports(command: PtzCommand): Boolean = when (command) {
     PtzCommand.MoveLeft,

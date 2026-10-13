@@ -44,6 +44,7 @@ class SettingsRepository(
                 updated.savedCameraViews.map(StoredCameraView::from),
             )
             preferences[REDUCED_MOTION] = updated.reducedMotion
+            preferences[REDUCED_TRANSPARENCY] = updated.reducedTransparency
             preferences[HIGH_CONTRAST] = updated.highContrast
             preferences[SUBTLE_ROUNDED_CORNERS] = updated.subtleRoundedCorners
             preferences[FAVORITE_CAMERA_NAMES] = json.encodeToString(updated.favoriteCameraNames)
@@ -92,6 +93,7 @@ class SettingsRepository(
                 .map(StoredCameraView::toModel)
                 .let(::sanitizeSavedCameraViews),
             reducedMotion = preferences[REDUCED_MOTION] ?: false,
+            reducedTransparency = preferences[REDUCED_TRANSPARENCY] ?: false,
             highContrast = preferences[HIGH_CONTRAST] ?: false,
             subtleRoundedCorners = preferences[SUBTLE_ROUNDED_CORNERS] ?: false,
             favoriteCameraNames = preferences[FAVORITE_CAMERA_NAMES]
@@ -185,6 +187,7 @@ class SettingsRepository(
         val STRETCHED_CAMERA_NAMES = stringSetPreferencesKey("stretched_camera_names")
         val SAVED_CAMERA_VIEWS = stringPreferencesKey("saved_camera_views")
         val REDUCED_MOTION = booleanPreferencesKey("reduced_motion")
+        val REDUCED_TRANSPARENCY = booleanPreferencesKey("reduced_transparency")
         val HIGH_CONTRAST = booleanPreferencesKey("high_contrast")
         val SUBTLE_ROUNDED_CORNERS = booleanPreferencesKey("subtle_rounded_corners")
         val FAVORITE_CAMERA_NAMES = stringPreferencesKey("favorite_camera_names")

@@ -23,8 +23,8 @@ class FrigateSessionManager(
         password: String,
         test: suspend (FrigateUserProfile) -> T,
     ): T {
-        val user = gateway.login(profile, password)
         return try {
+            val user = gateway.login(profile, password)
             test(user)
         } finally {
             runCatching { gateway.logout(profile) }

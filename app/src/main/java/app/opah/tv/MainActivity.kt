@@ -90,6 +90,7 @@ class MainActivity : ComponentActivity() {
                 initialInformationTabName = documentationInformationTab,
                 initialActivityPageName = documentationActivityPage,
                 initialClipsPageName = documentationClipsPage,
+                restoredUiState = savedInstanceState?.getBundle("nativeUiState"),
             )
             nativeOpahController = controller
             setContentView(controller.root)
@@ -126,6 +127,11 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        nativeOpahController?.let { outState.putBundle("nativeUiState", it.saveUiState()) }
+        super.onSaveInstanceState(outState)
     }
 
     override fun onDestroy() {

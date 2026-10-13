@@ -7,24 +7,23 @@ review recent activity, search saved video, browse history, and keep or share
 important clips. Opah can also show calm TV alerts, watch a camera view for
 important activity, and summarize what happened since you last watched.
 
-The vision for Opah is to provide Frigate users with an intuitive, simple,
-NVR-like television experience. Instead of presenting Frigate as a technical
-web interface on a TV, Opah organizes its most useful everyday features into
-clear, approachable screens that are comfortable to navigate from the sofa.
+Opah organizes everyday camera tasks into clear, approachable screens that
+are comfortable to navigate from the sofa.
 
 Opah connects directly from your TV to your Frigate server and does not operate
 a separate camera cloud or recording service. It is an independent community
-project and is not affiliated with, endorsed by, or supported by Frigate, Inc.
+project and is not affiliated with, sponsored by, endorsed by, or supported by
+Frigate, Inc.
 
 ## Screenshots
 
-| Home | Live camera |
+| Cameras | Live camera |
 | --- | --- |
-| <img src="docs/screenshots/04-home.png" alt="Opah Home with example camera previews" width="720"> | <img src="docs/screenshots/10-live-playback.png" alt="Opah live camera controls" width="720"> |
+| <img src="docs/screenshots/04-home.png" alt="Opah Cameras grid with fictional camera previews" width="720"> | <img src="docs/screenshots/10-live-playback.png" alt="Opah live camera with compact glass controls" width="720"> |
 
-| Recent activity | Activity history |
+| New activity | Activity history |
 | --- | --- |
-| <img src="docs/screenshots/08-review.png" alt="Opah recent activity with example alerts" width="720"> | <img src="docs/screenshots/19-activity-history.png" alt="Opah History with example times and motion levels" width="720"> |
+| <img src="docs/screenshots/08-review.png" alt="Opah New activity with fictional alerts" width="720"> | <img src="docs/screenshots/19-activity-history.png" alt="Opah History with date and time controls" width="720"> |
 
 See the [complete interface gallery](docs/screenshots.md). All camera scenes,
 names, addresses, and data shown in the gallery are fictional examples.
@@ -76,60 +75,86 @@ such as `http://frigate.local:5000` and leave the username and password blank.
 This connection has full Frigate access, so never expose port `5000` to the
 internet. Most people should use Frigate's authenticated address instead.
 
-## Make Home yours and watch cameras together
+## Find your way around
 
-Moving focus on Home previews that camera in the large picture. Press and hold
-the remote's center button on a camera or view to pin it as a favorite, move a
-favorite earlier or later, or hide a camera from Home. Choose **Restore
-cameras** to bring hidden cameras back.
+Opah opens on **Cameras**, with **Activity**, **Clips**, and **Settings** in the
+side navigation. Move left from the edge of a page to open navigation, choose a
+destination, and press the remote's center button to enter it. Back closes the
+nearest dialog or returns to the previous screen.
 
-Open a camera or view from **Home**. To make a new multi-camera view, open the
-camera catalog from Home, choose two to four cameras, and choose **Watch**.
-Opah fills the screen with every camera picture.
+The glass design uses compact controls, clear focus outlines, and large camera
+pictures. Browsing remembers your place when you return from playback. If you
+previously chose a different startup camera or view, Opah keeps that choice.
+
+## Make Cameras yours and watch cameras together
+
+The **Cameras** grid shows periodically refreshed previews. Open a tile to
+watch live video. Preview age and failure messages help distinguish an older
+picture from a working camera; choose **Retry preview** if a preview fails.
+
+Press and hold the remote's center button on a camera or view to pin it as a
+favorite, move a favorite earlier or later, or hide a camera from the grid.
+Choose **Restore** to return to the default camera layout.
+
+To make a multi-camera view, choose **New view**, select two to four cameras,
+and choose **Next: name this view**. Enter a name and choose **Save view**.
+**Back to cameras** lets you revise the selection without losing the name.
+Saved views stay on that device and appear alongside camera groups already
+set up in Frigate. Open a view to watch its cameras together. If a Frigate group
+has more than four cameras, Opah asks which ones to watch.
+
 On supported TVs, a two-camera group can also pop out over another app. Camera
-names hide automatically while you watch.
-
-Choose **Save view** to name a group you use often. Saved views stay on that
-device. Camera groups already set up in Frigate also appear here. If a group has
-more than four cameras, Opah asks you which cameras to watch.
+names and playback controls hide while you watch; press the center button to
+show the controls again.
 
 ## Find and review activity
 
 Open **Activity** to see alerts and other recorded activity:
 
-- **Recent** shows new items and which ones still need review.
-- **History** lets you move continuously through saved video with recording,
-  motion, detection, and alert markers.
+- **New** shows activity that still needs review.
+- **Reviewed** shows activity you have already marked reviewed.
+- **History** lets you browse saved video by camera. Choose **Date & time** to
+  jump to a day and hour, or use **Earlier** and **Later** for nearby hours.
 - **Search** finds saved activity from a short description when search is set
   up in Frigate.
 - **Motion** appears on supported Frigate 0.18 servers and finds movement in a
   selected part of the picture.
 
 Open an item to watch it, mark it reviewed or not reviewed, save its recording,
-or find activity that looks similar. **Recent** > **Alerts** can also mark all
-alerts currently shown as reviewed after a warning. Frigate may provide a short
-summary, a recognized name, or a license plate.
+or find activity that looks similar. **New** offers **Mark all reviewed** for
+the items currently shown, after a warning. The selected item stays marked
+while you move into its actions. Choose **Load more activity** at the end of the list
+to reach older items. Frigate may provide a short summary, a recognized name,
+or a license plate.
+
+Open **Filter** > **Review all new activity** to review the current new items
+as a queue. Its heading shows which queue you are in. If saving a clip or
+marking an item fails, Opah shows the problem beside that action and offers a
+retry.
 
 While a saved Activity video is playing, choose **Next activity** to continue
-through the same list without returning to the grid. At the end, the control
-shows **Caught up** for a review queue or **No next activity** for another list.
+through the New or Reviewed list you opened, without returning to the browser.
+In a review queue, it stays within that queue. At the end, the control shows
+**Caught up** for a review queue or **No next activity** for ordinary browsing.
 Move focus to the playback timeline and use left or right to move by 10 seconds.
-Pressing Back returns to the original item, filters, and position in the
-Activity list.
+Back hides visible playback controls first. Pressing Back while the controls
+are hidden returns to the selected item, filters, and position in the Activity
+list. Camera views and Monitor use the same hide-first behavior.
 
 ## Stay aware without watching constantly
 
-Opah 0.5 adds three optional ways to keep up with activity:
+Three optional features help you keep up with activity:
 
 - **TV alerts** can notify you about important Frigate activity while another
   TV app is open. You choose the cameras, kinds of activity, quiet times, and
   how much detail a notification may show.
-- **Monitor Mode** keeps a saved View or Frigate camera group on screen and can
-  bring one active camera forward when something important happens. Audio is
-  off unless you turn it on.
-- **Since you last watched** adds a short factual briefing to Home when there
-  is unseen activity. You can play highlights, open a Review queue, or dismiss
-  only the items currently shown.
+- **Monitor** on Cameras watches several cameras and can bring one active
+  camera forward when something important happens. You can also start it from
+  a saved view or Frigate camera group. Audio is off unless you turn it on.
+  Its timer offers **Never**, **30**, **60**, or **120 minutes**.
+- **Highlights** on Cameras shows a short briefing when there is unseen
+  activity. Choose **Play highlights**, **Review as a list**, or dismiss only
+  the summary currently shown.
 
 Shared TVs can use a local PIN to protect selected app areas, administrative
 actions, destructive actions, and private cameras. For the strongest
@@ -137,12 +162,12 @@ protection, also use a restricted Frigate account for the TV.
 
 ## Save important recordings
 
-Choose **Keep clip** while reviewing recorded activity. You can also keep a
+Choose **Save recording** while reviewing recorded activity. You can also keep a
 selected part of **History**. Open **Clips** to see preview pictures, play a
 clip, or share a local copy. Frigate administrators can also rename a clip or
 delete it after a confirmation warning.
 
-With a supported Frigate 0.18 server, **Save all angles** keeps the same moment
+With a supported Frigate 0.18 server, **Save all camera angles** keeps the same moment
 from several authorized cameras. Frigate administrators can group clips into
 simple **Incidents**.
 
@@ -151,14 +176,31 @@ separate Opah cloud service or stored as a second recording archive on the TV.
 
 ## Control and size cameras
 
-If Frigate reports compatible camera controls, a **Controls** choice appears
-for that camera. In control mode, the D-pad moves the camera, center stops it,
-and a compact shelf contains supported zoom, focus, and saved positions.
+If Frigate reports compatible camera controls, press and hold the camera tile
+on **Cameras** and choose **Camera controls**. In control mode, the D-pad moves
+the camera, center stops it, and a compact shelf contains supported zoom,
+focus, and saved positions.
 
 While watching a camera or Birdseye, use the screen-size control to choose
 whether the whole picture fits on the television or fills the screen. Opah
-remembers that choice for each camera and for Birdseye on the device. Choose
-**Video only** if an audio track prevents a camera from playing.
+remembers that choice for each camera and for Birdseye on the device. If an
+audio track prevents playback, try **Settings** > **Cameras and Playback** >
+**Check camera compatibility** and choose a video-only option.
+
+## Adjust appearance and settings
+
+Settings keeps its categories on the left and the selected page on the right.
+Press right or the center button on a category to open it. Server information,
+storage, appearance, and device details have their own layouts and scroll when
+more information is available.
+
+Open **Settings** > **Appearance** to choose **System**, **Dark**, **Light**, or
+**Custom**. Custom mode lets you adjust the accent and background while seeing
+a preview. **High contrast**, **Reduce motion**, and **Reduce transparency**
+offer simpler, more readable presentation. Rounded corners are part of the
+design; **Extra rounding** is an optional softer treatment.
+
+Updating Opah keeps your saved appearance and startup choices.
 
 ## Get updates
 

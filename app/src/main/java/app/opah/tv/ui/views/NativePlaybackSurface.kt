@@ -2,13 +2,17 @@ package app.opah.tv.ui.views
 
 import android.annotation.SuppressLint
 import android.content.res.ColorStateList
+import android.content.Context
 import android.graphics.Color
 import android.graphics.Rect
 import android.os.SystemClock
+import android.os.Bundle
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
@@ -44,7 +48,7 @@ import app.opah.tv.playback.compatibility.PlaybackResult
 import app.opah.tv.playback.compatibility.TransportMode
 import app.opah.tv.playback.media3.PlayerViewMedia3VideoOutputTarget
 import app.opah.tv.ui.DOCUMENTATION_URI_PREFIX
-import app.opah.tv.ui.DocumentationImageStore
+import app.opah.tv.ui.DocumentationSupport
 import app.opah.tv.ui.boundedSeekPosition
 import app.opah.tv.playback.media3.SingleLivePlaybackRequestId
 import kotlinx.coroutines.CancellationException
@@ -76,12 +80,75 @@ internal fun nativePlaybackResizeMode(stretched: Boolean): Int = if (stretched) 
 
 internal const val AUTOMATIC_REVIEW_WATCH_MILLIS = 8_000L
 
+private val playbackMediaKeys = setOf(
+    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+    KeyEvent.KEYCODE_MEDIA_PLAY,
+    KeyEvent.KEYCODE_MEDIA_PAUSE,
+    KeyEvent.KEYCODE_MEDIA_REWIND,
+    KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+)
+
 internal fun automaticReviewWatchThresholdMillis(durationMillis: Long?): Long =
     durationMillis?.takeIf { it > 0L }?.coerceAtMost(AUTOMATIC_REVIEW_WATCH_MILLIS)
         ?: AUTOMATIC_REVIEW_WATCH_MILLIS
 
 internal fun watchedEnoughForAutomaticReview(watchedMillis: Long, durationMillis: Long?): Boolean =
     watchedMillis >= automaticReviewWatchThresholdMillis(durationMillis)
+
+internal data class NativeTimelineRange(val positionMillis: Long = 0L, val durationMillis: Long? = null, val seekable: Boolean = false)
+
+internal class NativeTimelineAccessibility(
+    private val range: () -> NativeTimelineRange,
+    private val seekBy: (Long) -> Unit,
+) : View.AccessibilityDelegate() {
+    override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(host, info)
+        info.className = "android.widget.SeekBar"
+        val state = range()
+        val duration = state.durationMillis?.takeIf { it > 0L } ?: return
+        val position = state.positionMillis.coerceIn(0L, duration)
+        info.rangeInfo = AccessibilityNodeInfo.RangeInfo.obtain(
+            AccessibilityNodeInfo.RangeInfo.RANGE_TYPE_FLOAT, 0f, duration / 1_000f, position / 1_000f,
+        )
+        if (host.isEnabled && state.seekable) {
+            if (position < duration) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
+            if (position > 0L) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
+        }
+    }
+
+    override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean {
+        val offset = when (action) {
+            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD -> 10_000L
+            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> -10_000L
+            else -> return super.performAccessibilityAction(host, action, args)
+        }
+        val state = range()
+        val duration = state.durationMillis?.takeIf { it > 0L } ?: return false
+        if (!host.isEnabled || !state.seekable || (offset > 0L && state.positionMillis >= duration) ||
+            (offset < 0L && state.positionMillis <= 0L)) return false
+        seekBy(offset)
+        return true
+    }
+}
+
+/** Content-sized live chrome remains bounded by the TV safe area. */
+private class NativePlaybackOverlayColumn @JvmOverloads constructor(
+    context: Context,
+    minimumDp: Int = 0,
+    private val maximumDp: Int? = null,
+) : LinearLayout(context) {
+    init { minimumWidth = context.dp(minimumDp) }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val maximum = maximumDp?.let(context::dp)
+        val mode = MeasureSpec.getMode(widthMeasureSpec)
+        val boundedWidth = if (maximum != null && mode != MeasureSpec.EXACTLY) {
+            val available = if (mode == MeasureSpec.UNSPECIFIED) maximum else MeasureSpec.getSize(widthMeasureSpec)
+            MeasureSpec.makeMeasureSpec(minOf(available, maximum), MeasureSpec.AT_MOST)
+        } else widthMeasureSpec
+        super.onMeasure(boundedWidth, heightMeasureSpec)
+    }
+}
 
 @UnstableApi
 @SuppressLint("ViewConstructor")
@@ -99,6 +166,7 @@ internal class NativePlaybackSurface(
     private val onClose: () -> Unit,
     private val onAutomaticReviewWatchThresholdReached: () -> Unit = {},
     private val onPlaybackEnded: () -> Unit = {},
+    initialFeedbackPending: Boolean = false,
 ) : FrameLayout(activity) {
     private val application = activity.application as OpahApplication
     private val documentationPlayback = BuildConfig.DOCUMENTATION_MODE &&
@@ -114,7 +182,7 @@ internal class NativePlaybackSurface(
             scaleType = ImageView.ScaleType.CENTER_CROP
             val cameraName = request.cameraName
                 ?: request.uri.removePrefix(DOCUMENTATION_URI_PREFIX).substringBefore('?')
-            setImageBitmap(DocumentationImageStore(activity).camera(cameraName)?.bitmap)
+            setImageBitmap(DocumentationSupport.images(activity).camera(cameraName)?.bitmap)
             contentDescription = "Fictional documentation camera scene"
         }
     } else {
@@ -141,25 +209,32 @@ internal class NativePlaybackSurface(
         textSize = 12f
         setShadowLayer(5f, 0f, 2f, Color.BLACK)
         visibility = if (request.kind == PlaybackKind.RECORDED) View.VISIBLE else View.GONE
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
     }
     private val primaryControls = LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
+        clipChildren = false
     }
     private val contextControls = LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
+        clipChildren = false
         visibility = View.GONE
     }
     private val mainControlRow = LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
+        clipChildren = false
     }
     private val mainControlScroller = HorizontalScrollView(activity).apply {
         isFocusable = false
         isFillViewport = true
         overScrollMode = View.OVER_SCROLL_NEVER
         isHorizontalScrollBarEnabled = false
+        clipChildren = false
+        clipToPadding = false
+        setPadding(0, activity.dp(3), 0, activity.dp(3))
         addView(mainControlRow, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
     }
     private val moreControls = LinearLayout(activity).apply {
@@ -186,9 +261,13 @@ internal class NativePlaybackSurface(
         textSize = 12f
         gravity = Gravity.CENTER
         minHeight = activity.dp(20)
+        maxWidth = activity.dp(320)
+        setLines(2)
+        ellipsize = TextUtils.TruncateAt.END
         includeFontPadding = false
     }
     private val timeline = ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal).apply {
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         max = 1_000
         progressTintList = ColorStateList.valueOf(NativeTheme.palette.focus)
         progressBackgroundTintList = ColorStateList.valueOf(0xFF586575.toInt())
@@ -200,8 +279,10 @@ internal class NativePlaybackSurface(
         isFocusable = request.kind == PlaybackKind.RECORDED
         isClickable = request.kind == PlaybackKind.RECORDED
         tag = "recorded:timeline"
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         background = activity.nativeFlatOverlayFocusableBackground()
         contentDescription = "Playback timeline, use left and right to seek 10 seconds"
+        accessibilityDelegate = NativeTimelineAccessibility({ timelineRange }, ::seekBy)
         setPadding(activity.dp(10), 0, activity.dp(10), activity.dp(3))
         setOnKeyListener { _, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN || request.kind != PlaybackKind.RECORDED) {
@@ -210,12 +291,10 @@ internal class NativePlaybackSurface(
             when (keyCode) {
                 KeyEvent.KEYCODE_DPAD_LEFT -> { seekBy(-10_000L); true }
                 KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBy(10_000L); true }
-                KeyEvent.KEYCODE_DPAD_CENTER,
-                KeyEvent.KEYCODE_ENTER,
-                -> { togglePlayback(); true }
                 else -> false
             }
         }
+        setOnClickListener { togglePlayback() }
         onFocusChangeListener = OnFocusChangeListener { _, focused ->
             if (focused) controlHint.setText(R.string.native_playback_seek_help)
         }
@@ -228,7 +307,7 @@ internal class NativePlaybackSurface(
     private val diagnostics = TextView(activity).apply {
         setTextColor(0xFFE6F0FB.toInt())
         textSize = 12f
-        setBackgroundColor(0xCC000000.toInt())
+        background = activity.nativeGlassOverlayBackground()
         setPadding(activity.dp(10), activity.dp(7), activity.dp(10), activity.dp(7))
         maxWidth = activity.dp(520)
         visibility = View.GONE
@@ -242,14 +321,24 @@ internal class NativePlaybackSurface(
     private var automaticReviewThresholdReported = false
     private var watchedPlaybackMillis = 0L
     private var lastWatchSampleElapsedRealtime: Long? = null
-    private var documentationPositionMillis = 8_000L
-    private val documentationDurationMillis = 24_000L
+    private var documentationPositionMillis =
+        if (documentationPlayback) DocumentationSupport.data.nativePlaybackPositionMillis() else 0L
+    private var timelineRange = NativeTimelineRange()
+    private val documentationDurationMillis =
+        if (documentationPlayback) DocumentationSupport.data.nativePlaybackDurationMillis() else 0L
     private var pictureInPictureReady = false
     private var pictureInPictureActive = false
     private var chromeVisible = true
     private var moreExpanded = false
     private var diagnosticsVisible = false
     private var chromeHideJob: Job? = null
+    private val heldKeys = mutableSetOf<Int>()
+    private var revealKey: Int? = null
+    private var selectTarget: View? = null
+    private var interactionOverlayOpen = false
+    private var closed = false
+    private var feedbackPending = initialFeedbackPending
+    private val dynamicButtons = linkedMapOf<String, TextView>()
     private val coordinatorOwned = request.kind == PlaybackKind.LIVE && request.liveCompatibilityRequestId != null
     private val playPause = controlButton("Pause", R.drawable.ic_pause, "Pause playback", emphasized = true) {
         togglePlayback()
@@ -298,21 +387,23 @@ internal class NativePlaybackSurface(
         documentationImage?.let { image ->
             addView(image, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         }
-        topPanel = LinearLayout(activity).apply {
+        topPanel = NativePlaybackOverlayColumn(activity, minimumDp = 220, maximumDp = 680).apply {
+            tag = "playback:heading"
             orientation = LinearLayout.VERTICAL
-            setPadding(activity.dp(16), activity.dp(10), activity.dp(16), activity.dp(9))
-            setBackgroundColor(0x77000000)
+            setPadding(activity.dp(18), activity.dp(12), activity.dp(18), activity.dp(12))
+            background = activity.nativeGlassOverlayBackground()
             addView(title)
             addView(status)
         }
         addView(
             topPanel,
-            LayoutParams(activity.dp(680), LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START).apply {
-                topMargin = activity.dp(12)
-                marginStart = activity.dp(12)
+            LayoutParams(if (request.kind == PlaybackKind.LIVE) LayoutParams.WRAP_CONTENT else activity.dp(680), LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START).apply {
+                topMargin = activity.dp(24)
+                marginStart = activity.dp(36)
+                marginEnd = activity.dp(36)
             },
         )
-        mainControlRow.addView(controlButton("Back", R.drawable.ic_chevron_left, "Back", action = onClose))
+        mainControlRow.addView(controlButton("Back", R.drawable.ic_arrow_back, "Back", action = onClose).apply { tag = "playback:back" })
         mainControlRow.addView(contextControls)
         mainControlRow.addView(primaryControls)
         primaryControls.addView(seekBack)
@@ -323,29 +414,35 @@ internal class NativePlaybackSurface(
         primaryControls.addView(pictureInPicture)
         primaryControls.addView(diagnosticButton)
         primaryControls.addView(moreButton)
-        bottomPanel = LinearLayout(activity).apply {
+        bottomPanel = NativePlaybackOverlayColumn(activity, minimumDp = 320).apply {
+            tag = "playback:controls"
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(activity.dp(12), activity.dp(5), activity.dp(12), activity.dp(8))
-            setBackgroundColor(0xC7000000.toInt())
+            setPadding(activity.dp(16), activity.dp(8), activity.dp(16), activity.dp(10))
+            background = activity.nativeGlassOverlayBackground()
+            clipChildren = false
             addView(
                 actionMessage,
                 LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT),
             )
             addView(progressStrip, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-            addView(controlHint, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, activity.dp(20)))
+            addView(controlHint, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
             addView(moreScroller, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
             addView(mainControlScroller, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         }
         addView(
             bottomPanel,
-            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM),
+            LayoutParams(if (request.kind == PlaybackKind.LIVE) LayoutParams.WRAP_CONTENT else LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                marginStart = activity.dp(36)
+                marginEnd = activity.dp(36)
+                bottomMargin = activity.dp(24)
+            },
         )
         addView(
             diagnostics,
             LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END).apply {
-                topMargin = activity.dp(22)
-                marginEnd = activity.dp(24)
+                topMargin = activity.dp(24)
+                marginEnd = activity.dp(36)
             },
         )
         if (documentationPlayback) {
@@ -355,7 +452,7 @@ internal class NativePlaybackSurface(
         } else {
             startDirectPlayback()
         }
-        updateControls(initialControls, initialActionMessage)
+        updateControls(initialControls, initialActionMessage, initialFeedbackPending)
         updateDiagnostics()
         if (request.compatibilityTest) {
             bottomPanel.visibility = View.GONE
@@ -364,39 +461,61 @@ internal class NativePlaybackSurface(
         }
     }
 
-    fun updateControls(updated: List<NativePlaybackControl>, message: String?) {
+    fun updateControls(updated: List<NativePlaybackControl>, message: String?, feedbackPending: Boolean = false) {
+        val messageChanged = actionMessage.text.toString() != message.orEmpty()
+        val pendingChanged = this.feedbackPending != feedbackPending
+        this.feedbackPending = feedbackPending
         val focusedKey = findFocus()?.tag as? String
         val dynamicControlHadFocus = focusedKey != null
         playerView.resizeMode = nativePlaybackResizeMode(
             updated.firstOrNull { it.key == "stretch" }?.selected == true,
         )
-        contextControls.removeAllViews()
-        moreControls.removeAllViews()
-        updated.forEach { control ->
-            val button = controlButton(
-                label = control.label,
-                iconRes = nativePlaybackControlIcon(control.key),
-                accessibilityLabel = control.label,
-                action = control.onClick,
-            ).apply {
-                tag = control.key
-                isEnabled = control.enabled
-                isSelected = control.selected
-                alpha = if (control.enabled) 1f else 0.5f
-            }
-            when (nativePlaybackControlPlacement(control.key)) {
-                NativePlaybackControlPlacement.CONTEXT -> contextControls.addView(button)
-                NativePlaybackControlPlacement.MORE -> moreControls.addView(button)
+        val nextKeys = updated.map(NativePlaybackControl::key).toSet()
+        dynamicButtons.keys.filter { it !in nextKeys }.toList().forEach { key ->
+            dynamicButtons.remove(key)?.let { button ->
+                if (selectTarget === button) {
+                    button.isPressed = false
+                    selectTarget = null
+                }
+                (button.parent as? ViewGroup)?.removeView(button)
             }
         }
+        fun reconcile(group: LinearLayout, placement: NativePlaybackControlPlacement) {
+            updated.filter { nativePlaybackControlPlacement(it.key) == placement }.forEachIndexed { index, control ->
+                val button = dynamicButtons.getOrPut(control.key) {
+                    controlButton(control.label, nativePlaybackControlIcon(control.key), control.label, action = control.onClick)
+                        .apply { tag = control.key }
+                }
+                if (group.indexOfChild(button) != index) {
+                    (button.parent as? ViewGroup)?.removeView(button)
+                    group.addView(button, index)
+                }
+                if (button.contentDescription?.toString() != control.label) {
+                    updateControlContent(button, control.label, nativePlaybackControlIcon(control.key), control.label)
+                }
+                button.isEnabled = control.enabled
+                button.isSelected = control.selected
+                button.alpha = if (control.enabled) 1f else 0.5f
+                button.setOnClickListener { control.onClick() }
+                if (!control.enabled && selectTarget === button) {
+                    button.isPressed = false
+                    selectTarget = null
+                }
+            }
+        }
+        reconcile(contextControls, NativePlaybackControlPlacement.CONTEXT)
+        reconcile(moreControls, NativePlaybackControlPlacement.MORE)
         contextControls.visibility = if (contextControls.isEmpty()) View.GONE else View.VISIBLE
         moreButton.visibility = if (moreControls.isEmpty()) View.GONE else View.VISIBLE
         if (moreControls.isEmpty()) moreExpanded = false
         updateMoreControlsVisibility()
         actionMessage.text = message.orEmpty()
         actionMessage.visibility = if (message.isNullOrBlank()) View.GONE else View.VISIBLE
-        if (dynamicControlHadFocus) {
+        if (dynamicControlHadFocus && chromeVisible && !interactionOverlayOpen &&
+            findFocus()?.takeIf { bottomPanel.isAncestorOf(it) && it.isEnabled && it.isFocusable && it.isShown } == null
+        ) {
             bottomPanel.post {
+                if (closed || !chromeVisible || interactionOverlayOpen) return@post
                 val target = findViewWithTag<View>(focusedKey)?.takeIf { it.isEnabled && it.isFocusable }
                     ?: contextControls.firstEnabledFocusableChild()
                     ?: primaryControls.firstEnabledFocusableChild()
@@ -404,10 +523,18 @@ internal class NativePlaybackSurface(
                 target?.requestFocus()
             }
         }
-        if (!message.isNullOrBlank()) showChrome(requestFocus = false)
+        if ((messageChanged && !message.isNullOrBlank()) || (pendingChanged && feedbackPending)) {
+            showChrome(requestFocus = false)
+        } else if (messageChanged || pendingChanged) {
+            scheduleChromeHide()
+        }
     }
 
     fun close() {
+        closed = true
+        selectTarget?.isPressed = false
+        selectTarget = null
+        heldKeys.clear()
         chromeHideJob?.cancel()
         chromeHideJob = null
         liveJob?.cancel()
@@ -422,6 +549,10 @@ internal class NativePlaybackSurface(
     fun setPictureInPictureActive(active: Boolean) {
         pictureInPictureActive = active
         if (active) {
+            selectTarget?.isPressed = false
+            selectTarget = null
+            heldKeys.clear()
+            revealKey = null
             chromeHideJob?.cancel()
             topPanel.visibility = View.GONE
             bottomPanel.visibility = View.GONE
@@ -431,27 +562,114 @@ internal class NativePlaybackSurface(
         }
     }
 
+    /** Controller-owned selectors and dialogs suspend idle chrome until dismissed. */
+    fun setInteractionOverlayOpen(open: Boolean) {
+        interactionOverlayOpen = open
+        selectTarget?.isPressed = false
+        selectTarget = null
+        heldKeys.clear()
+        revealKey = null
+        if (open) chromeHideJob?.cancel() else scheduleChromeHide()
+    }
+
+    /** Remote and system Back dismiss all visible playback controls before leaving. */
+    fun dismissPlaybackOsd(): Boolean {
+        if (closed || pictureInPictureActive || !chromeVisible) return false
+        chromeHideJob?.cancel()
+        chromeHideJob = null
+        selectTarget?.isPressed = false
+        selectTarget = null
+        heldKeys.clear()
+        revealKey = null
+        moreExpanded = false
+        diagnosticsVisible = false
+        updateMoreControlsVisibility()
+        diagnosticButton.isSelected = false
+        hideChrome(force = true)
+        return true
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.action == KeyEvent.ACTION_DOWN) {
-            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-                if (moreExpanded) {
-                    moreExpanded = false
-                    updateMoreControlsVisibility()
-                    moreButton.requestFocus()
-                } else {
-                    onClose()
+        if (closed) return true
+        val key = event.keyCode
+        val down = event.action == KeyEvent.ACTION_DOWN
+        val up = event.action == KeyEvent.ACTION_UP
+        if (down) {
+            heldKeys.add(key)
+            chromeHideJob?.cancel()
+        } else if (up) {
+            heldKeys.remove(key)
+        }
+        // Consume the entire press that reveals chrome, including repeats and its key-up.
+        if (revealKey == key) {
+            if (up) {
+                revealKey = null
+                scheduleChromeHide()
+            }
+            return true
+        }
+        if (key == KeyEvent.KEYCODE_BACK) {
+            // NativeRootLayout consumes the matching key-up after dispatching Back down.
+            heldKeys.remove(key)
+            if (down && event.repeatCount == 0 && !event.isCanceled && !dismissPlaybackOsd()) onClose()
+            return true
+        }
+        if (key in playbackMediaKeys) {
+            if (down && event.repeatCount == 0) {
+                when (key) {
+                    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> togglePlayback()
+                    KeyEvent.KEYCODE_MEDIA_PLAY -> player?.play()
+                    KeyEvent.KEYCODE_MEDIA_PAUSE -> player?.pause()
+                    KeyEvent.KEYCODE_MEDIA_REWIND -> seekBy(-10_000L)
+                    KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> seekBy(10_000L)
                 }
-                return true
             }
-            val chromeActuallyVisible = topPanel.isVisible &&
-                (request.compatibilityTest || bottomPanel.isVisible)
-            if ((!chromeVisible || !chromeActuallyVisible) && !pictureInPictureActive) {
-                showChrome(requestFocus = true)
-                return true
+            if (up) scheduleChromeHide()
+            return true
+        }
+        val select = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER ||
+            key == KeyEvent.KEYCODE_NUMPAD_ENTER
+        val directional = key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT ||
+            key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN
+        val chromeActuallyVisible = topPanel.isVisible &&
+            (request.compatibilityTest || bottomPanel.isVisible)
+        if (down && (select || directional) && (!chromeVisible || !chromeActuallyVisible) && !pictureInPictureActive) {
+            revealKey = key
+            showChrome(requestFocus = true)
+            return true
+        }
+        if (select) {
+            if (down && event.repeatCount == 0) {
+                selectTarget = findFocus()?.takeIf { it.isClickable && it.isEnabled && it.isShown }
+                selectTarget?.isPressed = true
+            } else if (up) {
+                val target = selectTarget
+                selectTarget = null
+                target?.isPressed = false
+                // A refreshed action row cannot redirect a held Select to a different action.
+                if (!event.isCanceled && target != null && target === findFocus() &&
+                    target.isAttachedToWindow && target.isShown && target.isEnabled && !interactionOverlayOpen
+                ) target.performClick()
+                scheduleChromeHide()
             }
+            return true
+        }
+        val handled = super.dispatchKeyEvent(event)
+        if (up) scheduleChromeHide()
+        return handled
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (!hasWindowFocus) {
+            selectTarget?.isPressed = false
+            selectTarget = null
+            heldKeys.clear()
+            revealKey = null
+            chromeHideJob?.cancel()
+        } else {
             scheduleChromeHide()
         }
-        return super.dispatchKeyEvent(event)
     }
 
     private fun controlButton(
@@ -487,9 +705,10 @@ internal class NativePlaybackSurface(
             marginEnd = activity.dp(2)
         }
         onFocusChangeListener = OnFocusChangeListener { _, focused ->
+            applyNativeFocusMotion(focused, scale = 1.05f)
             if (focused) {
-                controlHint.text = accessibilityLabel
-            } else if (controlHint.text == accessibilityLabel) {
+                controlHint.text = contentDescription
+            } else if (controlHint.text == contentDescription) {
                 controlHint.text = ""
             }
         }
@@ -512,6 +731,11 @@ internal class NativePlaybackSurface(
 
     private fun toggleMoreControls() {
         moreExpanded = !moreExpanded
+        if (moreExpanded) {
+            diagnosticsVisible = false
+            diagnostics.visibility = View.GONE
+            diagnosticButton.isSelected = false
+        }
         updateMoreControlsVisibility()
         if (moreExpanded) {
             val target = (0 until moreControls.childCount)
@@ -531,6 +755,10 @@ internal class NativePlaybackSurface(
 
     private fun toggleDiagnostics() {
         diagnosticsVisible = !diagnosticsVisible
+        if (diagnosticsVisible) {
+            moreExpanded = false
+            updateMoreControlsVisibility()
+        }
         diagnostics.visibility = if (diagnosticsVisible && chromeVisible) View.VISIBLE else View.GONE
         diagnosticButton.isSelected = diagnosticsVisible
         updateDiagnostics()
@@ -546,6 +774,7 @@ internal class NativePlaybackSurface(
         val focused = findFocus()
         if (
             !request.compatibilityTest &&
+            !interactionOverlayOpen &&
             (requestFocus || focused == null || focused === this || !bottomPanel.isAncestorOf(focused))
         ) {
             playPause.requestFocus()
@@ -553,8 +782,8 @@ internal class NativePlaybackSurface(
         scheduleChromeHide()
     }
 
-    private fun hideChrome() {
-        if (pictureInPictureActive || request.compatibilityTest || player?.isPlaying != true) return
+    private fun hideChrome(force: Boolean = false) {
+        if (!force && !canHideChrome()) return
         chromeVisible = false
         topPanel.visibility = View.GONE
         bottomPanel.visibility = View.GONE
@@ -565,18 +794,17 @@ internal class NativePlaybackSurface(
     private fun scheduleChromeHide() {
         chromeHideJob?.cancel()
         chromeHideJob = null
-        if (
-            request.compatibilityTest ||
-            pictureInPictureActive ||
-            moreExpanded ||
-            diagnosticsVisible ||
-            player?.isPlaying != true
-        ) return
+        if (!canHideChrome()) return
         chromeHideJob = activity.lifecycleScope.launch {
             delay(4_500)
             hideChrome()
         }
     }
+
+    private fun canHideChrome(): Boolean = !closed && !request.compatibilityTest &&
+        !pictureInPictureActive && !interactionOverlayOpen && !moreExpanded && !diagnosticsVisible &&
+        heldKeys.isEmpty() && revealKey == null && selectTarget == null && !feedbackPending &&
+        hasWindowFocus() && player?.isPlaying == true
 
     private fun startDirectPlayback() {
         retry.visibility = View.GONE
@@ -747,6 +975,7 @@ internal class NativePlaybackSurface(
     }
 
     private fun detachPlayer() {
+        timelineRange = NativeTimelineRange()
         progressJob?.cancel()
         progressJob = null
         playerView.player = null
@@ -776,6 +1005,7 @@ internal class NativePlaybackSurface(
     }
 
     private fun updateDocumentationProgress() {
+        timelineRange = NativeTimelineRange(documentationPositionMillis, documentationDurationMillis, seekable = true)
         progress.text = activity.getString(
             R.string.native_playback_progress,
             playbackTime(documentationPositionMillis),
@@ -804,6 +1034,7 @@ internal class NativePlaybackSurface(
         val position = active.currentPosition.coerceAtLeast(0L)
         val duration = active.duration.takeIf { it > 0 }
         val seekable = active.isCurrentMediaItemSeekable && duration != null
+        timelineRange = NativeTimelineRange(position, duration, seekable)
         progressStrip.isEnabled = seekable
         progressStrip.alpha = if (seekable) 1f else 0.55f
         progress.text = if (duration != null) {
@@ -906,12 +1137,12 @@ internal class NativePlaybackSurface(
     private fun updateControlContent(
         view: TextView,
         label: String,
-        iconRes: Int,
+        iconRes: Int?,
         accessibilityLabel: String,
     ) {
-        view.text = ""
+        view.text = if (iconRes == null) label else ""
         view.contentDescription = accessibilityLabel
-        view.setCompoundDrawablesRelativeWithIntrinsicBounds(iconRes, 0, 0, 0)
+        view.setCompoundDrawablesRelativeWithIntrinsicBounds(iconRes ?: 0, 0, 0, 0)
         view.compoundDrawablesRelative.forEach { drawable -> drawable?.setTint(Color.WHITE) }
         if (view.hasFocus()) controlHint.text = accessibilityLabel
     }

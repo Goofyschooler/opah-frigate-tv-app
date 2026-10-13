@@ -937,6 +937,21 @@ class RoomVerifiedPlaybackStrategyStore(
         if (status == AttemptStatus.AMBIGUOUS_QUARANTINED) {
             return@withTransaction StrategyWriteCancellationOutcome.ResolutionUnavailable
         }
+        // Strategy retention can remove the visible row while its terminal attempt remains valid.
+        // Replay that exact decision without turning a pruned commit into an ambiguous result.
+        if (
+            status == AttemptStatus.COMMITTED &&
+            existing.identityKey == identityKey &&
+            existing.decisionFingerprint == decisionFingerprint &&
+            existing.hasStructurallyValidCommittedShape() &&
+            existing.hasValidTerminalDecision()
+        ) {
+            return@withTransaction StrategyWriteCancellationOutcome.FinalizedReplay(
+                StrategyPersistenceFinalizationOutcome.Committed(
+                    requireNotNull(existing.recordGeneration),
+                ),
+            )
+        }
         val exactCancellation = existing.hasExactCancellationShape(identityKey, decisionFingerprint)
         if (
             status == AttemptStatus.CANCELLED_PENDING_RESOLUTION &&
