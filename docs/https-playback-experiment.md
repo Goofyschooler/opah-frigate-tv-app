@@ -28,8 +28,10 @@ late fragments after a timeout. WebSocket ping/pong detects a dead connection.
 ## Required before submitting
 
 1. Pass upstream's complete unit-test, lint, and debug-assembly command.
-2. Add scripted WebSocket tests for handshake/auth denial, redirect refusal,
-   negotiation, disconnect, stalled data, release races, and stale callbacks.
+2. Pass the scripted session tests and loopback TLS/WebSocket tests for
+   authentication cookies, denial, redirect refusal, negotiation, disconnect,
+   stalled data, release races, and late fragments. These tests use synthetic
+   certificates and bytes; they do not prove Media3 decoding of real video.
 3. Check ownership against the process-wide RTSP player coordinator; do not
    allow competing players after a preset change.
 4. Verify real authenticated Frigate 0.18 playback on the Hisense: continuous
@@ -39,3 +41,6 @@ late fragments after a timeout. WebSocket ping/pong detects a dead connection.
    enter shared test reports.
 
 Current status: implementation candidate only; no live playback verification.
+The loopback certificate helper is a test-only dependency; no new runtime
+library is added. The workflow publishes only a debug test artifact, not a
+GitHub release or an in-app update.

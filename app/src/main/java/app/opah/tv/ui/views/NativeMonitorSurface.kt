@@ -106,7 +106,6 @@ internal class NativeMonitorSurface(
     }
 
     init {
-        activity.lifecycle.addObserver(lifecycleObserver)
         setBackgroundColor(Color.BLACK)
         isFocusable = true
         addView(visualHost, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -179,6 +178,7 @@ internal class NativeMonitorSurface(
                 bottomMargin = activity.dp(24)
             },
         )
+        activity.lifecycle.addObserver(lifecycleObserver)
         update(initialState)
         controls.post {
             presetButtons[state.preset]?.requestFocus()
