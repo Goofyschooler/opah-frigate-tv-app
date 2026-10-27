@@ -6,9 +6,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSpec
 import java.io.IOException
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -24,6 +21,7 @@ internal class MseLiveDataSource(private val client: OkHttpClient) : BaseDataSou
         val pipe = LiveBytePipe()
         @Volatile var socket: WebSocket? = null
         @Volatile var cancelled = false
+        @Volatile var negotiated = false
         fun cancel() {
             cancelled = true
             pipe.fail(IOException("Live stream closed"))
@@ -64,17 +62,16 @@ internal class MseLiveDataSource(private val client: OkHttpClient) : BaseDataSou
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                val type = if (text.length <= 16_384) runCatching {
-                    Json.parseToJsonElement(text).jsonObject["type"]?.jsonPrimitive?.content
-                }.getOrNull() else null
-                if (type == null || type == "error") {
+                if (active.negotiated || !acceptsMseNegotiation(text)) {
                     active.pipe.fail(LiveTransportException())
                     webSocket.cancel()
+                } else {
+                    active.negotiated = true
                 }
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                if (bytes.size > 8 * 1024 * 1024 || !active.pipe.offer(bytes.toByteArray())) {
+                if (!active.negotiated || bytes.size > 8 * 1024 * 1024 || !active.pipe.offer(bytes.toByteArray())) {
                     active.pipe.fail(IOException("Live buffer limit reached"))
                     webSocket.cancel()
                 }

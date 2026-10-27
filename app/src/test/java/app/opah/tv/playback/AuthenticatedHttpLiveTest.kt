@@ -18,6 +18,7 @@ class AuthenticatedHttpLiveTest {
         assertSame(original.hostnameVerifier, streaming.hostnameVerifier)
         assertEquals(0, streaming.callTimeoutMillis)
         assertEquals(20_000, streaming.readTimeoutMillis)
+        assertEquals(15_000, streaming.pingIntervalMillis)
         assertEquals(30_000, original.callTimeoutMillis)
         assertFalse(streaming.followRedirects)
         assertFalse(streaming.followSslRedirects)
