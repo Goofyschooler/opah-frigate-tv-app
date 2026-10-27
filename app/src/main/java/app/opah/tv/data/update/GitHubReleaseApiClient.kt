@@ -1,5 +1,7 @@
 package app.opah.tv.data.update
 
+import app.opah.tv.BuildConfig
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
@@ -197,7 +199,7 @@ class GitHubReleaseApiClient(
     private fun JsonObject.long(key: String): Long? = get(key)?.jsonPrimitive?.longOrNull
 
     companion object {
-        const val OPAH_REPOSITORY_OWNER = "VibeCodingAntagonist"
+        val OPAH_REPOSITORY_OWNER = BuildConfig.UPDATE_REPOSITORY_OWNER
         const val OPAH_REPOSITORY_NAME = "opah-frigate-tv-app"
         const val LATEST_APK_ALIAS = "opah-latest.apk"
         private const val GITHUB_WEB_HOST = "github.com"

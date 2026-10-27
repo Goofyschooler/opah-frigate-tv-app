@@ -1,0 +1,57 @@
+name: Opah Test 0.6 integration
+on:
+  push:
+    branches: [experiment/opah-test-060]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: darknode-test-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Test and build with existing test signing identity
+        env:
+          OPAH_TEST_KEYSTORE_BASE64: ${{ secrets.OPAH_TEST_KEYSTORE_BASE64 }}
+          OPAH_RELEASE_STORE_PASSWORD: ${{ secrets.OPAH_TEST_PASSWORD }}
+          OPAH_RELEASE_KEY_PASSWORD: ${{ secrets.OPAH_TEST_PASSWORD }}
+          OPAH_RELEASE_KEY_ALIAS: opah-test
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$OPAH_TEST_KEYSTORE_BASE64"
+          export OPAH_RELEASE_KEYSTORE_FILE="$RUNNER_TEMP/opah-test.p12"
+          trap 'rm -f "$OPAH_RELEASE_KEYSTORE_FILE"' EXIT
+          printf '%s' "$OPAH_TEST_KEYSTORE_BASE64" | base64 --decode > "$OPAH_RELEASE_KEYSTORE_FILE"
+          bash gradlew --no-daemon -Popah.requireReleaseSigning=true testDebugUnitTest testDarknodeTestUnitTest lintDebug lintDarknodeTest assembleDarknodeTest
+      - name: Verify test identity and signature
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/darknodeTest/app-darknodeTest.apk
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" > "$RUNNER_TEMP/opah-test-badging.txt"
+          grep -q "package: name='app.opah.tv.darknode.test'" "$RUNNER_TEMP/opah-test-badging.txt"
+          grep -q "application-label:'Opah Test'" "$RUNNER_TEMP/opah-test-badging.txt"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk"
+          sha256sum "$apk"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: opah-test-060-results
+          path: |
+            app/build/reports/
+            app/build/test-results/
+            app/build/outputs/apk/darknodeTest/*.apk

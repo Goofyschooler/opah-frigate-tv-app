@@ -55,6 +55,7 @@ android {
         versionCode = opahVersionCode
         versionName = opahVersionName
         buildConfigField("boolean", "DOCUMENTATION_MODE", "false")
+        buildConfigField("String", "UPDATE_REPOSITORY_OWNER", "\"VibeCodingAntagonist\"")
         buildConfigField("boolean", "NATIVE_VIEW_PRESENTATION", nativeViewPresentation.toString())
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -90,6 +91,15 @@ android {
             versionNameSuffix = "-https-lab"
             matchingFallbacks += "debug"
             signingConfig = signingConfigs.getByName("debug")
+        }
+        create("darknodeTest") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".darknode.test"
+            versionNameSuffix = "-darknode-test"
+            matchingFallbacks += "debug"
+            // Preserve the existing test app's signing identity; never silently use a new key.
+            signingConfig = if (hasCompleteReleaseSigning) signingConfigs.getByName("release") else null
+            buildConfigField("String", "UPDATE_REPOSITORY_OWNER", "\"Goofyschooler\"")
         }
         release {
             if (hasCompleteReleaseSigning) {
