@@ -37,7 +37,7 @@ jobs:
           export OPAH_RELEASE_KEYSTORE_FILE="$RUNNER_TEMP/opah-test.p12"
           trap 'rm -f "$OPAH_RELEASE_KEYSTORE_FILE"' EXIT
           printf '%s' "$OPAH_TEST_KEYSTORE_BASE64" | base64 --decode > "$OPAH_RELEASE_KEYSTORE_FILE"
-          bash gradlew --no-daemon -Popah.requireReleaseSigning=true testDebugUnitTest testDarknodeTestUnitTest lintDebug lintDarknodeTest assembleDarknodeTest
+          bash gradlew --no-daemon -Popah.requireReleaseSigning=true -Pandroid.onlyEnableUnitTestForTheTestedBuildType=false testDebugUnitTest testDarknodeTestUnitTest lintDebug lintDarknodeTest assembleDarknodeTest
       - name: Verify test identity and signature
         run: |
           set -euo pipefail
