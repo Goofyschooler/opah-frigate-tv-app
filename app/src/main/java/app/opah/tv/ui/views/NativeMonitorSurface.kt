@@ -87,6 +87,7 @@ internal class NativeMonitorSurface(
     private val audioButton: TextView
     private val awakeButton: TextView
     private val exitButton: TextView
+    private val gridButton: TextView
     private var state = initialState
     private var visualKey: String? = null
     private var visualJob: Job? = null
@@ -159,6 +160,8 @@ internal class NativeMonitorSurface(
             controls.addView(button)
         }
         controls.addView(divider())
+        gridButton = controlButton("Show grid") { clearPinnedCamera() }
+        controls.addView(gridButton)
         audioButton = controlButton("", R.drawable.ic_volume_off) { onAudioEnabled(!state.audioEnabled) }
         awakeButton = controlButton("") { onKeepScreenAwake(!state.keepScreenAwake) }
         exitButton = controlButton("") { onExitMinutes(nextNativeMonitorExitMinutes(state.exitAfterMinutes)) }
@@ -198,6 +201,7 @@ internal class NativeMonitorSurface(
             it.name == pinnedCamera && it.name in updated.visibleCameraIds && updated.preset == MonitorPreset.FIXED
         }
         if (pinned == null) pinnedCamera = null
+        gridButton.visibility = if (pinned != null) View.VISIBLE else View.GONE
         keepScreenOn = updated.keepScreenAwake
         title.text = updated.title
         status.text = if (pinned != null) "Pinned ${pinned.displayName} · $pinnedStatus" else monitorStatus(updated)
@@ -285,17 +289,28 @@ internal class NativeMonitorSurface(
         return true
     }
 
+    private fun clearPinnedCamera() {
+        pinnedCamera = null
+        update(state)
+        showChrome(requestFocus = true)
+    }
+
+    /** Used both by the TV key dispatcher and Android's system Back callback. */
+    fun handlePlaybackBack(): Boolean {
+        if (closed) return false
+        if (dismissPlaybackOsd()) return true
+        if (pinnedCamera == null) return false
+        clearPinnedCamera()
+        return true
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (closed) return true
         if (event.keyCode == KeyEvent.KEYCODE_BACK) {
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
-                !event.isCanceled && !dismissPlaybackOsd()
+                !event.isCanceled && !handlePlaybackBack()
             ) {
-                if (pinnedCamera != null) {
-                    pinnedCamera = null
-                    update(state)
-                    showChrome(requestFocus = true)
-                } else onBack()
+                onBack()
             }
             return true
         }

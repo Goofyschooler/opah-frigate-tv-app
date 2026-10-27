@@ -4381,7 +4381,7 @@ internal class NativeOpahController(
             root.navigationOpen -> root.closeNavigation()
             currentState.tvAlertPrivacyGateOpen -> viewModel.cancelTvAlertPrivacyGate()
             currentState.playback != null -> if (activePlayback?.dismissPlaybackOsd() != true) viewModel.closePlayback()
-            currentState.monitorMode != null -> if (activeMonitor?.dismissPlaybackOsd() != true) viewModel.closeMonitorMode()
+            currentState.monitorMode != null -> if (activeMonitor?.handlePlaybackBack() != true) viewModel.closeMonitorMode()
             currentState.cameraGroupView != null -> if (activeCameraGroup?.dismissPlaybackOsd() != true) viewModel.closeCameraGroup()
             currentState.ptz.cameraName != null -> viewModel.closePtzControls()
             else -> {
