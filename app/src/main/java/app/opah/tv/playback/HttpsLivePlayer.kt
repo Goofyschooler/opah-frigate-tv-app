@@ -12,12 +12,18 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.io.IOException
 import okhttp3.OkHttpClient
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import app.opah.tv.playback.media3.ExclusiveVideoOutputLease
 
 /** Continuous fMP4 over Frigate's MSE route; retains authenticated TLS and cookie policy. */
 @UnstableApi
-internal class HttpsLivePlayer(context: Context, authenticatedClient: OkHttpClient) : LivePlayer {
+internal class HttpsLivePlayer(
+    context: Context,
+    authenticatedClient: OkHttpClient,
+    private val outputLease: ExclusiveVideoOutputLease,
+) : LivePlayer {
     private val sources = CopyOnWriteArrayList<MseLiveDataSource>()
     private var released = false
+    private var attached = false
     private val client = httpLiveClient(authenticatedClient)
     override val player = ExoPlayer.Builder(context.applicationContext,
         DefaultRenderersFactory(context.applicationContext)
@@ -34,19 +40,31 @@ internal class HttpsLivePlayer(context: Context, authenticatedClient: OkHttpClie
     ).build()
 
     override fun prepare(uri: String, options: LivePlaybackOptions) {
+        check(!released) { "Live player released" }
         require(uri.toHttpUrl().scheme == "https")
+        attached = true
+        outputLease.attachment.target.attach(player, outputLease.attachment.generation)
         player.volume = if (options.videoOnly) 0f else 1f
         player.setMediaItem(MediaItem.Builder().setUri(uri).setMimeType("video/mp4").build())
         player.playWhenReady = true
         player.prepare()
     }
 
-    override fun release() {
-        synchronized(sources) {
-            released = true
-            sources.forEach { it.cancel() }
-        }
-        player.release()
+    override fun release() { close() }
+
+    fun close(): Boolean = outputLease.finish {
+        // Wake loading threads before synchronous Media3 teardown on the main looper.
+        val cancelled = runCatching {
+            synchronized(sources) {
+                released = true
+                sources.forEach { it.cancel() }
+            }
+        }.isSuccess
+        val concealed = runCatching {
+            !attached || outputLease.attachment.target.detachAndHide(player, outputLease.attachment.generation)
+        }.getOrDefault(false)
+        val decoderReleased = runCatching { player.release() }.isSuccess
         sources.clear()
+        cancelled && concealed && decoderReleased
     }
 }

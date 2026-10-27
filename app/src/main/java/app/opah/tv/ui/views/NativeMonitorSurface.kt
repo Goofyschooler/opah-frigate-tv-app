@@ -38,6 +38,11 @@ import app.opah.tv.playback.compatibility.PlaybackCompatibilityState
 import app.opah.tv.playback.compatibility.PlaybackResult
 import app.opah.tv.playback.media3.PlayerViewMedia3VideoOutputTarget
 import app.opah.tv.playback.media3.SingleLivePlaybackRequestId
+import app.opah.tv.playback.media3.ProcessMedia3VideoOutputRegistry
+import app.opah.tv.playback.media3.ExclusiveVideoOutputLease
+import app.opah.tv.playback.compatibility.PlaybackAttemptId
+import app.opah.tv.playback.compatibility.PlaybackSessionId
+import java.util.UUID
 import app.opah.tv.ui.MonitorModeUiState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -318,10 +323,15 @@ internal class NativeMonitorSurface(
     }
 
     private fun stopHttpsLive() {
-        httpsView?.player = null
-        httpsView = null
-        httpsBackend?.release()
+        val backend = httpsBackend
         httpsBackend = null
+        httpsView?.player = null
+        httpsView?.visibility = View.INVISIBLE
+        httpsView = null
+        if (backend != null && !backend.close()) {
+            pinnedStatus = "Playback cleanup incomplete; restart Opah"
+            status.text = pinnedStatus
+        }
     }
 
     private fun showHttpsLive(camera: Camera) {
@@ -334,46 +344,77 @@ internal class NativeMonitorSurface(
             report("HTTPS stream unavailable or access denied; Back to retry")
             return
         }
-        report("Connecting HTTPS video")
+        report("Waiting for previous player to close")
         val view = PlayerView(activity).apply {
             useController = false
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
             setKeepContentOnPlayerReset(false)
         }
         visualHost.addView(view, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        val backend = HttpsLivePlayer(activity, application.container.httpClient)
-        httpsBackend = backend
-        httpsView = view
-        view.player = backend.player
-        var firstFrame = false
-        backend.player.addListener(object : Player.Listener {
-            override fun onRenderedFirstFrame() {
-                if (httpsBackend !== backend) return
-                if (!request.isAuthorized()) {
-                    report("Access changed; playback stopped")
-                    stopHttpsLive()
-                    return
-                }
-                firstFrame = true
-                report("Live HTTPS video")
-            }
-            override fun onPlayerError(error: PlaybackException) {
-                if (httpsBackend !== backend) return
-                report("HTTPS playback failed: ${liveFailureStatus(error) ?: error.errorCodeName}; Back to retry")
-                stopHttpsLive()
-            }
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (httpsBackend !== backend) return
-                if (playbackState == Player.STATE_ENDED) {
-                    report("Live connection ended; Back to retry")
-                    stopHttpsLive()
-                }
-            }
-        })
-        backend.prepare(request.uri, LivePlaybackOptions(videoOnly = !state.audioEnabled))
+        val output = PlayerViewMedia3VideoOutputTarget(view, {}, {})
+        val attempt = PlaybackAttemptId(PlaybackSessionId("https-${UUID.randomUUID()}"), 1)
         visualJob = activity.lifecycleScope.launch {
+            var lease: ExclusiveVideoOutputLease? = null
+            val deadline = android.os.SystemClock.elapsedRealtime() + 3_000L
+            while (isActive && request.isAuthorized() && lease == null &&
+                android.os.SystemClock.elapsedRealtime() < deadline
+            ) {
+                lease = ProcessMedia3VideoOutputRegistry.instance.acquireExclusive(output, attempt)
+                if (lease == null) delay(50L)
+            }
+            val acquired = lease
+            if (acquired == null) {
+                report("Player busy or access changed; Back to retry")
+                return@launch
+            }
+            if (!request.isAuthorized()) {
+                acquired.finish { true } // Nothing was constructed or attached.
+                report("Access changed; playback stopped")
+                return@launch
+            }
+            val backend = try {
+                HttpsLivePlayer(activity, application.container.httpClient, acquired)
+            } catch (_: Exception) {
+                // Without a returned player, construction cleanup cannot be proven.
+                acquired.finish { false }
+                report("Player setup failed; restart Opah")
+                return@launch
+            }
+            httpsBackend = backend
+            httpsView = view
+            var firstFrame = false
+            try { backend.player.addListener(object : Player.Listener {
+                override fun onRenderedFirstFrame() {
+                    if (httpsBackend !== backend) return
+                    if (!request.isAuthorized()) {
+                        report("Access changed; playback stopped")
+                        stopHttpsLive()
+                        return
+                    }
+                    firstFrame = true
+                    report("Live HTTPS video")
+                }
+                override fun onPlayerError(error: PlaybackException) {
+                    if (httpsBackend !== backend) return
+                    report("HTTPS playback failed: ${liveFailureStatus(error) ?: error.errorCodeName}; Back to retry")
+                    stopHttpsLive()
+                }
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (httpsBackend !== backend) return
+                    if (playbackState == Player.STATE_ENDED) {
+                        report("Live connection ended; Back to retry")
+                        stopHttpsLive()
+                    }
+                }
+            }) } catch (_: Exception) {
+                report("Player listener setup failed; Back to retry")
+                stopHttpsLive()
+                return@launch
+            }
             val started = android.os.SystemClock.elapsedRealtime()
             try {
+                report("Connecting HTTPS video")
+                backend.prepare(request.uri, LivePlaybackOptions(videoOnly = !state.audioEnabled))
                 while (isActive && httpsBackend === backend) {
                     if (!request.isAuthorized()) {
                         report("Access changed; playback stopped")
@@ -385,8 +426,13 @@ internal class NativeMonitorSurface(
                     }
                     delay(250L)
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                report("HTTPS player setup failed; Back to retry")
             } finally {
                 if (httpsBackend === backend) stopHttpsLive()
+                else backend.close()
             }
         }
     }

@@ -84,6 +84,13 @@ android {
         debug {
             applicationIdSuffix = ".dev"
         }
+        create("httpsLab") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".httpslab"
+            versionNameSuffix = "-https-lab"
+            matchingFallbacks += "debug"
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             if (hasCompleteReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")

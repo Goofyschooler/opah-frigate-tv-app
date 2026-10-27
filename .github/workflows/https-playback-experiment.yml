@@ -17,12 +17,21 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
           log-accepted-android-sdk-licenses: false
       - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
-      - run: bash gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
+      - run: bash gradlew --no-daemon testDebugUnitTest lintDebug lintHttpsLab assembleHttpsLab
+      - name: Check isolated TV application identity
+        run: |
+          apk=app/build/outputs/apk/httpsLab/app-httpsLab.apk
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" > /tmp/opah-lab-badging.txt
+          grep -q "package: name='app.opah.tv.httpslab'" /tmp/opah-lab-badging.txt
+          grep -q "application-label:'Opah HTTPS Lab'" /tmp/opah-lab-badging.txt
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
+          sha256sum "$apk"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -30,4 +39,4 @@ jobs:
           path: |
             app/build/reports/
             app/build/test-results/
-            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/httpsLab/*.apk
