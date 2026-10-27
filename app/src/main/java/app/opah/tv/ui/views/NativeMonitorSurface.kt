@@ -39,7 +39,7 @@ import app.opah.tv.playback.compatibility.PlaybackResult
 import app.opah.tv.playback.media3.PlayerViewMedia3VideoOutputTarget
 import app.opah.tv.playback.media3.SingleLivePlaybackRequestId
 import app.opah.tv.playback.media3.ProcessMedia3VideoOutputRegistry
-import app.opah.tv.playback.media3.ExclusiveVideoOutputLease
+import app.opah.tv.playback.media3.awaitExclusiveVideoOutput
 import app.opah.tv.playback.compatibility.PlaybackAttemptId
 import app.opah.tv.playback.compatibility.PlaybackSessionId
 import java.util.UUID
@@ -354,15 +354,9 @@ internal class NativeMonitorSurface(
         val output = PlayerViewMedia3VideoOutputTarget(view, {}, {})
         val attempt = PlaybackAttemptId(PlaybackSessionId("https-${UUID.randomUUID()}"), 1)
         visualJob = activity.lifecycleScope.launch {
-            var lease: ExclusiveVideoOutputLease? = null
-            val deadline = android.os.SystemClock.elapsedRealtime() + 3_000L
-            while (isActive && request.isAuthorized() && lease == null &&
-                android.os.SystemClock.elapsedRealtime() < deadline
-            ) {
-                lease = ProcessMedia3VideoOutputRegistry.instance.acquireExclusive(output, attempt)
-                if (lease == null) delay(50L)
-            }
-            val acquired = lease
+            val acquired = awaitExclusiveVideoOutput(
+                ProcessMedia3VideoOutputRegistry.instance, output, attempt, request.isAuthorized,
+            )
             if (acquired == null) {
                 report("Player busy or access changed; Back to retry")
                 return@launch
