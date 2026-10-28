@@ -1,7 +1,7 @@
 name: Opah Test 0.6 integration
 on:
   push:
-    branches: [experiment/opah-test-060]
+    branches: [experiment/opah-test-060, fix/opah-test-hevc]
   workflow_dispatch:
 permissions:
   contents: read

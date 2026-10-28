@@ -14,7 +14,7 @@ class TestVariantIdentityTest {
         )
         if (isTest) {
             assertEquals("app.opah.tv.darknode.test", BuildConfig.APPLICATION_ID)
-            assertEquals(6002, BuildConfig.VERSION_CODE)
+            assertEquals(6003, BuildConfig.VERSION_CODE)
             assertEquals("0.6.0-darknode-test", BuildConfig.VERSION_NAME)
         }
     }

@@ -8,7 +8,7 @@ plugins {
 
 val opahVersionCode = providers.gradleProperty("opah.versionCode")
     .map(String::toInt)
-    .orElse(6002)
+    .orElse(6003)
     .get()
 val opahVersionName = providers.gradleProperty("opah.versionName")
     .orElse("0.6.0")

@@ -37,7 +37,7 @@ class MseTlsTransportTest {
                 }).build()
             client = httpLiveClient(original)
         }
-        fun connection() = MseLiveConnection(client::newWebSocket)
+        fun connection() = MseLiveConnection(openSocket = client::newWebSocket)
         fun uri() = server.url("/live/mse/api/ws?src=test").toString()
         override fun close() {
             client.dispatcher.cancelAll()

@@ -25,6 +25,7 @@ internal class HttpsLivePlayer(
     private var released = false
     private var attached = false
     private val client = httpLiveClient(authenticatedClient)
+    private val hevcSupported = platformSupportsHevcMain51()
     override val player = ExoPlayer.Builder(context.applicationContext,
         DefaultRenderersFactory(context.applicationContext)
             .setEnableDecoderFallback(true)
@@ -33,7 +34,7 @@ internal class HttpsLivePlayer(
         .setDataSourceFactory(DataSource.Factory {
             synchronized(sources) {
                 if (released) throw IOException("Live player released")
-                MseLiveDataSource(client).also { sources.add(it) }
+                MseLiveDataSource(client, hevcSupported).also { sources.add(it) }
             }
         })
         .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(0)),

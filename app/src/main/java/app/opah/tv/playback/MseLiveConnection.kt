@@ -9,7 +9,10 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 
 /** One terminal streaming session, independent of Android so release races are testable. */
-internal class MseLiveConnection(private val openSocket: (Request, WebSocketListener) -> WebSocket) {
+internal class MseLiveConnection(
+    private val hevcSupported: Boolean = false,
+    private val openSocket: (Request, WebSocketListener) -> WebSocket,
+) {
     private val pipe = LiveBytePipe()
     @Volatile private var socket: WebSocket? = null
     @Volatile private var stopped = false
@@ -26,13 +29,13 @@ internal class MseLiveConnection(private val openSocket: (Request, WebSocketList
         val created = openSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (stopped) { webSocket.cancel(); return }
-                if (!webSocket.send("""{"type":"mse","value":"avc1.640029,mp4a.40.2,mp4a.40.5"}""")) {
+                if (!webSocket.send("""{"type":"mse","value":"${mseCodecs(hevcSupported)}"}""")) {
                     cancel()
                     webSocket.cancel()
                 }
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
-                if (stopped || negotiated || !acceptsMseNegotiation(text)) {
+                if (stopped || negotiated || !acceptsMseNegotiation(text, hevcSupported)) {
                     fail(LiveTransportException())
                     webSocket.cancel()
                 } else negotiated = true
