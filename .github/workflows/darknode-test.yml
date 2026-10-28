@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -38,6 +40,13 @@ jobs:
           trap 'rm -f "$OPAH_RELEASE_KEYSTORE_FILE"' EXIT
           printf '%s' "$OPAH_TEST_KEYSTORE_BASE64" | base64 --decode > "$OPAH_RELEASE_KEYSTORE_FILE"
           bash gradlew --no-daemon -Popah.requireReleaseSigning=true -Pandroid.onlyEnableUnitTestForTheTestedBuildType=false testDebugUnitTest testDarknodeTestUnitTest lintDebug lintDarknodeTest assembleDarknodeTest
+          # Forward-version rollback preserves login/data without uninstall or downgrade flags.
+          rollback="$RUNNER_TEMP/opah-rollback"
+          mkdir "$rollback"
+          git archive 4321a3d2dbb566845e6fb23d78a9b342c86d2255 | tar -x -C "$rollback"
+          (cd "$rollback" && bash gradlew --no-daemon -Popah.requireReleaseSigning=true -Popah.versionCode=6004 assembleDarknodeTest)
+          mkdir -p app/build/outputs/rollback
+          cp "$rollback/app/build/outputs/apk/darknodeTest/app-darknodeTest.apk" app/build/outputs/rollback/opah-test-rollback-6004.apk
       - name: Verify test identity and signature
         run: |
           set -euo pipefail
@@ -47,6 +56,13 @@ jobs:
           grep -q "application-label:'Opah Test'" "$RUNNER_TEMP/opah-test-badging.txt"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk"
           sha256sum "$apk"
+          rollback=app/build/outputs/rollback/opah-test-rollback-6004.apk
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$rollback" > "$RUNNER_TEMP/rollback-badging.txt"
+          grep -q "package: name='app.opah.tv.darknode.test'.*versionCode='6004'" "$RUNNER_TEMP/rollback-badging.txt"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk" | grep 'Signer #1 certificate SHA-256 digest:' > "$RUNNER_TEMP/candidate-cert"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$rollback" | grep 'Signer #1 certificate SHA-256 digest:' > "$RUNNER_TEMP/rollback-cert"
+          cmp "$RUNNER_TEMP/candidate-cert" "$RUNNER_TEMP/rollback-cert"
+          sha256sum "$rollback"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -55,3 +71,4 @@ jobs:
             app/build/reports/
             app/build/test-results/
             app/build/outputs/apk/darknodeTest/*.apk
+            app/build/outputs/rollback/*.apk
