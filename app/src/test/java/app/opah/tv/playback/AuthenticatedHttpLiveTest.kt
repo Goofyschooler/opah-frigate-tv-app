@@ -11,6 +11,15 @@ import java.util.concurrent.TimeUnit
 
 class AuthenticatedHttpLiveTest {
     @Test
+    fun selectedStreamMustStillExistAndIsNeverSilentlyReplaced() {
+        assertEquals("cam_sub", selectHttpLiveStream("cam", listOf("cam", "cam_sub"), "cam_sub"))
+        assertNull(selectHttpLiveStream("cam", listOf("cam"), "cam_sub"))
+        assertNull(selectHttpLiveStream("cam", listOf("cam"), "rtsp://private/source"))
+        assertEquals("cam", selectHttpLiveStream("cam", listOf("cam_sub", "cam"), null))
+        assertNull(selectHttpLiveStream("cam", emptyList(), null))
+    }
+
+    @Test
     fun normalCameraUsesHttpsEvenWhenCompatibilityRequestExists() {
         val live = PlaybackRequest("Camera", "", PlaybackKind.LIVE, cameraName = "cam1",
             liveCompatibilityRequestId = "opaque")

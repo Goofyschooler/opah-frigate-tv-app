@@ -888,6 +888,7 @@ internal class NativePlaybackSurface(
                     throw cancelled
                 } catch (_: Exception) {
                     failure = "HTTPS playback failed"
+                    status.text = "HTTPS playback failed; Back to retry"
                 } finally {
                     if (httpsBackend === backend) {
                         backend.player.removeListener(listener)

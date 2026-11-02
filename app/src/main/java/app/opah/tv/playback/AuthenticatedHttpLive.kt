@@ -37,3 +37,8 @@ internal fun httpLiveUri(baseUrl: String, streamName: String): String? {
 internal fun useAuthenticatedLive(request: PlaybackRequest, baseUrl: String?): Boolean =
     request.kind == PlaybackKind.LIVE && !request.compatibilityTest &&
         baseUrl?.toHttpUrlOrNull()?.scheme == "https"
+
+/** Explicit stream choice is never silently replaced when discovery or access changes. */
+internal fun selectHttpLiveStream(cameraName: String, available: List<String>, preferred: String?): String? =
+    if (preferred != null) preferred.takeIf { it in available }
+    else available.firstOrNull { it == cameraName } ?: available.firstOrNull()

@@ -52,7 +52,7 @@ jobs:
           set -euo pipefail
           apk=app/build/outputs/apk/darknodeTest/app-darknodeTest.apk
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" > "$RUNNER_TEMP/opah-test-badging.txt"
-          grep -q "package: name='app.opah.tv.darknode.test'" "$RUNNER_TEMP/opah-test-badging.txt"
+          grep -q "package: name='app.opah.tv.darknode.test'.*versionCode='6005'" "$RUNNER_TEMP/opah-test-badging.txt"
           grep -q "application-label:'Opah Test'" "$RUNNER_TEMP/opah-test-badging.txt"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk"
           sha256sum "$apk"
@@ -62,6 +62,7 @@ jobs:
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk" | grep 'Signer #1 certificate SHA-256 digest:' > "$RUNNER_TEMP/candidate-cert"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$rollback" | grep 'Signer #1 certificate SHA-256 digest:' > "$RUNNER_TEMP/rollback-cert"
           cmp "$RUNNER_TEMP/candidate-cert" "$RUNNER_TEMP/rollback-cert"
+          grep -q '1d8dc8ab49435d5bbd5b56899215c125a174d96fa5d4cbb9a60a24071606dd76' "$RUNNER_TEMP/candidate-cert"
           sha256sum "$rollback"
       - uses: actions/upload-artifact@v4
         if: always()

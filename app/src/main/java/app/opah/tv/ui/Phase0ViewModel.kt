@@ -3435,10 +3435,10 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val snapshot = current.snapshot ?: return null
         if (cameraName !in snapshot.user.allowedCameras) return null
         val camera = snapshot.cameras.firstOrNull { it.name == cameraName } ?: return null
-        val stream = if (preferredStreamName != null) {
-            camera.streams.firstOrNull { it.streamName == preferredStreamName } ?: return null
-        } else camera.streams.firstOrNull { it.streamName == cameraName }
-            ?: camera.streams.firstOrNull() ?: return null
+        val selected = app.opah.tv.playback.selectHttpLiveStream(
+            cameraName, camera.streams.map { it.streamName }, preferredStreamName,
+        ) ?: return null
+        val stream = camera.streams.first { it.streamName == selected }
         val grant = issuePrivacyGrant(PrivacySurface.LIVE_PLAYBACK, PrivacyTarget.Camera(cameraName))
             ?: return null
         val uri = app.opah.tv.playback.httpLiveUri(profile.apiBaseUrl, stream.streamName) ?: return null
