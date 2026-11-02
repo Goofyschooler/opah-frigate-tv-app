@@ -23,6 +23,7 @@ data class PlaybackRequest(
     val recordingSaveKey: String? = null,
     val returnToLiveCameraName: String? = null,
     val stretchPreferenceKey: String? = cameraName,
+    val liveStreamName: String? = null,
 )
 
 const val BIRDSEYE_STRETCH_PREFERENCE_KEY = "__opah_birdseye__"

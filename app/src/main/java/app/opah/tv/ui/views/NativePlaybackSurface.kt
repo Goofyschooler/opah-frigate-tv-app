@@ -166,7 +166,7 @@ internal class NativePlaybackSurface(
     private val activity: ComponentActivity,
     val request: PlaybackRequest,
     private val authenticatedLive: Boolean = false,
-    private val prepareHttpLive: (String) -> AuthenticatedHttpLive? = { null },
+    private val prepareHttpLive: (String, String?) -> AuthenticatedHttpLive? = { _, _ -> null },
     private val preferRtpTcp: Boolean,
     startMuted: Boolean,
     private val diagnosticsEnabled: Boolean = false,
@@ -832,7 +832,7 @@ internal class NativePlaybackSurface(
         retry.visibility = View.GONE
         liveJob = activity.lifecycleScope.launch {
             activity.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                val live = request.cameraName?.let(prepareHttpLive)
+                val live = request.cameraName?.let { prepareHttpLive(it, request.liveStreamName) }
                 if (closed || live == null || !live.isAuthorized()) {
                     status.text = "HTTPS stream unavailable or access denied"
                     return@repeatOnLifecycle

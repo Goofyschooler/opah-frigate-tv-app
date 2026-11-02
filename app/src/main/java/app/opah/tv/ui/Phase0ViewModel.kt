@@ -3429,13 +3429,15 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
             ?.let { cameraImageRepository.cached(it, cameraName) }
     }
 
-    internal fun prepareMonitorHttpLive(cameraName: String): app.opah.tv.playback.AuthenticatedHttpLive? {
+    internal fun prepareMonitorHttpLive(cameraName: String, preferredStreamName: String? = null): app.opah.tv.playback.AuthenticatedHttpLive? {
         val current = _state.value
         val profile = current.activeProfile ?: return null
         val snapshot = current.snapshot ?: return null
         if (cameraName !in snapshot.user.allowedCameras) return null
         val camera = snapshot.cameras.firstOrNull { it.name == cameraName } ?: return null
-        val stream = camera.streams.firstOrNull { it.streamName == cameraName }
+        val stream = if (preferredStreamName != null) {
+            camera.streams.firstOrNull { it.streamName == preferredStreamName } ?: return null
+        } else camera.streams.firstOrNull { it.streamName == cameraName }
             ?: camera.streams.firstOrNull() ?: return null
         val grant = issuePrivacyGrant(PrivacySurface.LIVE_PLAYBACK, PrivacyTarget.Camera(cameraName))
             ?: return null
@@ -5712,6 +5714,22 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         compatibilityTestUseSavedStrategyFirst: Boolean = true,
         preferRtpTcpOverride: Boolean? = null,
     ) {
+        val httpsRequest = PlaybackRequest(
+            title = camera.displayName, uri = "", kind = PlaybackKind.LIVE,
+            cameraName = camera.name, liveStreamName = option.streamName,
+            compatibilityTest = compatibilityTest,
+        )
+        if (!BuildConfig.DOCUMENTATION_MODE &&
+            app.opah.tv.playback.useAuthenticatedLive(httpsRequest, profile.apiBaseUrl)) {
+            // Do not prepare an RTSP capability for an HTTPS-only camera session.
+            val live = prepareMonitorHttpLive(camera.name, option.streamName)
+            if (live == null || !live.isAuthorized()) {
+                _state.update { it.copy(errorMessage = "HTTPS stream unavailable or access denied") }
+                return
+            }
+            _state.update { it.copy(playback = httpsRequest, activeCameraName = camera.name, errorMessage = null) }
+            return
+        }
         if (!BuildConfig.DOCUMENTATION_MODE) {
             val current = _state.value
             val snapshot = current.snapshot
