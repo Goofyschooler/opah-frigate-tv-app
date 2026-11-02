@@ -19,12 +19,24 @@ class MseLiveConnectionTest {
         override fun close(code: Int, reason: String?) = true
         override fun cancel() { cancelled = true }
     }
-    private class Fixture {
+    private class Fixture(hevcSupported: Boolean = false) {
         val socket = Socket()
         lateinit var listener: WebSocketListener
-        val connection = MseLiveConnection { _, callback -> listener = callback; socket }
+        val connection = MseLiveConnection(hevcSupported) { _, callback -> listener = callback; socket }
         fun open() = connection.open(socket.request().url.toString())
         fun negotiate() = listener.onMessage(socket, """{"type":"mse","value":"video/mp4; codecs=\"avc1.640029\""}""")
+    }
+    @Test fun hevcFragmentsAreAcceptedOnlyOnCapableSession() {
+        val reply = """{"type":"mse","value":"video/mp4; codecs=\"hvc1.1.6.L153.B0\""}"""
+        val capable = Fixture(true); capable.open()
+        capable.listener.onMessage(capable.socket, reply)
+        capable.listener.onMessage(capable.socket, byteArrayOf(7).toByteString())
+        assertEquals(1, capable.connection.read(ByteArray(1), 0, 1))
+        capable.connection.cancel()
+        val unsupported = Fixture(); unsupported.open()
+        unsupported.listener.onMessage(unsupported.socket, reply)
+        assertTrue(unsupported.socket.cancelled)
+        assertThrows(IOException::class.java) { unsupported.connection.read(ByteArray(1), 0, 1) }
     }
     @Test fun readsOrderedFragmentsOnlyAfterNegotiation() {
         val f = Fixture(); f.open(); f.negotiate()
