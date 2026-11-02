@@ -44,9 +44,9 @@ jobs:
           rollback="$RUNNER_TEMP/opah-rollback"
           mkdir "$rollback"
           git archive 4321a3d2dbb566845e6fb23d78a9b342c86d2255 | tar -x -C "$rollback"
-          (cd "$rollback" && bash gradlew --no-daemon -Popah.requireReleaseSigning=true -Popah.versionCode=6004 assembleDarknodeTest)
+          (cd "$rollback" && bash gradlew --no-daemon -Popah.requireReleaseSigning=true -Popah.versionCode=6006 assembleDarknodeTest)
           mkdir -p app/build/outputs/rollback
-          cp "$rollback/app/build/outputs/apk/darknodeTest/app-darknodeTest.apk" app/build/outputs/rollback/opah-test-rollback-6004.apk
+          cp "$rollback/app/build/outputs/apk/darknodeTest/app-darknodeTest.apk" app/build/outputs/rollback/opah-test-rollback-6006.apk
       - name: Verify test identity and signature
         run: |
           set -euo pipefail
@@ -56,9 +56,9 @@ jobs:
           grep -q "application-label:'Opah Test'" "$RUNNER_TEMP/opah-test-badging.txt"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk"
           sha256sum "$apk"
-          rollback=app/build/outputs/rollback/opah-test-rollback-6004.apk
+          rollback=app/build/outputs/rollback/opah-test-rollback-6006.apk
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$rollback" > "$RUNNER_TEMP/rollback-badging.txt"
-          grep -q "package: name='app.opah.tv.darknode.test'.*versionCode='6004'" "$RUNNER_TEMP/rollback-badging.txt"
+          grep -q "package: name='app.opah.tv.darknode.test'.*versionCode='6006'" "$RUNNER_TEMP/rollback-badging.txt"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk" | grep 'Signer #1 certificate SHA-256 digest:' > "$RUNNER_TEMP/candidate-cert"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$rollback" | grep 'Signer #1 certificate SHA-256 digest:' > "$RUNNER_TEMP/rollback-cert"
           cmp "$RUNNER_TEMP/candidate-cert" "$RUNNER_TEMP/rollback-cert"

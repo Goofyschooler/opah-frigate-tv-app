@@ -3866,6 +3866,8 @@ internal class NativeOpahController(
         val surface = NativePlaybackSurface(
             activity = activity,
             request = displayRequest,
+            authenticatedLive = app.opah.tv.playback.useAuthenticatedLive(request, state.activeProfile?.apiBaseUrl),
+            prepareHttpLive = viewModel::prepareMonitorHttpLive,
             preferRtpTcp = state.settings.preferRtpTcp,
             startMuted = state.settings.startLiveMuted,
             diagnosticsEnabled = state.settings.diagnosticsEnabled,

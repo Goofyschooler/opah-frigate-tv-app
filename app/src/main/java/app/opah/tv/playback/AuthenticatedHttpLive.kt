@@ -30,3 +30,10 @@ internal fun httpLiveUri(baseUrl: String, streamName: String): String? {
         .addQueryParameter("src", streamName)
         .build().toString()
 }
+
+/** Normal camera viewing on an HTTPS profile must not silently fall back to RTSP.
+ * Explicit compatibility diagnostics and recorded video retain their existing paths.
+ */
+internal fun useAuthenticatedLive(request: PlaybackRequest, baseUrl: String?): Boolean =
+    request.kind == PlaybackKind.LIVE && !request.compatibilityTest &&
+        baseUrl?.toHttpUrlOrNull()?.scheme == "https"

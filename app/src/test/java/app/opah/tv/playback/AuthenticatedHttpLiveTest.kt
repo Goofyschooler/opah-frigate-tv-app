@@ -2,6 +2,7 @@ package app.opah.tv.playback
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Test
@@ -9,6 +10,18 @@ import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
 class AuthenticatedHttpLiveTest {
+    @Test
+    fun normalCameraUsesHttpsEvenWhenCompatibilityRequestExists() {
+        val live = PlaybackRequest("Camera", "", PlaybackKind.LIVE, cameraName = "cam1",
+            liveCompatibilityRequestId = "opaque")
+        assertTrue(useAuthenticatedLive(live, "https://example.test"))
+        assertTrue(useAuthenticatedLive(live.copy(liveCompatibilityRequestId = null), "https://example.test"))
+        assertFalse(useAuthenticatedLive(live.copy(compatibilityTest = true), "https://example.test"))
+        assertFalse(useAuthenticatedLive(live.copy(kind = PlaybackKind.RECORDED), "https://example.test"))
+        assertFalse(useAuthenticatedLive(live, "http://example.test"))
+        assertFalse(useAuthenticatedLive(live, null))
+    }
+
     @Test
     fun streamingClientRetainsAuthenticationAndTlsWithoutRedirectsOrWholeCallDeadline() {
         val original = OkHttpClient.Builder().callTimeout(30, TimeUnit.SECONDS).build()
