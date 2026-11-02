@@ -825,7 +825,7 @@ internal class NativePlaybackSurface(
     private fun stopHttpsPlayback() {
         val backend = httpsBackend ?: return
         httpsBackend = null
-        if (!backend.close()) status.text = "Playback cleanup incomplete; restart Opah"
+        if (!backend.close()) status.setText(R.string.native_https_cleanup_failed)
     }
 
     private fun startHttpsPlayback() {
@@ -834,10 +834,10 @@ internal class NativePlaybackSurface(
             activity.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 val live = request.cameraName?.let { prepareHttpLive(it, request.liveStreamName) }
                 if (closed || live == null || !live.isAuthorized()) {
-                    status.text = "HTTPS stream unavailable or access denied"
+                    status.setText(R.string.native_https_unavailable)
                     return@repeatOnLifecycle
                 }
-                status.text = "Connecting HTTPS video"
+                status.setText(R.string.native_https_connecting)
                 val target = PlayerViewMedia3VideoOutputTarget(playerView, ::attachPlayer) {
                     if (player === it) detachPlayer()
                 }
@@ -847,14 +847,14 @@ internal class NativePlaybackSurface(
                     { !closed && live.isAuthorized() },
                 )
                 if (lease == null) {
-                    status.text = "Player busy or access changed; Back to retry"
+                    status.setText(R.string.native_https_busy)
                     return@repeatOnLifecycle
                 }
                 val backend = try {
                     HttpsLivePlayer(activity, application.container.httpClient, lease)
                 } catch (_: Exception) {
                     lease.finish { false }
-                    status.text = "Player setup failed; restart Opah"
+                    status.setText(R.string.native_https_setup_failed)
                     return@repeatOnLifecycle
                 }
                 httpsBackend = backend
@@ -883,16 +883,16 @@ internal class NativePlaybackSurface(
                             }
                         },
                     )
-                    failure?.let { status.text = "$it; Back to retry" }
+                    failure?.let { status.text = activity.getString(R.string.native_https_retry_detail, it) }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
                     failure = "HTTPS playback failed"
-                    status.text = "HTTPS playback failed; Back to retry"
+                    status.setText(R.string.native_https_failed)
                 } finally {
                     if (httpsBackend === backend) {
                         backend.player.removeListener(listener)
-                        failure?.let { status.text = "$it; Back to retry" }
+                        failure?.let { status.text = activity.getString(R.string.native_https_retry_detail, it) }
                         stopHttpsPlayback()
                     }
                 }
