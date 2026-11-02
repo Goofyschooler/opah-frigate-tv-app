@@ -5717,6 +5717,7 @@ class Phase0ViewModel(application: Application) : AndroidViewModel(application) 
         val httpsRequest = PlaybackRequest(
             title = camera.displayName, uri = "", kind = PlaybackKind.LIVE,
             cameraName = camera.name, liveStreamName = option.streamName,
+            httpsLiveRequestId = java.util.UUID.randomUUID().toString(),
             compatibilityTest = compatibilityTest,
         )
         if (!BuildConfig.DOCUMENTATION_MODE &&

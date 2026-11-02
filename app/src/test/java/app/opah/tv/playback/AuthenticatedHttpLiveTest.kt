@@ -11,6 +11,16 @@ import java.util.concurrent.TimeUnit
 
 class AuthenticatedHttpLiveTest {
     @Test
+    fun separateHttpsRequestsCannotReuseAnOldCameraSurface() {
+        val first = PlaybackRequest("Camera", "", PlaybackKind.LIVE, cameraName = "cam1",
+            httpsLiveRequestId = "request-one")
+        val second = first.copy(cameraName = "cam2", httpsLiveRequestId = "request-two")
+        assertFalse(playbackSurfaceKey(first) == playbackSurfaceKey(second))
+        assertEquals(playbackSurfaceKey(first), playbackSurfaceKey(first.copy(detail = "Changed status")))
+        assertFalse(playbackSurfaceKey(first) == playbackSurfaceKey(first.copy(httpsLiveRequestId = "retry")))
+    }
+
+    @Test
     fun selectedStreamMustStillExistAndIsNeverSilentlyReplaced() {
         assertEquals("cam_sub", selectHttpLiveStream("cam", listOf("cam", "cam_sub"), "cam_sub"))
         assertNull(selectHttpLiveStream("cam", listOf("cam"), "cam_sub"))

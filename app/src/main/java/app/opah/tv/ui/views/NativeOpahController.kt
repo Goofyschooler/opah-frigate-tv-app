@@ -3814,8 +3814,7 @@ internal class NativeOpahController(
 
     private fun showPlayback(state: Phase0UiState) {
         val request = requireNotNull(state.playback)
-        val surfaceKey = "playback:${request.liveCompatibilityRequestId ?: request.uri}:" +
-            "${request.activityItemId}:${request.compatibilityTestVideoOnly}"
+        val surfaceKey = app.opah.tv.playback.playbackSurfaceKey(request)
         val controls = playbackControls(state, request)
         val actionMessage = state.review.actionErrorFor(request.activityItemId)?.message
             ?: state.review.playbackNavigationMessage
